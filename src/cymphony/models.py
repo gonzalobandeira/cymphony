@@ -1,0 +1,279 @@
+"""Domain models for Cymphony (spec §4)."""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Issue tracker model
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BlockerRef:
+    """Blocker reference within an issue (spec §4.1.1)."""
+    id: str | None
+    identifier: str | None
+    state: str | None
+
+
+@dataclass
+class Comment:
+    """A comment on an issue."""
+    author: str
+    body: str
+    created_at: datetime | None
+
+
+@dataclass
+class Issue:
+    """Normalized issue record (spec §4.1.1)."""
+    id: str
+    identifier: str
+    title: str
+    description: str | None
+    priority: int | None
+    state: str
+    branch_name: str | None
+    url: str | None
+    labels: list[str]
+    blocked_by: list[BlockerRef]
+    comments: list[Comment]
+    created_at: datetime | None
+    updated_at: datetime | None
+
+
+# ---------------------------------------------------------------------------
+# Workflow / config models
+# ---------------------------------------------------------------------------
+
+@dataclass
+class WorkflowDefinition:
+    """Parsed WORKFLOW.md (spec §4.1.2)."""
+    config: dict[str, Any]
+    prompt_template: str
+
+
+@dataclass
+class TrackerConfig:
+    kind: str
+    endpoint: str
+    api_key: str
+    project_slug: str
+    active_states: list[str]
+    terminal_states: list[str]
+    assignee: str | None
+
+
+@dataclass
+class PollingConfig:
+    interval_ms: int
+
+
+@dataclass
+class WorkspaceConfig:
+    root: str
+
+
+@dataclass
+class HooksConfig:
+    after_create: str | None
+    before_run: str | None
+    after_run: str | None
+    before_remove: str | None
+    timeout_ms: int
+
+
+@dataclass
+class AgentConfig:
+    max_concurrent_agents: int
+    max_turns: int
+    max_retry_backoff_ms: int
+    max_concurrent_agents_by_state: dict[str, int]
+
+
+@dataclass
+class CodingAgentConfig:
+    """Config for the coding agent (Claude Code CLI, called 'codex' in spec)."""
+    command: str
+    turn_timeout_ms: int
+    read_timeout_ms: int
+    stall_timeout_ms: int
+    # High-trust Claude Code specific
+    dangerously_skip_permissions: bool
+
+
+@dataclass
+class ServerConfig:
+    port: int | None
+
+
+@dataclass
+class ServiceConfig:
+    """Fully typed runtime configuration (spec §4.1.3)."""
+    tracker: TrackerConfig
+    polling: PollingConfig
+    workspace: WorkspaceConfig
+    hooks: HooksConfig
+    agent: AgentConfig
+    coding_agent: CodingAgentConfig
+    server: ServerConfig
+
+
+# ---------------------------------------------------------------------------
+# Workspace model
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Workspace:
+    """Filesystem workspace for one issue (spec §4.1.4)."""
+    path: str
+    workspace_key: str
+    created_now: bool
+
+
+# ---------------------------------------------------------------------------
+# Agent / session models
+# ---------------------------------------------------------------------------
+
+class AgentEventType(str, Enum):
+    SESSION_STARTED = "session_started"
+    STARTUP_FAILED = "startup_failed"
+    TURN_COMPLETED = "turn_completed"
+    TURN_FAILED = "turn_failed"
+    TURN_CANCELLED = "turn_cancelled"
+    TURN_INPUT_REQUIRED = "turn_input_required"
+    NOTIFICATION = "notification"
+    OTHER_MESSAGE = "other_message"
+    MALFORMED = "malformed"
+
+
+@dataclass
+class AgentEvent:
+    """Structured event emitted by the agent runner to the orchestrator."""
+    event: AgentEventType
+    timestamp: datetime
+    session_id: str | None = None
+    pid: int | None = None
+    usage: dict[str, int] | None = None
+    message: str | None = None
+    raw: dict[str, Any] | None = None
+
+
+@dataclass
+class LiveSession:
+    """State tracked while a Claude Code subprocess is running (spec §4.1.6)."""
+    session_id: str | None
+    pid: int | None
+    last_event: AgentEventType | None
+    last_event_timestamp: datetime | None
+    last_message: str | None
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    last_reported_input_tokens: int
+    last_reported_output_tokens: int
+    last_reported_total_tokens: int
+    turn_count: int
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator state
+# ---------------------------------------------------------------------------
+
+class RunStatus(str, Enum):
+    PREPARING_WORKSPACE = "PreparingWorkspace"
+    BUILDING_PROMPT = "BuildingPrompt"
+    LAUNCHING_AGENT = "LaunchingAgentProcess"
+    INITIALIZING_SESSION = "InitializingSession"
+    STREAMING_TURN = "StreamingTurn"
+    FINISHING = "Finishing"
+    SUCCEEDED = "Succeeded"
+    FAILED = "Failed"
+    TIMED_OUT = "TimedOut"
+    STALLED = "Stalled"
+    CANCELED = "CanceledByReconciliation"
+
+
+@dataclass
+class RunningEntry:
+    """One active worker in the orchestrator (spec §4.1.6 + §4.1.8)."""
+    issue_id: str
+    identifier: str
+    issue: Issue
+    task: asyncio.Task | None  # type: ignore[type-arg]
+    session: LiveSession
+    retry_attempt: int | None  # None = first run
+    started_at: datetime
+
+
+@dataclass
+class RetryEntry:
+    """Scheduled retry state (spec §4.1.7)."""
+    issue_id: str
+    identifier: str
+    attempt: int
+    due_at_ms: float  # monotonic clock
+    error: str | None
+
+
+@dataclass
+class CodexTotals:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    seconds_running: float = 0.0
+
+
+@dataclass
+class OrchestratorState:
+    """Single authoritative in-memory state (spec §4.1.8)."""
+    poll_interval_ms: int
+    max_concurrent_agents: int
+    running: dict[str, RunningEntry] = field(default_factory=dict)
+    claimed: set[str] = field(default_factory=set)
+    retry_attempts: dict[str, RetryEntry] = field(default_factory=dict)
+    completed: set[str] = field(default_factory=set)
+    codex_totals: CodexTotals = field(default_factory=CodexTotals)
+    codex_rate_limits: dict[str, Any] | None = None
+
+
+# ---------------------------------------------------------------------------
+# Error types
+# ---------------------------------------------------------------------------
+
+class CymphonyError(Exception):
+    """Base error."""
+    code: str = "cymphony_error"
+
+
+class WorkflowError(CymphonyError):
+    """Workflow / config loading errors (spec §5.5)."""
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class TrackerError(CymphonyError):
+    """Issue tracker errors (spec §11.4)."""
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class WorkspaceError(CymphonyError):
+    """Workspace lifecycle errors."""
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class AgentError(CymphonyError):
+    """Agent runner errors (spec §10.6)."""
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
