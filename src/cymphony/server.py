@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from aiohttp import web
@@ -52,8 +53,13 @@ async def _handle_state(request: web.Request) -> web.Response:
 async def _handle_refresh(request: web.Request) -> web.Response:
     """POST /api/v1/refresh — trigger immediate poll."""
     orch: Orchestrator = request.app["orchestrator"]
-    orch.request_immediate_poll()
-    return _json_response({"ok": True, "message": "poll scheduled"}, status=202)
+    coalesced = orch.request_immediate_poll()
+    return _json_response({
+        "queued": True,
+        "coalesced": coalesced,
+        "requested_at": datetime.now(timezone.utc).isoformat(),
+        "operations": ["reconcile", "dispatch"],
+    }, status=202)
 
 
 async def _handle_issue(request: web.Request) -> web.Response:
@@ -67,17 +73,34 @@ async def _handle_issue(request: web.Request) -> web.Response:
 
     for entry in snap.get("running", []):
         if entry.get("issue_identifier") == identifier:
-            issue_data = {"status": "running", **entry}
+            issue_data = {
+                "tracked": True,
+                "status": "running",
+                **entry,
+            }
             break
 
     if issue_data is None:
         for entry in snap.get("retrying", []):
             if entry.get("issue_identifier") == identifier:
-                issue_data = {"status": "retry_scheduled", **entry}
+                issue_data = {
+                    "tracked": True,
+                    "status": "retry_scheduled",
+                    "last_error": entry.get("error"),
+                    **entry,
+                }
                 break
 
     if issue_data is None:
-        return _json_response({"error": "not_found", "identifier": identifier}, status=404)
+        return _json_response(
+            {
+                "error": {
+                    "code": "issue_not_found",
+                    "message": f"Issue {identifier} is not tracked",
+                }
+            },
+            status=404,
+        )
 
     return _json_response(issue_data)
 

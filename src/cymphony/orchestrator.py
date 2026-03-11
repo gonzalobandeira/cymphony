@@ -65,6 +65,7 @@ class Orchestrator:
         self._server: Any = None
         self._shutdown_event = asyncio.Event()
         self._state_id_cache: dict[str, str] = {}  # state_name → Linear state ID
+        self._immediate_poll_pending: bool = False
 
     # ------------------------------------------------------------------
     # Startup
@@ -145,6 +146,7 @@ class Orchestrator:
 
     async def _tick(self) -> None:
         """One poll-and-dispatch tick (spec §8.1, §16.2)."""
+        self._immediate_poll_pending = False
         try:
             # 1. Reconcile active runs
             await self._reconcile_running_issues()
@@ -192,11 +194,19 @@ class Orchestrator:
             lambda: asyncio.create_task(self._tick()),
         )
 
-    def request_immediate_poll(self) -> None:
-        """Trigger an immediate poll tick (e.g. from HTTP POST /api/v1/refresh)."""
+    def request_immediate_poll(self) -> bool:
+        """Trigger an immediate poll tick (e.g. from HTTP POST /api/v1/refresh).
+
+        Returns True if the request was coalesced (a poll was already pending),
+        False if a new tick was scheduled.
+        """
+        if self._immediate_poll_pending:
+            return True  # coalesced — already queued
+        self._immediate_poll_pending = True
         asyncio.get_event_loop().call_soon(
             lambda: asyncio.create_task(self._tick())
         )
+        return False
 
     # ------------------------------------------------------------------
     # Reconciliation (spec §8.5)
@@ -808,6 +818,7 @@ class Orchestrator:
             for e in self._state.running.values()
         )
         totals = self._state.codex_totals
+        wm = WorkspaceManager(self._config)
 
         running_rows = []
         for issue_id, entry in self._state.running.items():
@@ -824,6 +835,8 @@ class Orchestrator:
                 "started_at": entry.started_at.isoformat(),
                 "last_event_at": s.last_event_timestamp.isoformat()
                     if s.last_event_timestamp else None,
+                "retry_attempt": entry.retry_attempt,
+                "workspace_path": str(wm.get_path(entry.identifier)),
                 "tokens": {
                     "input_tokens": s.input_tokens,
                     "output_tokens": s.output_tokens,
