@@ -322,7 +322,7 @@ query IssueTeam($issueId: String!) {
 
         # Step 2: get all workflow states for this team via root-level query
         states_query = """
-query TeamWorkflowStates($teamId: String!) {
+query TeamWorkflowStates($teamId: ID!) {
   workflowStates(filter: { team: { id: { eq: $teamId } } }) {
     nodes { id name }
   }
