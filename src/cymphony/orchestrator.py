@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -834,12 +834,12 @@ class Orchestrator:
         retrying_rows = []
         for issue_id, retry in self._state.retry_attempts.items():
             remaining_ms = max(retry.due_at_ms - _monotonic_ms(), 0)
-            due_in_s = remaining_ms / 1000.0
+            due_at = now + timedelta(milliseconds=remaining_ms)
             retrying_rows.append({
                 "issue_id": issue_id,
                 "issue_identifier": retry.identifier,
                 "attempt": retry.attempt,
-                "due_in_seconds": round(due_in_s, 1),
+                "due_at": due_at.isoformat(),
                 "error": retry.error,
             })
 
