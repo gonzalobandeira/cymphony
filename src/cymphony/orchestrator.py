@@ -495,11 +495,16 @@ class Orchestrator:
 
         try:
             while True:
-                # Render prompt
-                try:
-                    prompt = render_prompt(self._workflow, issue, attempt)
-                except WorkflowError as exc:
-                    raise AgentError("prompt_error", str(exc)) from exc
+                # Render full prompt only on the first turn of this attempt;
+                # continuation turns (session already open) send brief guidance
+                # so the original task description is not re-injected (spec §7.1).
+                if session_id is None:
+                    try:
+                        prompt = render_prompt(self._workflow, issue, attempt)
+                    except WorkflowError as exc:
+                        raise AgentError("prompt_error", str(exc)) from exc
+                else:
+                    prompt = "Continue working on the task."
 
                 entry.session.turn_count += 1
                 issue_log(
