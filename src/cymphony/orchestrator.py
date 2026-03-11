@@ -336,9 +336,7 @@ class Orchestrator:
                 client = LinearClient(self._config.tracker)
                 state_id = self._state_id_cache.get(state_name)
                 if not state_id:
-                    state_id = await client.fetch_workflow_state_id(
-                        self._config.tracker.project_slug, state_name
-                    )
+                    state_id = await client.fetch_workflow_state_id(issue_id, state_name)
                     if not state_id:
                         logger.warning(
                             f"action=state_transition_skipped issue_id={issue_id} "
@@ -351,7 +349,7 @@ class Orchestrator:
                     f"action=issue_state_set issue_id={issue_id} state={state_name!r}"
                 )
             except Exception as exc:
-                logger.debug(
+                logger.warning(
                     f"action=state_transition_failed issue_id={issue_id} "
                     f"state={state_name!r} error={exc}"
                 )

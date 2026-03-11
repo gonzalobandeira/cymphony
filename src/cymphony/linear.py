@@ -298,14 +298,32 @@ class LinearClient:
         issues = [_normalize_issue_minimal(n) for n in nodes if n]
         return [i for i in issues if i is not None]
 
-    async def fetch_workflow_state_id(self, project_slug: str, state_name: str) -> str | None:
-        """Return the workflow state ID matching state_name in the given project."""
-        query = """
-query StateByProject($projectSlug: String!, $stateName: String!) {
-  workflowStates(filter: {
-    team: { projects: { slugId: { eq: $projectSlug } } },
-    name: { eqIgnoreCase: $stateName }
-  }) {
+    async def fetch_workflow_state_id(self, issue_id: str, state_name: str) -> str | None:
+        """Return the workflow state ID for state_name on the team that owns the issue."""
+        # Step 1: get team ID from the issue
+        team_query = """
+query IssueTeam($issueId: ID!) {
+  issue(id: $issueId) {
+    team { id }
+  }
+}
+"""
+        async with aiohttp.ClientSession(
+            headers=self._headers(), timeout=_NETWORK_TIMEOUT
+        ) as session:
+            data = await self._request(session, team_query, {"issueId": issue_id})
+
+        team_id = ((data.get("issue") or {}).get("team") or {}).get("id")
+        if not team_id:
+            logger.warning(
+                f"action=fetch_workflow_state_id_no_team issue_id={issue_id}"
+            )
+            return None
+
+        # Step 2: get all workflow states for this team via root-level query
+        states_query = """
+query TeamWorkflowStates($teamId: String!) {
+  workflowStates(filter: { team: { id: { eq: $teamId } } }) {
     nodes { id name }
   }
 }
@@ -313,11 +331,17 @@ query StateByProject($projectSlug: String!, $stateName: String!) {
         async with aiohttp.ClientSession(
             headers=self._headers(), timeout=_NETWORK_TIMEOUT
         ) as session:
-            data = await self._request(
-                session, query, {"projectSlug": project_slug, "stateName": state_name}
-            )
+            data = await self._request(session, states_query, {"teamId": team_id})
+
         nodes = (data.get("workflowStates") or {}).get("nodes") or []
-        return nodes[0]["id"] if nodes else None
+        logger.info(
+            f"action=workflow_states_fetched issue_id={issue_id} "
+            f"team_id={team_id} count={len(nodes)} "
+            f"names={[n.get('name') for n in nodes]}"
+        )
+        target = state_name.lower()
+        match = next((n for n in nodes if n.get("name", "").lower() == target), None)
+        return match["id"] if match else None
 
     async def set_issue_state(self, issue_id: str, state_id: str) -> None:
         """Update the workflow state of an issue."""
@@ -331,7 +355,12 @@ mutation IssueUpdate($id: String!, $stateId: String!) {
         async with aiohttp.ClientSession(
             headers=self._headers(), timeout=_NETWORK_TIMEOUT
         ) as session:
-            await self._request(session, mutation, {"id": issue_id, "stateId": state_id})
+            result = await self._request(session, mutation, {"id": issue_id, "stateId": state_id})
+        success = (result.get("issueUpdate") or {}).get("success")
+        logger.info(
+            f"action=set_issue_state_result issue_id={issue_id} "
+            f"state_id={state_id} success={success}"
+        )
 
     async def create_comment(self, issue_id: str, body: str) -> None:
         """Post a comment on a Linear issue (fire-and-forget friendly)."""

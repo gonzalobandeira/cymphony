@@ -175,7 +175,7 @@ async def start_server(orchestrator: "Orchestrator", port: int) -> web.AppRunner
     app = build_app(orchestrator)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
-    logger.info(f"action=http_server_started port={port}")
+    logger.info(f"action=http_server_started host=127.0.0.1 port={port}")
     return runner
