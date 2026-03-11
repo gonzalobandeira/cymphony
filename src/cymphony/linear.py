@@ -302,7 +302,7 @@ class LinearClient:
         """Return the workflow state ID for state_name on the team that owns the issue."""
         # Step 1: get team ID from the issue
         team_query = """
-query IssueTeam($issueId: ID!) {
+query IssueTeam($issueId: String!) {
   issue(id: $issueId) {
     team { id }
   }
