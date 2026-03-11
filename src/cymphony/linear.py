@@ -362,20 +362,6 @@ mutation IssueUpdate($id: String!, $stateId: String!) {
             f"state_id={state_id} success={success}"
         )
 
-    async def create_comment(self, issue_id: str, body: str) -> None:
-        """Post a comment on a Linear issue (fire-and-forget friendly)."""
-        mutation = """
-mutation CommentCreate($issueId: String!, $body: String!) {
-  commentCreate(input: { issueId: $issueId, body: $body }) {
-    success
-  }
-}
-"""
-        async with aiohttp.ClientSession(
-            headers=self._headers(), timeout=_NETWORK_TIMEOUT
-        ) as session:
-            await self._request(session, mutation, {"issueId": issue_id, "body": body})
-
     async def fetch_issue_states_by_ids(self, issue_ids: list[str]) -> list[Issue]:
         """Fetch current state for given issue IDs (for reconciliation, spec §11.1.3)."""
         if not issue_ids:

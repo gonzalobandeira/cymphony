@@ -326,21 +326,6 @@ class Orchestrator:
                     f"identifier={entry.identifier} error={exc}"
                 )
 
-    # ------------------------------------------------------------------
-    # Linear comment helpers
-    # ------------------------------------------------------------------
-
-    def _post_comment(self, issue_id: str, body: str) -> None:
-        """Fire-and-forget a Linear comment; never raises."""
-        async def _do() -> None:
-            try:
-                client = LinearClient(self._config.tracker)
-                await client.create_comment(issue_id, body)
-            except Exception as exc:
-                logger.debug(f"action=comment_post_failed issue_id={issue_id} error={exc}")
-
-        asyncio.create_task(_do())
-
     def _transition_issue_state(self, issue_id: str, state_name: str) -> None:
         """Fire-and-forget: move an issue to the named workflow state; never raises."""
         async def _do() -> None:
@@ -468,7 +453,6 @@ class Orchestrator:
             issue.id, issue.identifier,
             attempt=attempt,
         )
-        self._post_comment(issue.id, "🤖 Cymphony agent started working on this issue.")
         self._transition_issue_state(issue.id, "In Progress")
 
     # ------------------------------------------------------------------
@@ -673,9 +657,6 @@ class Orchestrator:
                 "worker_exited_normal",
                 issue_id, identifier,
             )
-            tokens = entry.session.total_tokens
-            token_note = f" ({tokens:,} tokens)" if tokens else ""
-            self._post_comment(issue_id, f"✅ Cymphony agent finished{token_note}.")
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=1,
@@ -694,7 +675,6 @@ class Orchestrator:
                 attempt=next_attempt,
                 error=error_str,
             )
-            self._post_comment(issue_id, f"⚠️ Cymphony agent error: {error_str}")
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=next_attempt,
