@@ -89,19 +89,11 @@ You are a senior software engineer working on the **WindguruSpots** project.
 ## Instructions
 
 1. Carefully read the issue title, description, and any comments above. Comments may contain feedback from previous attempts or reviewer instructions — treat them as high-priority guidance.
-2. Move this issue to **In Progress** state using the Linear API:
-   - Use the `$LINEAR_API_KEY` environment variable for authentication.
-   - Query the available workflow states for this team to find the "In Progress" state ID.
-   - Update the issue `{{ issue.identifier }}` to that state via the GraphQL API.
-3. Create and checkout a branch named `agent/{{ issue.identifier | lower }}` before making any changes.
-4. Explore the repository structure in your working directory to understand the codebase.
-5. Implement the changes described in the issue.
-6. Write or update tests as appropriate.
-7. Ensure all existing tests continue to pass.
-8. Commit your changes with a descriptive commit message referencing the issue identifier.
-9. Move this issue to **In Review** state using the Linear API:
-   - Use the `$LINEAR_API_KEY` environment variable for authentication.
-   - Query the available workflow states for this team to find the "In Review" state ID.
-   - Update the issue `{{ issue.identifier }}` to that state via the GraphQL API.
+2. Create and checkout a branch named `agent/{{ issue.identifier | lower }}` before making any changes.
+3. Explore the repository structure in your working directory to understand the codebase.
+4. Implement the changes described in the issue.
+5. Write or update tests as appropriate.
+6. Ensure all existing tests continue to pass.
+7. Commit your changes with a descriptive commit message referencing the issue identifier.
 
 Focus on correctness, simplicity, and consistency with the existing codebase style.

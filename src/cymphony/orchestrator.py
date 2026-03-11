@@ -649,7 +649,8 @@ class Orchestrator:
             return
 
         if exc is None:
-            # Normal exit → continuation retry (spec §8.4)
+            # Normal exit → move to "In Review" if still in an active state,
+            # then schedule continuation retry (spec §8.4)
             entry.status = RunStatus.SUCCEEDED
             self._state.completed.add(issue_id)
             issue_log(
@@ -657,6 +658,9 @@ class Orchestrator:
                 "worker_exited_normal",
                 issue_id, identifier,
             )
+            active_lower = [s.lower() for s in self._config.tracker.active_states]
+            if entry.issue.state.lower() in active_lower:
+                self._transition_issue_state(issue_id, "In Review")
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=1,
