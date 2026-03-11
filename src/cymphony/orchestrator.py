@@ -23,6 +23,7 @@ from .models import (
     OrchestratorState,
     RetryEntry,
     RunningEntry,
+    RunStatus,
     WorkflowDefinition,
     WorkflowError,
 )
@@ -225,6 +226,7 @@ class Orchestrator:
             for issue_id in stalled:
                 entry = self._state.running.get(issue_id)
                 if entry:
+                    entry.status = RunStatus.STALLED
                     issue_log(
                         logger, logging.WARNING,
                         "agent_stall_detected",
@@ -474,15 +476,18 @@ class Orchestrator:
         agent = AgentRunner(self._config.coding_agent)
 
         # Prepare workspace
+        entry.status = RunStatus.PREPARING_WORKSPACE
         try:
             workspace = await wm.create_for_issue(issue.identifier)
         except Exception as exc:
+            entry.status = RunStatus.FAILED
             raise AgentError("workspace_error", f"Workspace creation failed: {exc}") from exc
 
         # before_run hook
         try:
             await wm.run_before_run_hook(workspace)
         except Exception as exc:
+            entry.status = RunStatus.FAILED
             await wm.run_after_run_hook(workspace)
             raise AgentError("before_run_hook_error", str(exc)) from exc
 
@@ -498,10 +503,12 @@ class Orchestrator:
                 # Render full prompt only on the first turn of this attempt;
                 # continuation turns (session already open) send brief guidance
                 # so the original task description is not re-injected (spec §7.1).
+                entry.status = RunStatus.BUILDING_PROMPT
                 if session_id is None:
                     try:
                         prompt = render_prompt(self._workflow, issue, attempt)
                     except WorkflowError as exc:
+                        entry.status = RunStatus.FAILED
                         raise AgentError("prompt_error", str(exc)) from exc
                 else:
                     prompt = "Continue working on the task."
@@ -516,6 +523,7 @@ class Orchestrator:
                     session_id=session_id,
                 )
 
+                entry.status = RunStatus.LAUNCHING_AGENT
                 title = f"{issue.identifier}: {issue.title}"
                 session_id = await agent.run_turn(
                     workspace_path=workspace.path,
@@ -526,6 +534,7 @@ class Orchestrator:
                     title=title,
                     on_event=on_event,
                 )
+                entry.status = RunStatus.FINISHING
 
                 # Check current issue state after turn
                 try:
@@ -582,6 +591,12 @@ class Orchestrator:
         session.last_event = event.event
         session.last_event_timestamp = event.timestamp
 
+        # Advance status on first event from the agent process
+        if event.event == AgentEventType.SESSION_STARTED:
+            entry.status = RunStatus.INITIALIZING_SESSION
+        elif event.event == AgentEventType.NOTIFICATION:
+            entry.status = RunStatus.STREAMING_TURN
+
         if event.session_id:
             session.session_id = event.session_id
         if event.pid:
@@ -631,6 +646,7 @@ class Orchestrator:
 
         if task.cancelled() or (exc and isinstance(exc, asyncio.CancelledError)):
             # Cancelled by reconciliation — do not retry
+            entry.status = RunStatus.CANCELED
             issue_log(
                 logger, logging.INFO,
                 "worker_cancelled",
@@ -640,6 +656,7 @@ class Orchestrator:
 
         if exc is None:
             # Normal exit → continuation retry (spec §8.4)
+            entry.status = RunStatus.SUCCEEDED
             self._state.completed.add(issue_id)
             issue_log(
                 logger, logging.INFO,
@@ -657,6 +674,7 @@ class Orchestrator:
             )
         else:
             # Abnormal exit → exponential backoff retry
+            entry.status = RunStatus.FAILED
             next_attempt = _next_attempt(entry.retry_attempt)
             error_str = str(exc)[:200]
             issue_log(
@@ -798,6 +816,7 @@ class Orchestrator:
                 "issue_id": issue_id,
                 "issue_identifier": entry.identifier,
                 "state": entry.issue.state,
+                "run_status": entry.status.value,
                 "session_id": s.session_id,
                 "turn_count": s.turn_count,
                 "last_event": s.last_event.value if s.last_event else None,

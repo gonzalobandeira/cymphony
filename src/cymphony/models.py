@@ -209,6 +209,7 @@ class RunningEntry:
     session: LiveSession
     retry_attempt: int | None  # None = first run
     started_at: datetime
+    status: RunStatus = field(default=RunStatus.PREPARING_WORKSPACE)
 
 
 @dataclass
