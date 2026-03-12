@@ -1,6 +1,6 @@
-# Cymphony
+# Cymphony — Developer Guide
 
-Orchestration service that polls Linear issues and runs Claude Code agents on them autonomously.
+Orchestration service that polls Linear issues and runs Claude Code agents on them autonomously. See `README.md` for user-facing docs.
 
 ## Architecture
 
@@ -19,13 +19,14 @@ src/cymphony/
   logging_.py        ← structured logging helpers
 ```
 
-### Data flow
+## Data flow
 
 1. **Poll**: `Orchestrator._tick()` fetches candidate issues from Linear (active states, project, assignee filter)
 2. **Dispatch**: eligible issues get a workspace created, hooks run, and a `_worker` asyncio task is spawned
 3. **Worker**: renders prompt → runs `AgentRunner.run_turn()` in a loop (up to `max_turns`) → runs `after_run` hook
-4. **Reconcile**: each tick checks running workers for stalls and refreshes issue states from Linear; terminal-state issues get their workers cancelled and workspaces removed
-5. **Retry**: workers that exit abnormally are retried with exponential backoff; clean exits get a 1-second continuation retry to re-evaluate the issue
+4. **Plan phase**: before the main agent loop, a separate planning turn runs (`render_plan_prompt`) to produce a structured plan, which is then appended to the main prompt
+5. **Reconcile**: each tick checks running workers for stalls and refreshes issue states from Linear; terminal-state issues get their workers cancelled and workspaces removed
+6. **Retry**: workers that exit abnormally are retried with exponential backoff; clean exits get a 1-second continuation retry to re-evaluate the issue
 
 ## Running
 
@@ -36,54 +37,14 @@ cymphony --port 8081
 cymphony --workflow-path /path/to/WORKFLOW.md --port 8081 --log-level DEBUG
 ```
 
-## WORKFLOW.md format
+## Development
 
-```yaml
----
-tracker:
-  kind: linear               # only "linear" supported
-  api_key: $LINEAR_API_KEY   # env var reference
-  project_slug: <slug>       # Linear project slugId
-  assignee: <username>       # optional; omit to pick up all issues
-  active_states: [Todo, In Progress]
-  terminal_states: [Done, Cancelled, Canceled, Duplicate, Closed]
-
-polling:
-  interval_ms: 30000
-
-workspace:
-  root: ~/my-workspaces      # ~ and $VAR are expanded
-
-agent:
-  max_concurrent_agents: 10
-  max_turns: 20
-  max_retry_backoff_ms: 300000
-  max_concurrent_agents_by_state:   # optional per-state cap
-    todo: 3
-
-codex:
-  command: claude
-  turn_timeout_ms: 3600000
-  stall_timeout_ms: 300000
-  dangerously_skip_permissions: true
-
-hooks:
-  after_create: |            # runs once when workspace directory is first created
-    git clone git@github.com:org/repo.git .
-  before_run: |              # runs before each agent turn batch
-    git fetch origin && git checkout main && git reset --hard origin/main
-  after_run: |               # runs after each agent turn batch (failure is non-fatal)
-    ...
-  before_remove: |           # runs before workspace is deleted
-    ...
-  timeout_ms: 120000
-
-server:
-  port: 8080
----
-Jinja2 prompt template goes here.
-Available variables: issue (dict), attempt (int|None)
+```bash
+pip install -e ".[dev]"   # or: pip install -e .
+pytest
 ```
+
+Dependencies: `pyyaml`, `jinja2`, `aiohttp`, `watchdog`. Python ≥ 3.11. Built with Hatchling.
 
 ## Key gotchas
 
@@ -94,6 +55,7 @@ Available variables: issue (dict), attempt (int|None)
 - **Assignee filter**: two separate query strings (with/without assignee) because passing `null` to `eqIgnoreCase` breaks the filter.
 - **`after_run` hook cancellation race**: the reconciler may call `task.cancel()` while the worker is in its `finally` block. The hook is launched as `asyncio.create_task` + awaited via `asyncio.shield` so it survives worker cancellation.
 - **PR title**: use `git log --format="%s" origin/main..HEAD | tail -1` in the `after_run` hook to get the agent's original commit as the PR title (not the hook's own commit).
+- **Issue auto-transition to "In Review"**: the orchestrator transitions issues to "In Review" on successful agent completion. The Linear state ID for "In Review" must exist in the project workflow.
 
 ## HTTP API
 
@@ -105,14 +67,3 @@ When `server.port` is set:
 | `GET` | `/api/v1/state` | Full orchestrator snapshot (JSON) |
 | `POST` | `/api/v1/refresh` | Trigger immediate poll |
 | `GET` | `/api/v1/<IDENTIFIER>` | Per-issue debug details |
-
-## Development
-
-```bash
-pip install -e ".[dev]"   # or: pip install -e .
-pytest
-```
-
-Dependencies: `pyyaml`, `jinja2`, `aiohttp`, `watchdog`. Python ≥ 3.11.
-
-The package is built with Hatchling. `pyproject.toml` defines the `cymphony` script entry point.
