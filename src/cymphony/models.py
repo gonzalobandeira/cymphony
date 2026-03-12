@@ -179,6 +179,7 @@ class LiveSession:
     last_reported_output_tokens: int
     last_reported_total_tokens: int
     turn_count: int
+    plan_comment_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +188,7 @@ class LiveSession:
 
 class RunStatus(str, Enum):
     PREPARING_WORKSPACE = "PreparingWorkspace"
+    PLANNING = "Planning"
     BUILDING_PROMPT = "BuildingPrompt"
     LAUNCHING_AGENT = "LaunchingAgentProcess"
     INITIALIZING_SESSION = "InitializingSession"

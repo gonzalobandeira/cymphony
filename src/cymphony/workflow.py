@@ -121,6 +121,32 @@ def render_prompt(
         ) from exc
 
 
+_PLAN_PROMPT_TEMPLATE = """\
+You are about to work on the following Linear issue:
+
+**Title**: {{ issue.title }}
+
+{% if issue.description %}
+**Description**:
+{{ issue.description }}
+{% endif %}
+
+Your task right now is PLANNING ONLY. Do not read any files, write any code, or make any changes.
+
+Use the TodoWrite tool to create a step-by-step checklist of everything you will need to do to complete this issue. Each item should be a concrete, actionable step.
+
+Once you have written the plan with TodoWrite, you are done — stop immediately.
+"""
+
+
+def render_plan_prompt(workflow: WorkflowDefinition, issue: Any) -> str:  # noqa: ARG001
+    """Render the planning prompt that instructs the agent to produce a TodoWrite checklist only."""
+    env = Environment(undefined=StrictUndefined, autoescape=False)
+    tmpl = env.from_string(_PLAN_PROMPT_TEMPLATE)
+    issue_dict = _issue_to_dict(issue)
+    return tmpl.render(issue=issue_dict).strip()
+
+
 def _issue_to_dict(issue: Any) -> dict[str, Any]:
     """Recursively convert issue dataclass to template-friendly dict."""
     from .models import Issue, BlockerRef

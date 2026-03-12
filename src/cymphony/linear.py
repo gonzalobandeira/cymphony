@@ -362,6 +362,45 @@ mutation IssueUpdate($id: String!, $stateId: String!) {
             f"state_id={state_id} success={success}"
         )
 
+    async def create_comment(self, issue_id: str, body: str) -> str:
+        """Create a comment on an issue and return the comment ID."""
+        mutation = """
+mutation CommentCreate($issueId: String!, $body: String!) {
+  commentCreate(input: { issueId: $issueId, body: $body }) {
+    success
+    comment { id }
+  }
+}
+"""
+        async with aiohttp.ClientSession(
+            headers=self._headers(), timeout=_NETWORK_TIMEOUT
+        ) as session:
+            result = await self._request(session, mutation, {"issueId": issue_id, "body": body})
+
+        comment_id = ((result.get("commentCreate") or {}).get("comment") or {}).get("id")
+        if not comment_id:
+            raise TrackerError(
+                "linear_comment_create_failed",
+                "commentCreate returned no comment ID",
+            )
+        return comment_id
+
+    async def update_comment(self, comment_id: str, body: str) -> bool:
+        """Update an existing comment body. Returns True on success."""
+        mutation = """
+mutation CommentUpdate($id: String!, $body: String!) {
+  commentUpdate(id: $id, input: { body: $body }) {
+    success
+  }
+}
+"""
+        async with aiohttp.ClientSession(
+            headers=self._headers(), timeout=_NETWORK_TIMEOUT
+        ) as session:
+            result = await self._request(session, mutation, {"id": comment_id, "body": body})
+
+        return bool((result.get("commentUpdate") or {}).get("success"))
+
     async def fetch_issue_states_by_ids(self, issue_ids: list[str]) -> list[Issue]:
         """Fetch current state for given issue IDs (for reconciliation, spec §11.1.3)."""
         if not issue_ids:

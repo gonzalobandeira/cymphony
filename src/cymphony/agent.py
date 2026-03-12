@@ -117,6 +117,7 @@ class AgentRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                limit=_MAX_LINE_BYTES,
             )
         except OSError as exc:
             raise AgentError(
