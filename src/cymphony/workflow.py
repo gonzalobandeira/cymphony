@@ -143,6 +143,60 @@ def _issue_to_dict(issue: Any) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Frontmatter writer
+# ---------------------------------------------------------------------------
+
+def write_frontmatter(path: str | Path, updates: dict) -> None:
+    """Merge *updates* into the YAML frontmatter of WORKFLOW.md, preserving the Jinja2 body.
+
+    Creates the file if it doesn't exist. Keys whose value is None are removed.
+    """
+    p = Path(path)
+    existing_config: dict = {}
+    body = ""
+
+    if p.exists():
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+
+        if text.startswith("---"):
+            lines = text.splitlines(keepends=True)
+            end_idx = None
+            for i, line in enumerate(lines[1:], start=1):
+                if line.rstrip() == "---":
+                    end_idx = i
+                    break
+            if end_idx is not None:
+                try:
+                    parsed = yaml.safe_load("".join(lines[1:end_idx]))
+                    if isinstance(parsed, dict):
+                        existing_config = parsed
+                except yaml.YAMLError:
+                    pass
+                body = "".join(lines[end_idx + 1:]).strip()
+            else:
+                body = text.strip()
+        else:
+            body = text.strip()
+
+    merged = dict(existing_config)
+    for key, value in updates.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+
+    new_yaml = yaml.dump(merged, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    new_text = f"---\n{new_yaml}---\n"
+    if body:
+        new_text += f"\n{body}\n"
+
+    p.write_text(new_text, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
 # File watcher
 # ---------------------------------------------------------------------------
 

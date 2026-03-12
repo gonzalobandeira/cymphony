@@ -51,22 +51,53 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 async def _run(workflow_path: Path, server_port: int | None) -> None:
     from .logging_ import log
     from .orchestrator import Orchestrator
+    from .server import start_server
 
-    # Load initial workflow
+    # Load initial workflow (may not exist on first run)
     try:
         workflow = load_workflow(workflow_path)
     except Exception as exc:
-        log.error(f"action=startup_failed error={exc}")
-        sys.exit(1)
+        workflow = None
+        log.warning(f"action=workflow_load_failed error={exc}")
 
-    # Build initial config
-    config = build_config(workflow, server_port_override=server_port)
+    # Build initial config (use a dummy workflow if loading failed)
+    if workflow is not None:
+        config = build_config(workflow, server_port_override=server_port)
+        validation = validate_dispatch_config(config)
+    else:
+        validation = None
 
-    # Startup validation (spec §6.3)
-    validation = validate_dispatch_config(config)
-    if not validation.ok:
-        for err in validation.errors:
-            log.error(f"action=startup_validation_failed error={err!r}")
+    config_valid = validation is not None and validation.ok
+
+    if not config_valid:
+        # If a port is available, start setup-only server instead of exiting
+        effective_port = server_port or (
+            build_config(workflow, server_port_override=None).server.port
+            if workflow is not None
+            else None
+        )
+        if effective_port is not None:
+            if validation is not None:
+                for err in validation.errors:
+                    log.warning(f"action=startup_validation_failed error={err!r}")
+            log.info(
+                f"action=setup_mode "
+                f"workflow_path={workflow_path} "
+                f"port={effective_port} "
+                "reason=config_invalid_or_missing"
+            )
+            _runner = await start_server(None, workflow_path, effective_port)
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await _runner.cleanup()
+            return
+        # No port configured — cannot start setup UI, exit with error
+        if validation is not None:
+            for err in validation.errors:
+                log.error(f"action=startup_validation_failed error={err!r}")
+        else:
+            log.error("action=startup_failed error='workflow missing and no port configured'")
         sys.exit(1)
 
     log.info(

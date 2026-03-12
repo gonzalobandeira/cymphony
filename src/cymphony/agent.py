@@ -114,6 +114,7 @@ class AgentRunner:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(ws),
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,

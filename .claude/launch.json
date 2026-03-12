@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "cymphony",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "cymphony", "--port", "8080"],
+      "port": 8080
+    }
+  ]
+}

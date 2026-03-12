@@ -2,54 +2,46 @@
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
-  project_slug: windguruspots-cd68ac867d6f
-  assignee: gonzalobandeira
+  project_slug: cd68ac867d6f
+  assignee: Gonzalo Bandeira
   active_states:
-    - Todo
-    - In Progress
+  - In Progress
+  - Todo
   terminal_states:
-    - Done
-    - Cancelled
-    - Canceled
-    - Duplicate
-    - Closed
-
+  - Canceled
+  - Duplicate
+  - Done
 polling:
-  interval_ms: 15000 # seconds
-
+  interval_ms: 30000
 workspace:
-  root: ~/windguruspots-workspaces
-
+  root: ~/cymphony-workspaces
 agent:
-  max_concurrent_agents: 2
-  max_turns: 30
-  max_retry_backoff_ms: 300000    # 5 minutes
-
+  max_concurrent_agents: 3
+  max_turns: 20
 codex:
   command: claude
-  turn_timeout_ms: 3600000        # 1 hour per turn
-  stall_timeout_ms: 300000        # 5 minutes stall detection
+  turn_timeout_ms: 3600000
+  stall_timeout_ms: 300000
   dangerously_skip_permissions: true
-
 hooks:
-  after_create: |
-    git clone git@github.com:gonzalobandeira/windguru-spots.git .
-  before_run: |
-    git fetch origin && git checkout main && git reset --hard origin/main
-    git branch | grep -v '^\* ' | xargs -r git branch -D 2>/dev/null || true
-  after_run: |
-    BRANCH=$(git branch --show-current)
-    if [ "$BRANCH" != "main" ]; then
-      git add -A && git commit -m "chore: agent work [skip ci]" || true
-      git push -u origin "$BRANCH" || true
-      TITLE=$(git log --format="%s" origin/main..HEAD | tail -1)
-      gh pr create --title "$TITLE" --body "" --head "$BRANCH" || true
-    fi
-  timeout_ms: 120000
+  after_create: 'git clone git@github.com:gonzalobandeira/windguru-spots.git .
 
+    '
+  before_run: 'git fetch origin && git checkout main && git reset --hard origin/main
+
+    git branch | grep -v ''^\* '' | xargs -r git branch -D 2>/dev/null || true
+
+    '
+  after_run: "BRANCH=$(git branch --show-current)\nif [ \"$BRANCH\" != \"main\" ];\
+    \ then\n  git add -A && git commit -m \"chore: agent work [skip ci]\" || true\n\
+    \  git push -u origin \"$BRANCH\" || true\n  TITLE=$(git log --format=\"%s\" origin/main..HEAD\
+    \ | tail -1)\n  gh pr create --title \"$TITLE\" --body \"\" --head \"$BRANCH\"\
+    \ || true\nfi\n"
+  timeout_ms: 120000
 server:
   port: 8080
 ---
+
 You are a senior software engineer working on the **WindguruSpots** project.
 
 ## Issue

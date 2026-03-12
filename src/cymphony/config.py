@@ -248,3 +248,12 @@ def validate_dispatch_config(config: ServiceConfig) -> ValidationResult:
         result.fail("codex.command is missing or empty")
 
     return result
+
+
+def has_valid_config(workflow: WorkflowDefinition) -> bool:
+    """Return True if workflow has a valid, dispatchable config."""
+    try:
+        result = validate_dispatch_config(build_config(workflow))
+        return result.ok
+    except Exception:
+        return False
