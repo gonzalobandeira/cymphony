@@ -86,7 +86,7 @@ class Orchestrator:
         # Start optional HTTP server
         if self._config.server.port is not None:
             from .server import start_server
-            self._server = await start_server(self, self._config.server.port)
+            self._server = await start_server(self, self._workflow_path, self._config.server.port)
 
         # Startup terminal workspace cleanup (spec §8.6)
         await self._startup_terminal_cleanup()
@@ -620,6 +620,51 @@ class Orchestrator:
             self._state.codex_totals.output_tokens += out_delta
             self._state.codex_totals.total_tokens += inp_delta + out_delta
 
+        # Sync agent's TodoWrite plan to the Linear issue comment (BAP-70)
+        if event.raw and event.raw.get("type") == "assistant":
+            todos = _extract_todowrite_todos(event.raw)
+            if todos is not None:
+                self._sync_plan_comment(issue_id, entry, todos)
+
+    def _sync_plan_comment(
+        self,
+        issue_id: str,
+        entry: RunningEntry,
+        todos: list[dict],
+    ) -> None:
+        """Fire-and-forget: create or update the plan checklist comment on the Linear issue."""
+        body = _render_todo_checklist(todos)
+        comment_id = entry.session.plan_comment_id
+
+        async def _do() -> None:
+            try:
+                client = LinearClient(self._config.tracker)
+                if comment_id is None:
+                    new_id = await client.create_comment(issue_id, body)
+                    if new_id:
+                        entry.session.plan_comment_id = new_id
+                        issue_log(
+                            logger, logging.DEBUG,
+                            "plan_comment_created",
+                            issue_id, entry.identifier,
+                            comment_id=new_id,
+                        )
+                else:
+                    await client.update_comment(comment_id, body)
+                    issue_log(
+                        logger, logging.DEBUG,
+                        "plan_comment_updated",
+                        issue_id, entry.identifier,
+                        comment_id=comment_id,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    f"action=plan_comment_sync_failed "
+                    f"issue_id={issue_id} error={exc}"
+                )
+
+        asyncio.create_task(_do())
+
     # ------------------------------------------------------------------
     # Worker exit (spec §16.6)
     # ------------------------------------------------------------------
@@ -861,6 +906,40 @@ class Orchestrator:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _extract_todowrite_todos(raw: dict) -> list[dict] | None:
+    """Return the todos list from a TodoWrite tool_use block, or None if not present."""
+    message = raw.get("message") or {}
+    content = message.get("content") or []
+    if not isinstance(content, list):
+        return None
+    for block in content:
+        if (
+            isinstance(block, dict)
+            and block.get("type") == "tool_use"
+            and block.get("name") == "TodoWrite"
+        ):
+            inp = block.get("input") or {}
+            todos = inp.get("todos")
+            if isinstance(todos, list):
+                return todos
+    return None
+
+
+def _render_todo_checklist(todos: list[dict]) -> str:
+    """Render a list of todo dicts as a markdown checklist comment body."""
+    lines = ["### Agent Plan", ""]
+    for todo in todos:
+        content = todo.get("content", "")
+        status = todo.get("status", "pending")
+        if status == "completed":
+            lines.append(f"- [x] {content}")
+        elif status == "in_progress":
+            lines.append(f"- [ ] 🔄 {content}  *(in progress)*")
+        else:
+            lines.append(f"- [ ] {content}")
+    return "\n".join(lines)
+
 
 def _sort_for_dispatch(issues: list[Issue]) -> list[Issue]:
     """Sort issues for dispatch (spec §8.2): priority asc, then oldest first."""

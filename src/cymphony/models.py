@@ -179,6 +179,8 @@ class LiveSession:
     last_reported_output_tokens: int
     last_reported_total_tokens: int
     turn_count: int
+    # ID of the Linear comment used to display the agent's live plan checklist (BAP-70)
+    plan_comment_id: str | None = None
 
 
 # ---------------------------------------------------------------------------

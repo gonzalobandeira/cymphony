@@ -29,7 +29,7 @@ query CandidateIssues($projectSlug: String!, $states: [String!]!, $after: String
     filter: {
       project: { slugId: { eq: $projectSlug } },
       state: { name: { in: $states } },
-      assignee: { displayName: { eqIgnoreCase: $assignee } }
+      assignee: { name: { eqIgnoreCase: $assignee } }
     },
     orderBy: updatedAt
   ) {
@@ -362,6 +362,49 @@ mutation IssueUpdate($id: String!, $stateId: String!) {
             f"state_id={state_id} success={success}"
         )
 
+    async def create_comment(self, issue_id: str, body: str) -> str | None:
+        """Create a comment on an issue. Returns the new comment ID, or None on failure."""
+        mutation = """
+mutation CommentCreate($issueId: String!, $body: String!) {
+  commentCreate(input: { issueId: $issueId, body: $body }) {
+    comment { id }
+    success
+  }
+}
+"""
+        async with aiohttp.ClientSession(
+            headers=self._headers(), timeout=_NETWORK_TIMEOUT
+        ) as session:
+            result = await self._request(session, mutation, {"issueId": issue_id, "body": body})
+        payload = result.get("commentCreate") or {}
+        comment = payload.get("comment") or {}
+        comment_id = comment.get("id")
+        logger.info(
+            f"action=comment_created issue_id={issue_id} "
+            f"success={payload.get('success')} comment_id={comment_id}"
+        )
+        return comment_id
+
+    async def update_comment(self, comment_id: str, body: str) -> bool:
+        """Update an existing comment's body. Returns True on success."""
+        mutation = """
+mutation CommentUpdate($id: String!, $body: String!) {
+  commentUpdate(id: $id, input: { body: $body }) {
+    comment { id }
+    success
+  }
+}
+"""
+        async with aiohttp.ClientSession(
+            headers=self._headers(), timeout=_NETWORK_TIMEOUT
+        ) as session:
+            result = await self._request(session, mutation, {"id": comment_id, "body": body})
+        success = bool((result.get("commentUpdate") or {}).get("success"))
+        logger.debug(
+            f"action=comment_updated comment_id={comment_id} success={success}"
+        )
+        return success
+
     async def fetch_issue_states_by_ids(self, issue_ids: list[str]) -> list[Issue]:
         """Fetch current state for given issue IDs (for reconciliation, spec §11.1.3)."""
         if not issue_ids:
@@ -403,11 +446,13 @@ def _normalize_issue(node: dict[str, Any]) -> Issue | None:
     label_nodes = (node.get("labels") or {}).get("nodes") or []
     labels = [str(ln.get("name", "")).lower() for ln in label_nodes if ln.get("name")]
 
-    # blocked_by from relations of type "blocks" (filter client-side; API has no filter arg)
+    # blocked_by from relations of type "blocked_by" (filter client-side; API has no filter arg)
+    # Linear relation types: "blocks" = this issue blocks relatedIssue (outgoing)
+    #                        "blocked_by" = this issue is blocked by relatedIssue (incoming)
     relation_nodes = (node.get("relations") or {}).get("nodes") or []
     blocked_by = []
     for rel in relation_nodes:
-        if rel.get("type") != "blocks":
+        if rel.get("type") != "blocked_by":
             continue
         related = rel.get("relatedIssue") or {}
         blocker_state_obj = related.get("state") or {}
@@ -477,6 +522,92 @@ def _normalize_issue_minimal(node: dict[str, Any]) -> Issue | None:
         created_at=None,
         updated_at=None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Setup API helpers (not bound to TrackerConfig — used by the setup wizard)
+# ---------------------------------------------------------------------------
+
+async def _raw_graphql(api_key: str, query: str, variables: dict | None = None) -> dict[str, Any]:
+    """Execute a GraphQL request with a bare API key."""
+    headers = {"Authorization": api_key, "Content-Type": "application/json"}
+    payload: dict[str, Any] = {"query": query}
+    if variables:
+        payload["variables"] = variables
+    try:
+        async with aiohttp.ClientSession(headers=headers, timeout=_NETWORK_TIMEOUT) as session:
+            async with session.post("https://api.linear.app/graphql", json=payload) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise TrackerError(
+                        "linear_api_status",
+                        f"Linear API returned HTTP {resp.status}: {text[:200]}",
+                    )
+                body: dict[str, Any] = await resp.json()
+    except aiohttp.ClientError as exc:
+        raise TrackerError("linear_api_request", f"Request failed: {exc}") from exc
+    if "errors" in body and body["errors"]:
+        raise TrackerError("linear_graphql_errors", f"GraphQL errors: {body['errors']}")
+    if "data" not in body:
+        raise TrackerError("linear_unknown_payload", f"Unexpected response: {str(body)[:200]}")
+    return body["data"]
+
+
+async def validate_api_key(api_key: str) -> bool:
+    """Return True if the API key is valid."""
+    try:
+        data = await _raw_graphql(api_key, "query { viewer { id } }")
+        return bool((data.get("viewer") or {}).get("id"))
+    except TrackerError:
+        return False
+
+
+async def list_projects(api_key: str) -> list[dict[str, Any]]:
+    """Return [{id, name, slugId}] for all accessible projects."""
+    data = await _raw_graphql(
+        api_key,
+        "query { projects(first: 100) { nodes { id name slugId } } }",
+    )
+    nodes = (data.get("projects") or {}).get("nodes") or []
+    return [
+        {"id": n["id"], "name": n["name"], "slugId": n.get("slugId", "")}
+        for n in nodes if n.get("id")
+    ]
+
+
+async def list_members(api_key: str) -> list[dict[str, Any]]:
+    """Return [{id, name, email}] for all workspace members."""
+    data = await _raw_graphql(
+        api_key,
+        "query { users(first: 100) { nodes { id name email } } }",
+    )
+    nodes = (data.get("users") or {}).get("nodes") or []
+    return [
+        {"id": n["id"], "name": n["name"], "email": n.get("email", "")}
+        for n in nodes if n.get("id")
+    ]
+
+
+async def list_team_states(api_key: str, project_id: str) -> list[dict[str, Any]]:
+    """Return deduplicated [{id, name}] for workflow states in the project's teams."""
+    query = """
+query ProjectTeamStates($projectId: String!) {
+  project(id: $projectId) {
+    teams { nodes { states { nodes { id name } } } }
+  }
+}
+"""
+    data = await _raw_graphql(api_key, query, {"projectId": project_id})
+    team_nodes = ((data.get("project") or {}).get("teams") or {}).get("nodes") or []
+    seen: set[str] = set()
+    states: list[dict[str, Any]] = []
+    for team in team_nodes:
+        for s in ((team.get("states") or {}).get("nodes") or []):
+            name = s.get("name", "")
+            if name and name not in seen:
+                seen.add(name)
+                states.append({"id": s["id"], "name": name})
+    return states
 
 
 def _parse_dt(value: str | None) -> datetime | None:
