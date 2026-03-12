@@ -27,7 +27,7 @@ from .models import (
     WorkflowDefinition,
     WorkflowError,
 )
-from .workflow import WorkflowWatcher, load_workflow, render_prompt
+from .workflow import WorkflowWatcher, load_workflow, render_plan_prompt, render_prompt
 from .workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -326,6 +326,46 @@ class Orchestrator:
                     f"identifier={entry.identifier} error={exc}"
                 )
 
+    def _render_todo_checklist(self, todos: list[dict]) -> str:
+        """Render a TodoWrite todos array as a markdown checklist."""
+        lines = ["**Agent Plan**\n"]
+        for todo in todos:
+            content = todo.get("content", "")
+            status = todo.get("status", "pending")
+            if status == "completed":
+                lines.append(f"- [x] {content}")
+            elif status == "in_progress":
+                lines.append(f"- [ ] 🔄 {content} *(in progress)*")
+            else:
+                lines.append(f"- [ ] {content}")
+        return "\n".join(lines)
+
+    def _sync_todo_comment(self, issue_id: str, entry: RunningEntry, todos: list[dict]) -> None:
+        """Fire-and-forget: sync TodoWrite todos to a Linear comment; never raises."""
+        body = self._render_todo_checklist(todos)
+        comment_id = entry.session.plan_comment_id
+
+        async def _do() -> None:
+            try:
+                client = LinearClient(self._config.tracker)
+                if comment_id is None:
+                    new_id = await client.create_comment(issue_id, body)
+                    entry.session.plan_comment_id = new_id
+                    logger.info(
+                        f"action=plan_comment_created issue_id={issue_id} comment_id={new_id}"
+                    )
+                else:
+                    await client.update_comment(comment_id, body)
+                    logger.info(
+                        f"action=plan_comment_updated issue_id={issue_id} comment_id={comment_id}"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    f"action=plan_comment_sync_failed issue_id={issue_id} error={exc}"
+                )
+
+        asyncio.create_task(_do())
+
     def _transition_issue_state(self, issue_id: str, state_name: str) -> None:
         """Fire-and-forget: move an issue to the named workflow state; never raises."""
         async def _do() -> None:
@@ -493,17 +533,48 @@ class Orchestrator:
             await self._handle_agent_event(issue.id, entry, event)
 
         try:
+            # Planning turn: agent produces a TodoWrite checklist only, no code changes.
+            # Reset plan_comment_id so a new comment is always created for this plan,
+            # even if a previous plan comment exists from an earlier attempt.
+            entry.session.plan_comment_id = None
+            entry.status = RunStatus.PLANNING
+            plan_prompt = render_plan_prompt(self._workflow, issue)
+            issue_log(
+                logger, logging.INFO,
+                "planning_turn_start",
+                issue.id, issue.identifier,
+            )
+            title = f"{issue.identifier}: {issue.title}"
+            session_id = await agent.run_turn(
+                workspace_path=workspace.path,
+                prompt=plan_prompt,
+                issue_id=issue.id,
+                issue_identifier=issue.identifier,
+                session_id=None,
+                title=title,
+                on_event=on_event,
+            )
+            issue_log(
+                logger, logging.INFO,
+                "planning_turn_completed",
+                issue.id, issue.identifier,
+                session_id=session_id,
+            )
+            entry.session.turn_count += 1
+            turn_number += 1  # planning turn consumed one slot
+
+            first_execution_turn = True
             while True:
-                # Render full prompt only on the first turn of this attempt;
-                # continuation turns (session already open) send brief guidance
-                # so the original task description is not re-injected (spec §7.1).
+                # Render full prompt on the first execution turn; continuation turns
+                # send brief guidance so the original task description is not re-injected (spec §7.1).
                 entry.status = RunStatus.BUILDING_PROMPT
-                if session_id is None:
+                if first_execution_turn:
                     try:
                         prompt = render_prompt(self._workflow, issue, attempt)
                     except WorkflowError as exc:
                         entry.status = RunStatus.FAILED
                         raise AgentError("prompt_error", str(exc)) from exc
+                    first_execution_turn = False
                 else:
                     prompt = "Continue working on the task."
 
@@ -597,6 +668,21 @@ class Orchestrator:
             session.pid = event.pid
         if event.message:
             session.last_message = event.message
+
+        # Detect TodoWrite tool calls in raw assistant events and sync to Linear
+        raw = event.raw
+        if raw and raw.get("type") == "assistant":
+            message = raw.get("message") or {}
+            content = message.get("content") or []
+            for block in content:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "tool_use"
+                    and block.get("name") == "TodoWrite"
+                ):
+                    todos = (block.get("input") or {}).get("todos") or []
+                    if todos:
+                        self._sync_todo_comment(issue_id, entry, todos)
 
         # Token accounting (spec §13.5)
         if event.usage:
