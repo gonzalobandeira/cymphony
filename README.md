@@ -35,8 +35,9 @@ Linear Issue (Todo)
 ## Prerequisites
 
 - Python ≥ 3.11
-- [Claude Code CLI](https://claude.ai/code) installed and authenticated (`claude`)
+- [Claude Code CLI](https://claude.ai/code) installed (`claude`)
 - A Linear account with an API key
+- An Anthropic API key (recommended over OAuth for background services)
 - `gh` CLI (optional, for auto-creating PRs in hooks)
 
 ## Installation
@@ -49,11 +50,16 @@ pip install -e ".[dev]"
 
 ## Quick start
 
-**1. Set your Linear API key:**
+**1. Create a `.env` file** next to your `WORKFLOW.md`:
 
 ```bash
-export LINEAR_API_KEY=lin_api_...
+LINEAR_API_KEY=lin_api_...
+ANTHROPIC_API_KEY=sk-ant-...
 ```
+
+Cymphony loads this file automatically on startup. You can also export these as shell environment variables instead.
+
+> **Why `ANTHROPIC_API_KEY`?** The Claude Code CLI supports both OAuth (interactive login) and API key authentication. OAuth tokens expire, which silently breaks background agents. An API key never expires and is the recommended approach for automated workflows.
 
 **2. Create a `WORKFLOW.md`** in your project directory (see [Configuration](#configuration) below).
 

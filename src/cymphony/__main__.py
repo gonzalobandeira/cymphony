@@ -12,6 +12,22 @@ from .config import build_config, validate_dispatch_config
 from .workflow import load_workflow, resolve_workflow_path
 
 
+def _load_dotenv(workflow_path: Path) -> None:
+    """Load .env from the workflow file's directory, if present."""
+    env_path = workflow_path.parent / ".env"
+    if not env_path.exists():
+        return
+    with env_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key and key not in os.environ:
+                os.environ[key] = value.strip()
+
+
 def _configure_logging(level: str = "INFO") -> None:
     logging.basicConfig(
         stream=sys.stderr,
@@ -88,6 +104,7 @@ def main(argv: list[str] | None = None) -> None:
     _configure_logging(args.log_level)
 
     workflow_path = resolve_workflow_path(args.workflow_path)
+    _load_dotenv(workflow_path)
 
     try:
         asyncio.run(_run(workflow_path, args.port))

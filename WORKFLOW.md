@@ -22,7 +22,7 @@ workspace:
 
 agent:
   max_concurrent_agents: 2
-  max_turns: 30
+  max_turns: 15
   max_retry_backoff_ms: 300000    # 5 minutes
 
 codex:
