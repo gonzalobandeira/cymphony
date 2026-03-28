@@ -130,17 +130,23 @@ class Orchestrator:
                 self._config.tracker.terminal_states
             )
             wm = WorkspaceManager(self._config)
+            removed = 0
             for issue in terminal_issues:
                 ws_path = wm.get_path(issue.identifier)
                 if ws_path.exists():
                     await wm.remove_workspace(issue.identifier)
+                    removed += 1
             logger.info(
                 f"action=startup_terminal_cleanup "
-                f"cleaned={len(terminal_issues)}"
+                f"project_slug={self._config.tracker.project_slug} "
+                f"states={self._config.tracker.terminal_states} "
+                f"matched={len(terminal_issues)} removed={removed}"
             )
         except Exception as exc:
             logger.warning(
-                f"action=startup_terminal_cleanup_failed error={exc} (continuing)"
+                f"action=startup_terminal_cleanup_failed "
+                f"project_slug={self._config.tracker.project_slug} "
+                f"error={exc} (continuing)"
             )
 
     # ------------------------------------------------------------------
