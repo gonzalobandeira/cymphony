@@ -443,8 +443,8 @@ class Orchestrator:
         )
         return global_available > 0
 
-    def _should_dispatch(self, issue: Issue) -> bool:
-        """Check dispatch eligibility (spec §8.2)."""
+    def _is_dispatch_eligible(self, issue: Issue) -> bool:
+        """Check non-slot dispatch eligibility (spec §8.2)."""
         # Must have required fields
         if not (issue.id and issue.identifier and issue.title and issue.state):
             return False
@@ -462,20 +462,6 @@ class Orchestrator:
         if issue.id in self._state.claimed:
             return False
 
-        # Global slot check
-        if not self._has_slots():
-            return False
-
-        # Per-state slot check
-        per_state = self._config.agent.max_concurrent_agents_by_state
-        if state_lower in per_state:
-            state_count = sum(
-                1 for e in self._state.running.values()
-                if e.issue.state.lower() == state_lower
-            )
-            if state_count >= per_state[state_lower]:
-                return False
-
         # Blocker check for Todo state (spec §8.2)
         if state_lower == "todo":
             terminal_lower_set = set(terminal_lower)
@@ -486,9 +472,35 @@ class Orchestrator:
 
         return True
 
+    def _has_state_slot(self, issue: Issue) -> bool:
+        """Check per-state slot availability for an issue."""
+        state_lower = issue.state.lower()
+        per_state = self._config.agent.max_concurrent_agents_by_state
+        if state_lower not in per_state:
+            return True
+
+        state_count = sum(
+            1 for e in self._state.running.values()
+            if e.issue.state.lower() == state_lower
+        )
+        return state_count < per_state[state_lower]
+
+    def _should_dispatch(self, issue: Issue) -> bool:
+        """Check dispatch eligibility including slot availability (spec §8.2)."""
+        return (
+            self._is_dispatch_eligible(issue)
+            and self._has_slots()
+            and self._has_state_slot(issue)
+        )
+
+    def _is_continuation_retry(self, retry_entry: RetryEntry) -> bool:
+        """Continuation retries come from a clean worker exit, not an error path."""
+        return retry_entry.error is None
+
     async def _dispatch_issue(self, issue: Issue, attempt: int | None) -> None:
         """Claim and spawn worker for issue (spec §16.4)."""
         self._state.claimed.add(issue.id)
+        self._state.completed.discard(issue.id)
         self._state.retry_attempts.pop(issue.id, None)
 
         session = LiveSession(
@@ -824,6 +836,8 @@ class Orchestrator:
         error: str | None = None,
     ) -> None:
         """Schedule a retry for an issue (spec §8.4)."""
+        is_continuation = error is None
+
         # Cancel existing retry timer
         existing = self._state.retry_attempts.pop(issue_id, None)
         if existing:
@@ -846,14 +860,23 @@ class Orchestrator:
             error=error,
         )
 
-        issue_log(
-            logger, logging.INFO,
-            "retry_scheduled",
-            issue_id, identifier,
-            attempt=attempt,
-            delay_ms=delay_ms,
-            error=error,
-        )
+        if is_continuation:
+            issue_log(
+                logger, logging.INFO,
+                "continuation_retry_scheduled",
+                issue_id, identifier,
+                attempt=attempt,
+                delay_ms=delay_ms,
+            )
+        else:
+            issue_log(
+                logger, logging.INFO,
+                "retry_scheduled",
+                issue_id, identifier,
+                attempt=attempt,
+                delay_ms=delay_ms,
+                error=error,
+            )
 
         asyncio.get_event_loop().call_later(
             delay_ms / 1000.0,
@@ -865,6 +888,8 @@ class Orchestrator:
         retry_entry = self._state.retry_attempts.pop(issue_id, None)
         if not retry_entry:
             return
+
+        is_continuation = self._is_continuation_retry(retry_entry)
 
         try:
             client = LinearClient(self._config.tracker)
@@ -887,6 +912,7 @@ class Orchestrator:
         if issue is None:
             # No longer a candidate — release claim
             self._state.claimed.discard(issue_id)
+            self._state.completed.discard(issue_id)
             issue_log(
                 logger, logging.INFO,
                 "retry_claim_released_not_found",
@@ -894,26 +920,54 @@ class Orchestrator:
             )
             return
 
-        if not self._should_dispatch(issue):
+        # Retry timers re-open eligibility by clearing bookkeeping guards before
+        # checking whether the issue is still a valid candidate.
+        self._state.claimed.discard(issue_id)
+        self._state.completed.discard(issue_id)
+
+        if not self._is_dispatch_eligible(issue):
             # No longer active — release
             self._state.claimed.discard(issue_id)
+            self._state.completed.discard(issue_id)
             issue_log(
                 logger, logging.INFO,
-                "retry_claim_released_inactive",
+                "continuation_retry_released_inactive"
+                if is_continuation else "retry_claim_released_inactive",
                 issue_id, retry_entry.identifier,
                 state=issue.state,
             )
             return
 
-        if not self._has_slots():
-            await self._schedule_retry(
-                issue_id,
-                issue.identifier,
-                attempt=retry_entry.attempt + 1,
-                error="no available orchestrator slots",
-            )
+        if not self._has_slots() or not self._has_state_slot(issue):
+            if is_continuation:
+                issue_log(
+                    logger, logging.INFO,
+                    "continuation_retry_waiting_for_slot",
+                    issue_id, retry_entry.identifier,
+                )
+                await self._schedule_retry(
+                    issue_id,
+                    issue.identifier,
+                    attempt=retry_entry.attempt,
+                    delay_ms=_CONTINUATION_RETRY_DELAY_MS,
+                    error=None,
+                )
+            else:
+                await self._schedule_retry(
+                    issue_id,
+                    issue.identifier,
+                    attempt=retry_entry.attempt + 1,
+                    error="no available orchestrator slots",
+                )
             return
 
+        issue_log(
+            logger, logging.INFO,
+            "continuation_retry_redispatching"
+            if is_continuation else "retry_dispatching",
+            issue_id, retry_entry.identifier,
+            attempt=retry_entry.attempt,
+        )
         await self._dispatch_issue(issue, attempt=retry_entry.attempt)
 
     # ------------------------------------------------------------------
