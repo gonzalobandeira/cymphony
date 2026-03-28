@@ -296,3 +296,136 @@ async def test_issue_control_handlers_delegate_to_orchestrator() -> None:
         ("requeue", "bap-172"),
         ("skip", "bap-172"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_issue_endpoint_returns_rich_running_drilldown() -> None:
+    request = _FakeRequest(
+        _FakeOrchestrator(
+            {
+                "running": [
+                    {
+                        "issue_id": "issue-1",
+                        "issue_identifier": "BAP-170",
+                        "issue_title": "Per-issue drill-down",
+                        "issue_url": "https://linear.app/bandeira/issue/BAP-170",
+                        "issue_description": "Inspect runtime state",
+                        "issue_labels": ["Feature"],
+                        "issue_comments": [
+                            {
+                                "author": "Gonzalo",
+                                "body": "Please add recent events",
+                                "created_at": "2026-03-28T12:00:00+00:00",
+                            }
+                        ],
+                        "state": "In Progress",
+                        "run_status": "StreamingTurn",
+                        "session_id": "sess-123",
+                        "turn_count": 3,
+                        "last_event": "notification",
+                        "last_message": "Writing tests",
+                        "started_at": "2026-03-28T11:00:00+00:00",
+                        "last_event_at": "2026-03-28T11:05:00+00:00",
+                        "retry_attempt": None,
+                        "workspace_path": "/tmp/BAP-170",
+                        "plan_comment_id": "comment-1",
+                        "latest_plan": "**Agent Plan**\n- [ ] Add drill-down",
+                        "recent_events": [
+                            {
+                                "event": "notification",
+                                "timestamp": "2026-03-28T11:05:00+00:00",
+                                "message": "Writing tests",
+                            }
+                        ],
+                        "tokens": {
+                            "input_tokens": 100,
+                            "output_tokens": 50,
+                            "total_tokens": 150,
+                        },
+                    }
+                ],
+                "retrying": [],
+                "waiting": [],
+                "problems": [],
+                "skipped": [],
+                "controls": {},
+                "codex_totals": {},
+            }
+        ),
+        identifier="bap-170",
+    )
+
+    response = await server._handle_issue(request)
+
+    assert response.status == 200
+    payload = response.text
+    assert '"tracked": true' in payload
+    assert '"status": "running"' in payload
+    assert '"latest_plan": "**Agent Plan**\\n- [ ] Add drill-down"' in payload
+    assert '"recent_events": [{"event": "notification"' in payload
+
+
+def test_render_dashboard_shows_issue_drilldown_details() -> None:
+    html = _render_dashboard(
+        {
+            "generated_at": "2026-03-28T12:00:00+00:00",
+            "summary": {
+                "running": 1,
+                "retrying": 0,
+                "ready": 0,
+                "waiting": 0,
+                "needs_attention": 0,
+                "capacity_in_use": "1/2",
+            },
+            "totals": {},
+            "controls": {"dispatch_paused": False, "recent_actions": []},
+            "running": [
+                {
+                    "issue_id": "issue-1",
+                    "issue_identifier": "BAP-170",
+                    "issue_title": "Per-issue drill-down",
+                    "issue_url": "https://linear.app/bandeira/issue/BAP-170",
+                    "issue_description": "Inspect runtime state",
+                    "issue_labels": ["Feature"],
+                    "issue_comments": [],
+                    "state": "In Progress",
+                    "run_status": "StreamingTurn",
+                    "session_id": "sess-123",
+                    "turn_count": 3,
+                    "last_event": "notification",
+                    "last_message": "Writing tests",
+                    "started_at": "2026-03-28T11:00:00+00:00",
+                    "last_event_at": "2026-03-28T11:05:00+00:00",
+                    "retry_attempt": None,
+                    "workspace_path": "/tmp/BAP-170",
+                    "plan_comment_id": "comment-1",
+                    "latest_plan": "**Agent Plan**\n- [ ] Add drill-down",
+                    "recent_events": [
+                        {
+                            "event": "notification",
+                            "timestamp": "2026-03-28T11:05:00+00:00",
+                            "message": "Writing tests",
+                        }
+                    ],
+                    "tokens": {
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "total_tokens": 150,
+                    },
+                }
+            ],
+            "retrying": [],
+            "ready": [],
+            "waiting": [],
+            "blocked": [],
+            "recently_completed": [],
+            "waiting_reasons": [],
+            "recent_problems": [],
+            "skipped": [],
+        }
+    )
+
+    assert "<details" in html
+    assert "Recent Events" in html
+    assert "Plan comment" in html
+    assert "Writing tests" in html

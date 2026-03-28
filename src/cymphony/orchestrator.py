@@ -35,6 +35,8 @@ from .workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
+_MAX_RECENT_EVENTS = 12
+
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -625,6 +627,7 @@ class Orchestrator:
     def _sync_todo_comment(self, issue_id: str, entry: RunningEntry, todos: list[dict]) -> None:
         """Fire-and-forget: sync TodoWrite todos to a Linear comment; never raises."""
         body = self._render_todo_checklist(todos)
+        entry.session.latest_plan = body
         comment_id = entry.session.plan_comment_id
 
         async def _do() -> None:
@@ -985,6 +988,22 @@ class Orchestrator:
         if event.message:
             session.last_message = event.message
 
+        event_row = {
+            "event": event.event.value,
+            "timestamp": event.timestamp.isoformat(),
+        }
+        if event.message:
+            event_row["message"] = event.message
+        if event.usage:
+            event_row["usage"] = {
+                "input_tokens": event.usage.get("input_tokens", 0),
+                "output_tokens": event.usage.get("output_tokens", 0),
+                "cache_read_input_tokens": event.usage.get("cache_read_input_tokens", 0),
+            }
+        session.recent_events.append(event_row)
+        if len(session.recent_events) > _MAX_RECENT_EVENTS:
+            session.recent_events = session.recent_events[-_MAX_RECENT_EVENTS:]
+
         # Detect TodoWrite tool calls in raw assistant events and sync to Linear
         raw = event.raw
         if raw and raw.get("type") == "assistant":
@@ -1068,6 +1087,7 @@ class Orchestrator:
                 attempt=1,
                 delay_ms=_CONTINUATION_RETRY_DELAY_MS,
                 error=None,
+                entry=entry,
             )
         else:
             # Abnormal exit → exponential backoff retry
@@ -1085,6 +1105,7 @@ class Orchestrator:
                 issue_id, identifier,
                 attempt=next_attempt,
                 error=error_str,
+                entry=entry,
             )
 
     # ------------------------------------------------------------------
@@ -1098,6 +1119,7 @@ class Orchestrator:
         attempt: int,
         delay_ms: float | None = None,
         error: str | None = None,
+        entry: RunningEntry | None = None,
     ) -> None:
         """Schedule a retry for an issue (spec §8.4)."""
         is_continuation = error is None
@@ -1116,13 +1138,67 @@ class Orchestrator:
             )
 
         due_at_ms = _monotonic_ms() + delay_ms
-        self._state.retry_attempts[issue_id] = RetryEntry(
+        retry_entry = RetryEntry(
             issue_id=issue_id,
             identifier=identifier,
             attempt=attempt,
             due_at_ms=due_at_ms,
             error=error,
         )
+        if entry is not None:
+            retry_entry.state = entry.issue.state
+            retry_entry.run_status = entry.status.value
+            retry_entry.session_id = entry.session.session_id
+            retry_entry.turn_count = entry.session.turn_count
+            retry_entry.last_event = (
+                entry.session.last_event.value if entry.session.last_event else None
+            )
+            retry_entry.last_message = entry.session.last_message
+            retry_entry.last_event_at = entry.session.last_event_timestamp
+            retry_entry.workspace_path = str(WorkspaceManager(self._config).get_path(entry.identifier))
+            retry_entry.tokens = {
+                "input_tokens": entry.session.input_tokens,
+                "output_tokens": entry.session.output_tokens,
+                "total_tokens": entry.session.total_tokens,
+            }
+            retry_entry.started_at = entry.started_at
+            retry_entry.retry_attempt = entry.retry_attempt
+            retry_entry.plan_comment_id = entry.session.plan_comment_id
+            retry_entry.latest_plan = entry.session.latest_plan
+            retry_entry.recent_events = list(entry.session.recent_events)
+            retry_entry.issue_title = entry.issue.title
+            retry_entry.issue_url = entry.issue.url
+            retry_entry.issue_description = entry.issue.description
+            retry_entry.issue_labels = list(entry.issue.labels)
+            retry_entry.issue_comments = [
+                {
+                    "author": comment.author,
+                    "body": comment.body,
+                    "created_at": comment.created_at.isoformat() if comment.created_at else None,
+                }
+                for comment in entry.issue.comments
+            ]
+        elif existing is not None:
+            retry_entry.state = existing.state
+            retry_entry.run_status = existing.run_status
+            retry_entry.session_id = existing.session_id
+            retry_entry.turn_count = existing.turn_count
+            retry_entry.last_event = existing.last_event
+            retry_entry.last_message = existing.last_message
+            retry_entry.last_event_at = existing.last_event_at
+            retry_entry.workspace_path = existing.workspace_path
+            retry_entry.tokens = dict(existing.tokens)
+            retry_entry.started_at = existing.started_at
+            retry_entry.retry_attempt = existing.retry_attempt
+            retry_entry.plan_comment_id = existing.plan_comment_id
+            retry_entry.latest_plan = existing.latest_plan
+            retry_entry.recent_events = list(existing.recent_events)
+            retry_entry.issue_title = existing.issue_title
+            retry_entry.issue_url = existing.issue_url
+            retry_entry.issue_description = existing.issue_description
+            retry_entry.issue_labels = list(existing.issue_labels)
+            retry_entry.issue_comments = list(existing.issue_comments)
+        self._state.retry_attempts[issue_id] = retry_entry
 
         if is_continuation:
             issue_log(
@@ -1249,28 +1325,8 @@ class Orchestrator:
         wm = WorkspaceManager(self._config)
 
         running_rows = []
-        for issue_id, entry in self._state.running.items():
-            s = entry.session
-            running_rows.append({
-                "issue_id": issue_id,
-                "issue_identifier": entry.identifier,
-                "state": entry.issue.state,
-                "run_status": entry.status.value,
-                "session_id": s.session_id,
-                "turn_count": s.turn_count,
-                "last_event": s.last_event.value if s.last_event else None,
-                "last_message": s.last_message or "",
-                "started_at": entry.started_at.isoformat(),
-                "last_event_at": s.last_event_timestamp.isoformat()
-                    if s.last_event_timestamp else None,
-                "retry_attempt": entry.retry_attempt,
-                "workspace_path": str(wm.get_path(entry.identifier)),
-                "tokens": {
-                    "input_tokens": s.input_tokens,
-                    "output_tokens": s.output_tokens,
-                    "total_tokens": s.total_tokens,
-                },
-            })
+        for entry in self._state.running.values():
+            running_rows.append(self._snapshot_running_entry(entry, wm))
 
         retrying_rows = []
         for issue_id, retry in self._state.retry_attempts.items():
@@ -1282,6 +1338,25 @@ class Orchestrator:
                 "attempt": retry.attempt,
                 "due_at": due_at.isoformat(),
                 "error": retry.error,
+                "state": retry.state,
+                "run_status": retry.run_status,
+                "session_id": retry.session_id,
+                "turn_count": retry.turn_count,
+                "last_event": retry.last_event,
+                "last_message": retry.last_message or "",
+                "last_event_at": retry.last_event_at.isoformat() if retry.last_event_at else None,
+                "workspace_path": retry.workspace_path,
+                "tokens": retry.tokens,
+                "started_at": retry.started_at.isoformat() if retry.started_at else None,
+                "retry_attempt": retry.retry_attempt,
+                "plan_comment_id": retry.plan_comment_id,
+                "latest_plan": retry.latest_plan,
+                "recent_events": retry.recent_events,
+                "issue_title": retry.issue_title,
+                "issue_url": retry.issue_url,
+                "issue_description": retry.issue_description,
+                "issue_labels": retry.issue_labels,
+                "issue_comments": retry.issue_comments,
             })
 
         waiting_rows = self._build_waiting_rows(now)
@@ -1543,6 +1618,48 @@ class Orchestrator:
             f"control_action={action} scope={scope} outcome={outcome} "
             f"issue_id={issue_id!r} issue_identifier={issue_identifier!r} detail={detail!r}"
         )
+
+    def _snapshot_running_entry(
+        self,
+        entry: RunningEntry,
+        wm: WorkspaceManager,
+    ) -> dict[str, Any]:
+        s = entry.session
+        return {
+            "issue_id": entry.issue_id,
+            "issue_identifier": entry.identifier,
+            "issue_title": entry.issue.title,
+            "issue_url": entry.issue.url,
+            "issue_description": entry.issue.description,
+            "issue_labels": list(entry.issue.labels),
+            "issue_comments": [
+                {
+                    "author": comment.author,
+                    "body": comment.body,
+                    "created_at": comment.created_at.isoformat() if comment.created_at else None,
+                }
+                for comment in entry.issue.comments
+            ],
+            "state": entry.issue.state,
+            "run_status": entry.status.value,
+            "session_id": s.session_id,
+            "turn_count": s.turn_count,
+            "last_event": s.last_event.value if s.last_event else None,
+            "last_message": s.last_message or "",
+            "started_at": entry.started_at.isoformat(),
+            "last_event_at": s.last_event_timestamp.isoformat()
+            if s.last_event_timestamp else None,
+            "retry_attempt": entry.retry_attempt,
+            "workspace_path": str(wm.get_path(entry.identifier)),
+            "plan_comment_id": s.plan_comment_id,
+            "latest_plan": s.latest_plan,
+            "recent_events": list(s.recent_events),
+            "tokens": {
+                "input_tokens": s.input_tokens,
+                "output_tokens": s.output_tokens,
+                "total_tokens": s.total_tokens,
+            },
+        }
 
 # ---------------------------------------------------------------------------
 # Helpers
