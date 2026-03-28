@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from datetime import datetime, timezone
 from html import escape
 from typing import TYPE_CHECKING
@@ -24,6 +25,28 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _format_retry_timing(retry_row: dict) -> str:
+    due_at_raw = retry_row.get("due_at")
+    if not due_at_raw:
+        return ""
+
+    try:
+        due_at = datetime.fromisoformat(str(due_at_raw).replace("Z", "+00:00"))
+    except ValueError:
+        return str(due_at_raw)
+
+    remaining_seconds = (due_at - _now_utc()).total_seconds()
+    if remaining_seconds <= 0:
+        return "due now"
+
+    return f"in {math.ceil(remaining_seconds)}s"
+
+
+def _format_waiting_timing(waiting_row: dict) -> str:
+    due_at_raw = waiting_row.get("due_at")
+    if not due_at_raw:
+        return ""
+    return _format_retry_timing(waiting_row)
 def _json_response(data: object, status: int = 200) -> web.Response:
     return web.Response(
         status=status,
@@ -305,6 +328,24 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         ]
         for row in groups["retrying"]
     ]
+    waiting_reason_rows = [
+        [
+            escape(str(row.get("issue_identifier") or "")),
+            escape(str(row.get("summary") or "")),
+            escape(str(row.get("detail") or "")),
+            escape(_format_waiting_timing(row)),
+        ]
+        for row in groups.get("waiting_reasons", [])
+    ]
+    problem_rows = [
+        [
+            escape(str(row.get("issue_identifier") or "-")),
+            escape(str(row.get("summary") or "")),
+            escape(str(row.get("detail") or "")),
+            escape(_format_timestamp(row.get("observed_at"))),
+        ]
+        for row in groups.get("recent_problems", [])
+    ]
 
     queue_sections = []
     for key, title, subtitle, empty in [
@@ -331,6 +372,24 @@ def _render_dashboard(groups: dict[str, object]) -> str:
                 empty,
             )
         )
+    queue_sections.append(
+        _render_table(
+            f"Waiting Reasons ({len(waiting_reason_rows)})",
+            "Snapshot-level explanations for issues that are not dispatching yet.",
+            ["Issue", "Reason", "Detail", "Timing"],
+            waiting_reason_rows,
+            "No waiting reasons captured in the latest snapshot.",
+        )
+    )
+    queue_sections.append(
+        _render_table(
+            f"Recent Problems ({len(problem_rows)})",
+            "Recent operator-visible orchestration issues for quick follow-up.",
+            ["Issue", "Problem", "Detail", "Observed"],
+            problem_rows,
+            "No recent orchestration problems captured.",
+        )
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -620,6 +679,16 @@ async def _handle_issue(request: web.Request) -> web.Response:
                 break
 
     if issue_data is None:
+        for entry in snap.get("waiting", []):
+            if entry.get("issue_identifier") == identifier:
+                issue_data = {
+                    "tracked": True,
+                    "status": entry.get("kind"),
+                    **entry,
+                }
+                break
+
+    if issue_data is None:
         return _json_response(
             {
                 "error": {
@@ -638,6 +707,8 @@ async def _handle_dashboard(request: web.Request) -> web.Response:
     orch: Orchestrator = request.app["orchestrator"]
     snap = orch.snapshot()
     groups = await _load_operator_groups(orch, snap)
+    groups["waiting_reasons"] = list(snap.get("waiting", []))
+    groups["recent_problems"] = list(snap.get("problems", []))
     return _html_response(_render_dashboard(groups))
 
 

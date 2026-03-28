@@ -225,6 +225,17 @@ class RetryEntry:
 
 
 @dataclass
+class ProblemRecord:
+    """Recent operator-visible problem captured by the orchestrator."""
+    kind: str
+    summary: str
+    detail: str
+    observed_at: datetime
+    issue_id: str | None = None
+    issue_identifier: str | None = None
+
+
+@dataclass
 class CodexTotals:
     input_tokens: int = 0
     output_tokens: int = 0
@@ -243,6 +254,9 @@ class OrchestratorState:
     completed: set[str] = field(default_factory=set)
     codex_totals: CodexTotals = field(default_factory=CodexTotals)
     codex_rate_limits: dict[str, Any] | None = None
+    last_candidates: list[Issue] = field(default_factory=list)
+    last_validation_errors: list[str] = field(default_factory=list)
+    recent_problems: list[ProblemRecord] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

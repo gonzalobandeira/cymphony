@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from cymphony import server
 from cymphony.models import BlockerRef, Issue
-from cymphony.server import _build_operator_groups
+from cymphony.server import _build_operator_groups, _render_dashboard
 
 
 def _issue(
@@ -129,8 +129,76 @@ def test_build_operator_groups_respects_state_capacity_limits() -> None:
     assert [item["identifier"] for item in groups["waiting"]] == ["BAP-103"]
     assert groups["waiting"][0]["reason"] == "Waiting for Todo capacity"
 
+
 def test_format_relative_due_formats_countdown_and_due_now() -> None:
     now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)
 
     assert server._format_relative_due("2026-03-28T12:01:30+00:00", now) == "1m 30s"
     assert server._format_relative_due("2026-03-28T12:00:00+00:00", now) == "Now"
+
+
+def test_render_dashboard_shows_waiting_reasons_and_recent_problems(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(server, "_now_utc", lambda: now)
+
+    html = _render_dashboard(
+        {
+            "generated_at": now.isoformat(),
+            "summary": {
+                "running": 0,
+                "retrying": 1,
+                "ready": 0,
+                "waiting": 0,
+                "needs_attention": 1,
+                "capacity_in_use": "0/2",
+            },
+            "totals": {},
+            "running": [],
+            "retrying": [
+                {
+                    "issue_identifier": "BAP-154",
+                    "attempt": 2,
+                    "due_at": (now + timedelta(seconds=90)).isoformat(),
+                    "error": "network blip",
+                }
+            ],
+            "ready": [],
+            "waiting": [],
+            "blocked": [],
+            "recently_completed": [],
+            "waiting_reasons": [
+                {
+                    "issue_identifier": "BAP-171",
+                    "summary": "Blocked by dependency",
+                    "detail": "BAP-170 (In Progress)",
+                    "due_at": None,
+                },
+                {
+                    "issue_identifier": "BAP-172",
+                    "summary": "Waiting for retry timer",
+                    "detail": "network blip",
+                    "due_at": (now + timedelta(seconds=15)).isoformat(),
+                },
+            ],
+            "recent_problems": [
+                {
+                    "issue_identifier": "BAP-173",
+                    "summary": "Dispatch configuration is invalid",
+                    "detail": "tracker.project_slug is required",
+                    "observed_at": now.isoformat(),
+                }
+            ],
+        }
+    )
+
+    assert "BAP-154" in html
+    assert "1m 30s" in html
+    assert "network blip" in html
+    assert "Waiting Reasons (2)" in html
+    assert "Blocked by dependency" in html
+    assert "BAP-170 (In Progress)" in html
+    assert "in 15s" in html
+    assert "Recent Problems (1)" in html
+    assert "tracker.project_slug is required" in html
