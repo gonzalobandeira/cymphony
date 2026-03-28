@@ -20,6 +20,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _json_response(data: object, status: int = 200) -> web.Response:
     return web.Response(
         status=status,
@@ -581,7 +585,7 @@ async def _handle_refresh(request: web.Request) -> web.Response:
     return _json_response({
         "queued": True,
         "coalesced": coalesced,
-        "requested_at": datetime.now(timezone.utc).isoformat(),
+        "requested_at": _now_utc().isoformat(),
         "operations": ["reconcile", "dispatch"],
     }, status=202)
 

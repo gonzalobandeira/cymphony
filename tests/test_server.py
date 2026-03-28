@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
+from cymphony import server
 from cymphony.models import BlockerRef, Issue
 from cymphony.server import _build_operator_groups
 
@@ -125,3 +128,9 @@ def test_build_operator_groups_respects_state_capacity_limits() -> None:
     assert [item["identifier"] for item in groups["ready"]] == ["BAP-102"]
     assert [item["identifier"] for item in groups["waiting"]] == ["BAP-103"]
     assert groups["waiting"][0]["reason"] == "Waiting for Todo capacity"
+
+def test_format_relative_due_formats_countdown_and_due_now() -> None:
+    now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)
+
+    assert server._format_relative_due("2026-03-28T12:01:30+00:00", now) == "1m 30s"
+    assert server._format_relative_due("2026-03-28T12:00:00+00:00", now) == "Now"
