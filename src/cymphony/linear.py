@@ -120,13 +120,21 @@ query CandidateIssues($projectSlug: String!, $states: [String!]!, $after: String
 }
 """ % {"page_size": _PAGE_SIZE}
 
-# Issues by state names (for startup terminal cleanup)
-_ISSUES_BY_STATES_QUERY = """
-query IssuesByStates($states: [String!]!) {
+# Project-scoped issues by state names (for startup terminal cleanup)
+_PROJECT_ISSUES_BY_STATES_QUERY = """
+query ProjectIssuesByStates($projectSlug: String!, $states: [String!]!, $after: String) {
   issues(
     first: %(page_size)d,
-    filter: { state: { name: { in: $states } } }
+    after: $after,
+    filter: {
+      project: { slugId: { eq: $projectSlug } },
+      state: { name: { in: $states } }
+    }
   ) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
     nodes {
       id
       identifier
@@ -281,22 +289,54 @@ class LinearClient:
         return issues
 
     async def fetch_issues_by_states(self, state_names: list[str]) -> list[Issue]:
-        """Fetch issues in given states (for startup terminal cleanup, spec §11.1.2)."""
+        """Fetch project-scoped issues in given states (spec §11.1.2)."""
         if not state_names:
             return []
+
+        issues: list[Issue] = []
+        after: str | None = None
 
         async with aiohttp.ClientSession(
             headers=self._headers(), timeout=_NETWORK_TIMEOUT
         ) as session:
-            data = await self._request(
-                session,
-                _ISSUES_BY_STATES_QUERY,
-                {"states": state_names},
-            )
+            while True:
+                variables: dict[str, Any] = {
+                    "projectSlug": self._config.project_slug,
+                    "states": state_names,
+                }
+                if after:
+                    variables["after"] = after
 
-        nodes = (data.get("issues") or {}).get("nodes") or []
-        issues = [_normalize_issue_minimal(n) for n in nodes if n]
-        return [i for i in issues if i is not None]
+                data = await self._request(
+                    session,
+                    _PROJECT_ISSUES_BY_STATES_QUERY,
+                    variables,
+                )
+
+                page = data.get("issues") or {}
+                nodes = page.get("nodes") or []
+                page_info = page.get("pageInfo") or {}
+
+                normalized = [_normalize_issue_minimal(n) for n in nodes if n]
+                issues.extend(i for i in normalized if i is not None)
+
+                has_next = page_info.get("hasNextPage", False)
+                if not has_next:
+                    break
+
+                end_cursor = page_info.get("endCursor")
+                if not end_cursor:
+                    raise TrackerError(
+                        "linear_missing_end_cursor",
+                        "Linear pagination: hasNextPage=true but endCursor is missing",
+                    )
+                after = end_cursor
+
+        logger.debug(
+            "action=fetch_issues_by_states "
+            f"project_slug={self._config.project_slug} count={len(issues)}"
+        )
+        return issues
 
     async def fetch_workflow_state_id(self, issue_id: str, state_name: str) -> str | None:
         """Return the workflow state ID for state_name on the team that owns the issue."""

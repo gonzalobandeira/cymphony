@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
 
+from cymphony.linear import LinearClient
 from cymphony.models import (
     AgentConfig,
     CodingAgentConfig,
+    Issue,
     PollingConfig,
     ServerConfig,
     ServiceConfig,
@@ -17,6 +20,7 @@ from cymphony.models import (
     HooksConfig,
 )
 from cymphony.orchestrator import Orchestrator
+from cymphony.workspace import WorkspaceManager
 
 
 def _build_orchestrator() -> Orchestrator:
@@ -56,6 +60,24 @@ def _build_orchestrator() -> Orchestrator:
     )
     workflow = WorkflowDefinition(config={}, prompt_template="")
     return Orchestrator(Path("WORKFLOW.md"), config, workflow)
+
+
+def _minimal_issue(identifier: str, *, issue_id: str = "issue-1", state: str = "Done") -> Issue:
+    return Issue(
+        id=issue_id,
+        identifier=identifier,
+        title=identifier,
+        description=None,
+        priority=None,
+        state=state,
+        branch_name=None,
+        url=None,
+        labels=[],
+        blocked_by=[],
+        comments=[],
+        created_at=None,
+        updated_at=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -153,3 +175,69 @@ async def test_schedule_tick_while_running_becomes_single_follow_up(monkeypatch:
 
     assert runs == 2
     assert max_concurrency == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_issues_by_states_scopes_requests_to_configured_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = LinearClient(_build_orchestrator()._config.tracker)
+    captured_variables: list[dict[str, object]] = []
+
+    class FakeSession:
+        async def __aenter__(self) -> "FakeSession":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    async def fake_request(self, session, query: str, variables: dict[str, object]) -> dict[str, object]:
+        del self, session
+        captured_variables.append(variables)
+        assert "project: { slugId: { eq: $projectSlug } }" in query
+        return {
+            "issues": {
+                "nodes": [
+                    {"id": "1", "identifier": "BAP-153", "state": {"name": "Done"}}
+                ],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }
+        }
+
+    monkeypatch.setattr("cymphony.linear.aiohttp.ClientSession", lambda **kwargs: FakeSession())
+    monkeypatch.setattr(LinearClient, "_request", fake_request)
+
+    issues = await client.fetch_issues_by_states(["Done"])
+
+    assert [issue.identifier for issue in issues] == ["BAP-153"]
+    assert captured_variables == [{"projectSlug": "proj", "states": ["Done"]}]
+
+
+@pytest.mark.asyncio
+async def test_startup_terminal_cleanup_removes_only_matching_workspaces_and_logs_project_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    orchestrator = _build_orchestrator()
+    orchestrator._config.workspace.root = str(tmp_path)
+    wm = WorkspaceManager(orchestrator._config)
+
+    await wm.create_for_issue("BAP-153")
+    other_path = tmp_path / "OTHER-1"
+    other_path.mkdir()
+
+    async def fake_fetch_issues_by_states(self, state_names: list[str]) -> list[Issue]:
+        del self
+        assert state_names == ["Done"]
+        return [_minimal_issue("BAP-153"), _minimal_issue("MISSING-1", issue_id="issue-2")]
+
+    monkeypatch.setattr(LinearClient, "fetch_issues_by_states", fake_fetch_issues_by_states)
+
+    caplog.set_level(logging.INFO)
+    await orchestrator._startup_terminal_cleanup()
+
+    assert not wm.get_path("BAP-153").exists()
+    assert other_path.exists()
+    assert "project_slug=proj" in caplog.text
+    assert "matched=2 removed=1" in caplog.text
