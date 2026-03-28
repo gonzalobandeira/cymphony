@@ -436,6 +436,110 @@ def test_snapshot_includes_waiting_reasons_and_recent_problems(
     assert snapshot["counts"]["problems"] == 1
 
 
+def test_pause_dispatching_blocks_slot_availability_and_resume_requeues_tick(monkeypatch: pytest.MonkeyPatch) -> None:
+    orchestrator = _build_orchestrator()
+    refresh_calls: list[float] = []
+
+    monkeypatch.setattr(orchestrator, "_enqueue_tick", lambda delay_ms: refresh_calls.append(delay_ms) or False)
+
+    pause_result = orchestrator.pause_dispatching()
+    resume_result = orchestrator.resume_dispatching()
+
+    assert pause_result["ok"] is True
+    assert orchestrator._state.dispatch_paused is False
+    assert resume_result["was_paused"] is True
+    assert refresh_calls == [0.0]
+    assert orchestrator._has_slots() is True
+    assert [a.action for a in orchestrator._state.control_actions[-2:]] == [
+        "pause_dispatching",
+        "resume_dispatching",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_skip_issue_marks_issue_as_skipped_and_requeue_clears_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    orchestrator = _build_orchestrator()
+    issue = _build_issue()
+    refresh_calls: list[float] = []
+
+    monkeypatch.setattr(orchestrator, "_enqueue_tick", lambda delay_ms: refresh_calls.append(delay_ms) or False)
+
+    orchestrator._state.retry_attempts[issue.id] = RetryEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        attempt=1,
+        due_at_ms=0.0,
+        error="boom",
+    )
+
+    skip_result = await orchestrator.skip_issue(issue.identifier)
+
+    assert skip_result["ok"] is True
+    assert issue.id in orchestrator._state.skipped
+    assert issue.id not in orchestrator._state.retry_attempts
+    assert orchestrator._is_dispatch_eligible(issue) is False
+
+    requeue_result = await orchestrator.requeue_issue(issue.identifier)
+
+    assert requeue_result["ok"] is True
+    assert issue.id not in orchestrator._state.skipped
+    assert refresh_calls == [0.0]
+
+
+@pytest.mark.asyncio
+async def test_cancel_worker_releases_running_issue(monkeypatch: pytest.MonkeyPatch) -> None:
+    orchestrator = _build_orchestrator()
+    issue = _build_issue()
+    terminated: list[tuple[str, bool]] = []
+
+    async def fake_terminate(issue_id: str, cleanup_workspace: bool) -> None:
+        terminated.append((issue_id, cleanup_workspace))
+        orchestrator._state.running.pop(issue_id, None)
+
+    monkeypatch.setattr(orchestrator, "_terminate_running_issue", fake_terminate)
+
+    orchestrator._state.running[issue.id] = RunningEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        issue=issue,
+        task=None,
+        session=LiveSession(
+            session_id=None,
+            pid=None,
+            last_event=None,
+            last_event_timestamp=None,
+            last_message=None,
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            last_reported_input_tokens=0,
+            last_reported_output_tokens=0,
+            last_reported_total_tokens=0,
+            turn_count=0,
+        ),
+        retry_attempt=None,
+        started_at=datetime.now(timezone.utc),
+        status=RunStatus.STREAMING_TURN,
+    )
+    orchestrator._state.claimed.add(issue.id)
+    orchestrator._state.completed.add(issue.id)
+    orchestrator._state.retry_attempts[issue.id] = RetryEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        attempt=1,
+        due_at_ms=0.0,
+        error="old",
+    )
+
+    result = await orchestrator.cancel_worker(issue.identifier)
+
+    assert result["ok"] is True
+    assert terminated == [(issue.id, False)]
+    assert issue.id not in orchestrator._state.claimed
+    assert issue.id not in orchestrator._state.completed
+    assert issue.id not in orchestrator._state.retry_attempts
+
+
 @pytest.mark.asyncio
 async def test_transition_state_cache_is_scoped_by_team(monkeypatch: pytest.MonkeyPatch) -> None:
     orchestrator = _build_orchestrator()
