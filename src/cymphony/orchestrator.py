@@ -65,7 +65,10 @@ class Orchestrator:
         self._server: Any = None
         self._shutdown_event = asyncio.Event()
         self._state_id_cache: dict[str, str] = {}  # state_name → Linear state ID
-        self._immediate_poll_pending: bool = False
+        self._tick_task: asyncio.Task[None] | None = None
+        self._tick_handle: asyncio.TimerHandle | None = None
+        self._tick_due_at_ms: float | None = None
+        self._tick_rerun_requested: bool = False
 
     # ------------------------------------------------------------------
     # Startup
@@ -92,7 +95,7 @@ class Orchestrator:
         await self._startup_terminal_cleanup()
 
         # Schedule immediate first tick
-        asyncio.create_task(self._tick())
+        self._enqueue_tick(delay_ms=0.0)
 
         try:
             await self._shutdown_event.wait()
@@ -145,8 +148,25 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     async def _tick(self) -> None:
+        """Run serialized ticks, coalescing any overlap into one follow-up pass."""
+        try:
+            while True:
+                self._tick_rerun_requested = False
+                await self._tick_once()
+
+                if self._tick_rerun_requested:
+                    continue
+
+                self._schedule_tick()
+                break
+        finally:
+            rerun_requested = self._tick_rerun_requested
+            self._tick_task = None
+            if rerun_requested:
+                self._enqueue_tick(delay_ms=0.0)
+
+    async def _tick_once(self) -> None:
         """One poll-and-dispatch tick (spec §8.1, §16.2)."""
-        self._immediate_poll_pending = False
         try:
             # 1. Reconcile active runs
             await self._reconcile_running_issues()
@@ -158,8 +178,6 @@ class Orchestrator:
                     logger.error(
                         f"action=dispatch_validation_failed error={err!r}"
                     )
-                # Skip dispatch, keep reconciliation; schedule next tick
-                self._schedule_tick()
                 return
 
             # 3. Fetch candidate issues
@@ -168,7 +186,6 @@ class Orchestrator:
                 issues = await client.fetch_candidate_issues()
             except Exception as exc:
                 logger.error(f"action=fetch_candidates_failed error={exc}")
-                self._schedule_tick()
                 return
 
             # 4. Sort for dispatch (spec §8.2)
@@ -184,15 +201,44 @@ class Orchestrator:
         except Exception as exc:
             logger.error(f"action=tick_error error={exc}", exc_info=True)
 
-        self._schedule_tick()
-
     def _schedule_tick(self, delay_ms: float | None = None) -> None:
         if delay_ms is None:
             delay_ms = float(self._state.poll_interval_ms)
-        asyncio.get_event_loop().call_later(
-            delay_ms / 1000.0,
-            lambda: asyncio.create_task(self._tick()),
+        self._enqueue_tick(delay_ms)
+
+    def _enqueue_tick(self, delay_ms: float) -> bool:
+        """Queue the next tick without allowing concurrent tick execution."""
+        if self._tick_task is not None and not self._tick_task.done():
+            already_requested = self._tick_rerun_requested
+            self._tick_rerun_requested = True
+            return already_requested
+
+        loop = asyncio.get_event_loop()
+        due_at_ms = _monotonic_ms() + max(delay_ms, 0.0)
+
+        if self._tick_handle is not None and not self._tick_handle.cancelled():
+            existing_due_at_ms = self._tick_due_at_ms or due_at_ms
+            if due_at_ms >= existing_due_at_ms:
+                return True
+            self._tick_handle.cancel()
+
+        self._tick_due_at_ms = due_at_ms
+        self._tick_handle = loop.call_later(
+            max(delay_ms, 0.0) / 1000.0,
+            self._start_tick_task,
         )
+        return False
+
+    def _start_tick_task(self) -> None:
+        """Start one serialized tick runner."""
+        self._tick_handle = None
+        self._tick_due_at_ms = None
+
+        if self._tick_task is not None and not self._tick_task.done():
+            self._tick_rerun_requested = True
+            return
+
+        self._tick_task = asyncio.create_task(self._tick())
 
     def request_immediate_poll(self) -> bool:
         """Trigger an immediate poll tick (e.g. from HTTP POST /api/v1/refresh).
@@ -200,13 +246,7 @@ class Orchestrator:
         Returns True if the request was coalesced (a poll was already pending),
         False if a new tick was scheduled.
         """
-        if self._immediate_poll_pending:
-            return True  # coalesced — already queued
-        self._immediate_poll_pending = True
-        asyncio.get_event_loop().call_soon(
-            lambda: asyncio.create_task(self._tick())
-        )
-        return False
+        return self._enqueue_tick(delay_ms=0.0)
 
     # ------------------------------------------------------------------
     # Reconciliation (spec §8.5)
