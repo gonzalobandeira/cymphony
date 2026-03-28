@@ -59,7 +59,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 Cymphony loads this file automatically on startup. You can also export these as shell environment variables instead.
 
-> **Why `ANTHROPIC_API_KEY`?** The Claude Code CLI supports both OAuth (interactive login) and API key authentication. OAuth tokens expire, which silently breaks background agents. An API key never expires and is the recommended approach for automated workflows.
+> **Why `ANTHROPIC_API_KEY`?** The Claude Code CLI supports both OAuth (interactive login) and API key authentication. OAuth tokens expire, which silently breaks background agents. An API key never expires and is the recommended approach for automated workflows. Cymphony passes Claude auth environment variables such as `ANTHROPIC_API_KEY` through to the Claude subprocess unchanged; it only removes the internal `CLAUDECODE` sentinel so nested CLI runs behave correctly.
 
 **2. Create a `WORKFLOW.md`** in your project directory (see [Configuration](#configuration) below).
 
