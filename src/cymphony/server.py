@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,27 @@ if TYPE_CHECKING:
     from .orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _format_retry_timing(retry_row: dict) -> str:
+    due_at_raw = retry_row.get("due_at")
+    if not due_at_raw:
+        return ""
+
+    try:
+        due_at = datetime.fromisoformat(str(due_at_raw).replace("Z", "+00:00"))
+    except ValueError:
+        return str(due_at_raw)
+
+    remaining_seconds = (due_at - _now_utc()).total_seconds()
+    if remaining_seconds <= 0:
+        return "due now"
+
+    return f"in {math.ceil(remaining_seconds)}s"
 
 
 def _json_response(data: object, status: int = 200) -> web.Response:
@@ -57,7 +79,7 @@ async def _handle_refresh(request: web.Request) -> web.Response:
     return _json_response({
         "queued": True,
         "coalesced": coalesced,
-        "requested_at": datetime.now(timezone.utc).isoformat(),
+        "requested_at": _now_utc().isoformat(),
         "operations": ["reconcile", "dispatch"],
     }, status=202)
 
@@ -130,7 +152,7 @@ async def _handle_dashboard(request: web.Request) -> web.Response:
         retry_rows += (
             f"<tr><td>{r.get('issue_identifier','')}</td>"
             f"<td>{r.get('attempt','')}</td>"
-            f"<td>{r.get('due_in_seconds','')}s</td>"
+            f"<td>{_format_retry_timing(r)}</td>"
             f"<td>{str(r.get('error',''))[:80]}</td></tr>\n"
         )
 
