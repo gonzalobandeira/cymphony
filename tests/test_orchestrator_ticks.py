@@ -292,3 +292,52 @@ async def test_schedule_retry_uses_continuation_log_action_for_clean_exit(
 
     assert "action=continuation_retry_scheduled" in caplog.text
     assert "action=retry_scheduled" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_transition_state_cache_is_scoped_by_team(monkeypatch: pytest.MonkeyPatch) -> None:
+    orchestrator = _build_orchestrator()
+    state_calls: list[tuple[str, str]] = []
+    set_calls: list[tuple[str, str]] = []
+
+    class FakeLinearClient:
+        def __init__(self, tracker_config: object) -> None:
+            self.tracker_config = tracker_config
+
+        async def fetch_issue_team_id(self, issue_id: str) -> str | None:
+            return {
+                "issue-a": "team-a",
+                "issue-b": "team-b",
+            }.get(issue_id)
+
+        async def fetch_team_workflow_state_id(self, team_id: str, state_name: str) -> str | None:
+            state_calls.append((team_id, state_name))
+            return {
+                ("team-a", "In Review"): "state-a-review",
+                ("team-b", "In Review"): "state-b-review",
+            }.get((team_id, state_name))
+
+        async def set_issue_state(self, issue_id: str, state_id: str) -> None:
+            set_calls.append((issue_id, state_id))
+
+    monkeypatch.setattr("cymphony.orchestrator.LinearClient", FakeLinearClient)
+
+    orchestrator._transition_issue_state("issue-a", "In Review")
+    orchestrator._transition_issue_state("issue-b", "In Review")
+    orchestrator._transition_issue_state("issue-a", "In Review")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert state_calls == [
+        ("team-a", "In Review"),
+        ("team-b", "In Review"),
+    ]
+    assert set_calls == [
+        ("issue-a", "state-a-review"),
+        ("issue-b", "state-b-review"),
+        ("issue-a", "state-a-review"),
+    ]
+    assert orchestrator._state_id_cache == {
+        ("team-a", "in review"): "state-a-review",
+        ("team-b", "in review"): "state-b-review",
+    }

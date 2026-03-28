@@ -64,7 +64,7 @@ class Orchestrator:
         self._observers: list[Any] = []
         self._server: Any = None
         self._shutdown_event = asyncio.Event()
-        self._state_id_cache: dict[str, str] = {}  # state_name → Linear state ID
+        self._state_id_cache: dict[tuple[str, str], str] = {}  # (team_id, state_name) → Linear state ID
         self._tick_task: asyncio.Task[None] | None = None
         self._tick_handle: asyncio.TimerHandle | None = None
         self._tick_due_at_ms: float | None = None
@@ -411,19 +411,31 @@ class Orchestrator:
         async def _do() -> None:
             try:
                 client = LinearClient(self._config.tracker)
-                state_id = self._state_id_cache.get(state_name)
+                team_id = await client.fetch_issue_team_id(issue_id)
+                if not team_id:
+                    logger.warning(
+                        f"action=state_transition_skipped issue_id={issue_id} "
+                        f"state={state_name!r} reason=team_id_not_found"
+                    )
+                    return
+
+                cache_key = (team_id, state_name.lower())
+                state_id = self._state_id_cache.get(cache_key)
                 if not state_id:
-                    state_id = await client.fetch_workflow_state_id(issue_id, state_name)
-                    if not state_id:
-                        logger.warning(
-                            f"action=state_transition_skipped issue_id={issue_id} "
-                            f"state={state_name!r} reason=state_id_not_found"
-                        )
-                        return
-                    self._state_id_cache[state_name] = state_id
+                    state_id = await client.fetch_team_workflow_state_id(team_id, state_name)
+                if not state_id:
+                    logger.warning(
+                        f"action=state_transition_skipped issue_id={issue_id} "
+                        f"state={state_name!r} team_id={team_id} reason=state_id_not_found"
+                    )
+                    return
+
+                if cache_key not in self._state_id_cache:
+                    self._state_id_cache[cache_key] = state_id
                 await client.set_issue_state(issue_id, state_id)
                 logger.info(
-                    f"action=issue_state_set issue_id={issue_id} state={state_name!r}"
+                    f"action=issue_state_set issue_id={issue_id} state={state_name!r} "
+                    f"team_id={team_id}"
                 )
             except Exception as exc:
                 logger.warning(
