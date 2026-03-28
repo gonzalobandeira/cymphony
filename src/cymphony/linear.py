@@ -338,9 +338,8 @@ class LinearClient:
         )
         return issues
 
-    async def fetch_workflow_state_id(self, issue_id: str, state_name: str) -> str | None:
-        """Return the workflow state ID for state_name on the team that owns the issue."""
-        # Step 1: get team ID from the issue
+    async def fetch_issue_team_id(self, issue_id: str) -> str | None:
+        """Return the owning Linear team ID for an issue."""
         team_query = """
 query IssueTeam($issueId: String!) {
   issue(id: $issueId) {
@@ -359,8 +358,10 @@ query IssueTeam($issueId: String!) {
                 f"action=fetch_workflow_state_id_no_team issue_id={issue_id}"
             )
             return None
+        return team_id
 
-        # Step 2: get all workflow states for this team via root-level query
+    async def fetch_team_workflow_state_id(self, team_id: str, state_name: str) -> str | None:
+        """Return a workflow state ID by name for a specific Linear team."""
         states_query = """
 query TeamWorkflowStates($teamId: ID!) {
   workflowStates(filter: { team: { id: { eq: $teamId } } }) {
@@ -375,13 +376,27 @@ query TeamWorkflowStates($teamId: ID!) {
 
         nodes = (data.get("workflowStates") or {}).get("nodes") or []
         logger.info(
-            f"action=workflow_states_fetched issue_id={issue_id} "
+            "action=workflow_states_fetched "
             f"team_id={team_id} count={len(nodes)} "
             f"names={[n.get('name') for n in nodes]}"
         )
         target = state_name.lower()
         match = next((n for n in nodes if n.get("name", "").lower() == target), None)
         return match["id"] if match else None
+
+    async def fetch_workflow_state_ref(self, issue_id: str, state_name: str) -> tuple[str | None, str | None]:
+        """Return ``(team_id, state_id)`` for a workflow state on the issue's owning team."""
+        team_id = await self.fetch_issue_team_id(issue_id)
+        if not team_id:
+            return None, None
+
+        state_id = await self.fetch_team_workflow_state_id(team_id, state_name)
+        return team_id, state_id
+
+    async def fetch_workflow_state_id(self, issue_id: str, state_name: str) -> str | None:
+        """Return the workflow state ID for state_name on the team that owns the issue."""
+        _, state_id = await self.fetch_workflow_state_ref(issue_id, state_name)
+        return state_id
 
     async def set_issue_state(self, issue_id: str, state_id: str) -> None:
         """Update the workflow state of an issue."""
