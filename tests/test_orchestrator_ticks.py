@@ -8,7 +8,9 @@ import pytest
 from cymphony.models import (
     AgentConfig,
     CodingAgentConfig,
+    Issue,
     PollingConfig,
+    RetryEntry,
     ServerConfig,
     ServiceConfig,
     TrackerConfig,
@@ -56,6 +58,28 @@ def _build_orchestrator() -> Orchestrator:
     )
     workflow = WorkflowDefinition(config={}, prompt_template="")
     return Orchestrator(Path("WORKFLOW.md"), config, workflow)
+
+
+def _build_issue(
+    issue_id: str = "issue-1",
+    identifier: str = "BAP-151",
+    state: str = "Todo",
+) -> Issue:
+    return Issue(
+        id=issue_id,
+        identifier=identifier,
+        title="Test issue",
+        description=None,
+        priority=None,
+        state=state,
+        branch_name=None,
+        url=None,
+        labels=[],
+        blocked_by=[],
+        comments=[],
+        created_at=None,
+        updated_at=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -153,3 +177,118 @@ async def test_schedule_tick_while_running_becomes_single_follow_up(monkeypatch:
 
     assert runs == 2
     assert max_concurrency == 1
+
+
+@pytest.mark.asyncio
+async def test_continuation_retry_timer_redispatches_after_clearing_guards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    issue = _build_issue()
+    dispatched: list[tuple[str, int | None]] = []
+
+    class FakeLinearClient:
+        def __init__(self, tracker_config: object) -> None:
+            self.tracker_config = tracker_config
+
+        async def fetch_candidate_issues(self) -> list[Issue]:
+            return [issue]
+
+    async def fake_dispatch(candidate: Issue, attempt: int | None) -> None:
+        dispatched.append((candidate.id, attempt))
+
+    monkeypatch.setattr("cymphony.orchestrator.LinearClient", FakeLinearClient)
+    monkeypatch.setattr(orchestrator, "_dispatch_issue", fake_dispatch)
+
+    orchestrator._state.claimed.add(issue.id)
+    orchestrator._state.completed.add(issue.id)
+    orchestrator._state.retry_attempts[issue.id] = RetryEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        attempt=1,
+        due_at_ms=0.0,
+        error=None,
+    )
+
+    await orchestrator._on_retry_timer(issue.id)
+
+    assert dispatched == [(issue.id, 1)]
+    assert issue.id not in orchestrator._state.claimed
+    assert issue.id not in orchestrator._state.completed
+
+
+@pytest.mark.asyncio
+async def test_continuation_retry_timer_reschedules_when_slots_are_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    issue = _build_issue()
+    scheduled: list[tuple[str, str, int, float | None, str | None]] = []
+
+    class FakeLinearClient:
+        def __init__(self, tracker_config: object) -> None:
+            self.tracker_config = tracker_config
+
+        async def fetch_candidate_issues(self) -> list[Issue]:
+            return [issue]
+
+    async def fake_schedule_retry(
+        issue_id: str,
+        identifier: str,
+        attempt: int,
+        delay_ms: float | None = None,
+        error: str | None = None,
+    ) -> None:
+        scheduled.append((issue_id, identifier, attempt, delay_ms, error))
+
+    async def fail_dispatch(candidate: Issue, attempt: int | None) -> None:
+        raise AssertionError("dispatch should not be called when slots are unavailable")
+
+    monkeypatch.setattr("cymphony.orchestrator.LinearClient", FakeLinearClient)
+    monkeypatch.setattr(orchestrator, "_schedule_retry", fake_schedule_retry)
+    monkeypatch.setattr(orchestrator, "_dispatch_issue", fail_dispatch)
+
+    orchestrator._state.max_concurrent_agents = 0
+    orchestrator._state.claimed.add(issue.id)
+    orchestrator._state.completed.add(issue.id)
+    orchestrator._state.retry_attempts[issue.id] = RetryEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        attempt=1,
+        due_at_ms=0.0,
+        error=None,
+    )
+
+    await orchestrator._on_retry_timer(issue.id)
+
+    assert scheduled == [(issue.id, issue.identifier, 1, 1000.0, None)]
+    assert issue.id not in orchestrator._state.claimed
+    assert issue.id not in orchestrator._state.completed
+
+
+@pytest.mark.asyncio
+async def test_schedule_retry_uses_continuation_log_action_for_clean_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    orchestrator = _build_orchestrator()
+
+    class FakeLoop:
+        def call_later(self, delay: float, callback: object) -> None:
+            self.delay = delay
+            self.callback = callback
+
+    fake_loop = FakeLoop()
+    monkeypatch.setattr("cymphony.orchestrator.asyncio.get_event_loop", lambda: fake_loop)
+
+    with caplog.at_level("INFO"):
+        await orchestrator._schedule_retry(
+            issue_id="issue-1",
+            identifier="BAP-151",
+            attempt=1,
+            delay_ms=1000.0,
+            error=None,
+        )
+
+    assert "action=continuation_retry_scheduled" in caplog.text
+    assert "action=retry_scheduled" not in caplog.text
