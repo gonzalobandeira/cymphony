@@ -1,4 +1,4 @@
-"""Claude Code agent runner — adapts 'codex app-server' spec to claude CLI (spec §10).
+"""Agent runner implementations (spec §10).
 
 Trust posture (documented per spec §15.1):
   High-trust mode. The claude CLI is invoked with --dangerously-skip-permissions so that
@@ -23,7 +23,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncIterator, Callable, Awaitable
+from typing import Callable, Awaitable
 
 from .models import (
     AgentError,
@@ -45,8 +45,8 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class AgentRunner:
-    """Runs Claude Code as a subprocess and streams AgentEvents (spec §10)."""
+class BaseAgentRunner:
+    """Shared subprocess runner logic for coding-agent providers."""
 
     def __init__(self, config: CodingAgentConfig) -> None:
         self._config = config
@@ -58,18 +58,12 @@ class AgentRunner:
         session_id: str | None,
         title: str,
     ) -> list[str]:
-        """Build the claude CLI command list."""
-        cmd = [self._config.command, "--output-format", "stream-json", "--verbose", "--print", prompt]
+        """Build the provider CLI command list."""
+        raise NotImplementedError
 
-        # Continuation turn: resume existing session (spec §10.3)
-        if session_id:
-            cmd.extend(["--resume", session_id])
-
-        # High-trust: auto-approve all tool calls (documented posture)
-        if self._config.dangerously_skip_permissions:
-            cmd.append("--dangerously-skip-permissions")
-
-        return cmd
+    def _build_env(self) -> dict[str, str]:
+        """Build the subprocess environment for this provider."""
+        return dict(os.environ)
 
     async def run_turn(
         self,
@@ -106,8 +100,7 @@ class AgentRunner:
             f"session_id={session_id!r} workspace={ws}"
         )
 
-        # Build env without CLAUDECODE to allow nested claude CLI invocations
-        env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        env = self._build_env()
 
         proc = None
         try:
@@ -265,6 +258,44 @@ class AgentRunner:
             )
 
         return session_id, turn_succeeded, turn_error
+
+
+class ClaudeAgentRunner(BaseAgentRunner):
+    """Runs Claude Code as a subprocess and streams AgentEvents (spec §10)."""
+
+    def _build_command(
+        self,
+        prompt: str,
+        workspace_path: str,
+        session_id: str | None,
+        title: str,
+    ) -> list[str]:
+        """Build the claude CLI command list."""
+        cmd = [self._config.command, "--output-format", "stream-json", "--verbose", "--print", prompt]
+
+        # Continuation turn: resume existing session (spec §10.3)
+        if session_id:
+            cmd.extend(["--resume", session_id])
+
+        # High-trust: auto-approve all tool calls (documented posture)
+        if self._config.dangerously_skip_permissions:
+            cmd.append("--dangerously-skip-permissions")
+
+        return cmd
+
+    def _build_env(self) -> dict[str, str]:
+        """Build the Claude subprocess environment.
+
+        Keep operator-selected Claude auth env vars intact for unattended runs while
+        removing the sentinel that would cause nested CLI invocations to mis-detect
+        the parent Codex environment.
+        """
+        env = dict(os.environ)
+        env.pop("CLAUDECODE", None)
+        return env
+
+
+AgentRunner = ClaudeAgentRunner
 
 
 def _parse_stream_event(

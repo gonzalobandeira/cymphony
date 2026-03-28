@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .agent import AgentRunner
+from .agent import ClaudeAgentRunner
 from .config import ServiceConfig, build_config, validate_dispatch_config
 from .linear import LinearClient
 from .logging_ import issue_log, session_log
@@ -547,7 +547,7 @@ class Orchestrator:
     ) -> None:
         """Run one agent session for an issue (workspace + hooks + turns)."""
         wm = WorkspaceManager(self._config)
-        agent = AgentRunner(self._config.coding_agent)
+        agent = ClaudeAgentRunner(self._config.coding_agent)
 
         # Prepare workspace
         entry.status = RunStatus.PREPARING_WORKSPACE
