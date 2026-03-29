@@ -1145,8 +1145,13 @@ class Orchestrator:
                 entry=entry,
             )
         else:
-            # Abnormal exit → exponential backoff retry
-            entry.status = RunStatus.FAILED
+            # Abnormal exit → set status based on error type, then retry
+            if isinstance(exc, AgentError) and exc.code == "stall_timeout":
+                entry.status = RunStatus.STALLED
+            elif isinstance(exc, AgentError) and exc.code == "turn_timeout":
+                entry.status = RunStatus.TIMED_OUT
+            else:
+                entry.status = RunStatus.FAILED
             next_attempt = _next_attempt(entry.retry_attempt)
             error_str = str(exc)[:200]
             issue_log(
@@ -1155,6 +1160,7 @@ class Orchestrator:
                 issue_id, identifier,
                 attempt=next_attempt,
                 error=error_str,
+                run_status=entry.status.value,
             )
             await self._schedule_retry(
                 issue_id, identifier,
