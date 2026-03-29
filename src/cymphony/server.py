@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
-from .config import build_config
+from .config import build_config, validate_dispatch_config
 from .linear import LinearClient
 from .models import Issue, WorkflowDefinition
 from .workflow import load_workflow, save_workflow
@@ -47,6 +47,11 @@ _DEFAULT_SETUP_FORM = {
     "before_remove": "",
     "hooks_timeout_ms": "120000",
     "server_port": "8080",
+    "qa_review_enabled": False,
+    "qa_review_dispatch": "QA Review",
+    "qa_review_success": "In Review",
+    "qa_review_failure": "Todo",
+    "review_prompt": "",
     "prompt_template": """You are a senior software engineer working on the project.\n\n## Issue\n\n**Title:** {{ issue.title }}\n**Identifier:** {{ issue.identifier }}\n**State:** {{ issue.state }}\n{% if issue.description %}\n**Description:**\n{{ issue.description }}\n{% endif %}\n\n## Instructions\n\n1. Read the issue carefully.\n2. Create and checkout a branch named `agent/{{ issue.identifier | lower }}`.\n3. Implement the requested change.\n4. Update tests as needed.\n5. Keep changes minimal and consistent with the codebase.\n""",
 }
 
@@ -257,6 +262,8 @@ def _workflow_form_data(
         codex = raw.get("codex") or {}
         hooks = raw.get("hooks") or {}
         server = raw.get("server") or {}
+        transitions = raw.get("transitions") or {}
+        qa_review = transitions.get("qa_review") or {}
 
         data.update(
             {
@@ -282,6 +289,11 @@ def _workflow_form_data(
                 "before_remove": str(hooks.get("before_remove") or ""),
                 "hooks_timeout_ms": str(hooks.get("timeout_ms") or data["hooks_timeout_ms"]),
                 "server_port": str(server.get("port") or data["server_port"]),
+                "qa_review_enabled": bool(qa_review.get("enabled", False)),
+                "qa_review_dispatch": str(qa_review.get("dispatch") or data["qa_review_dispatch"]),
+                "qa_review_success": str(qa_review.get("success") or data["qa_review_success"]),
+                "qa_review_failure": str(qa_review.get("failure") or data["qa_review_failure"]),
+                "review_prompt": str(raw.get("review_prompt") or ""),
                 "prompt_template": workflow.prompt_template or data["prompt_template"],
             }
         )
@@ -342,6 +354,24 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
         },
     }
 
+    qa_enabled = bool(form.get("qa_review_enabled"))
+    qa_dispatch = str(form.get("qa_review_dispatch") or "").strip()
+    qa_success = str(form.get("qa_review_success") or "").strip()
+    qa_failure = str(form.get("qa_review_failure") or "").strip()
+    if qa_enabled or qa_dispatch or qa_success or qa_failure:
+        config["transitions"] = {
+            "qa_review": {
+                "enabled": qa_enabled,
+                "dispatch": qa_dispatch or None,
+                "success": qa_success or None,
+                "failure": qa_failure or None,
+            }
+        }
+
+    review_prompt = str(form.get("review_prompt") or "").strip()
+    if review_prompt:
+        config["review_prompt"] = review_prompt
+
     return WorkflowDefinition(
         config=config,
         prompt_template=str(form.get("prompt_template") or "").strip(),
@@ -379,6 +409,10 @@ def _validate_workflow_form(form: dict[str, object]) -> list[str]:
         errors.append("agent.max_turns must be greater than zero.")
     if config.polling.interval_ms <= 0:
         errors.append("polling.interval_ms must be greater than zero.")
+    for error in validate_dispatch_config(config).errors:
+        if error == "tracker.api_key is missing or resolved to empty string":
+            continue
+        errors.append(error)
 
     return errors
 
@@ -433,7 +467,7 @@ def _render_setup_page(
     .grid {{ display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }}
     .card {{ background: #fff; border: 1px solid #d1d5db; border-radius: 12px; padding: 18px; }}
     label {{ display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px; }}
-    input, textarea {{ width: 100%; box-sizing: border-box; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px 12px; font: inherit; }}
+    input, textarea, select {{ width: 100%; box-sizing: border-box; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px 12px; font: inherit; }}
     textarea {{ min-height: 120px; resize: vertical; }}
     .full {{ grid-column: 1 / -1; }}
     .notice {{ border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }}
@@ -528,6 +562,23 @@ def _render_setup_page(
         <label>Permissions</label>
         <label class="check"><input type="checkbox" name="dangerously_skip_permissions" value="1"{_checkbox_checked(values.get("dangerously_skip_permissions"))} />Dangerously skip permissions</label>
       </section>
+      <section class="card">
+        <label>QA review lane</label>
+        <label class="check"><input type="checkbox" name="qa_review_enabled" value="1"{_checkbox_checked(values.get("qa_review_enabled"))} />Enable implementation → QA Review → human review</label>
+        <div class="muted">When enabled, successful implementation runs move into the QA review state first.</div>
+      </section>
+      <section class="card">
+        <label for="qa_review_dispatch">QA review dispatch state</label>
+        <input id="qa_review_dispatch" name="qa_review_dispatch" value="{field("qa_review_dispatch")}" />
+      </section>
+      <section class="card">
+        <label for="qa_review_success">QA review pass state</label>
+        <input id="qa_review_success" name="qa_review_success" value="{field("qa_review_success")}" />
+      </section>
+      <section class="card">
+        <label for="qa_review_failure">QA review failure state</label>
+        <input id="qa_review_failure" name="qa_review_failure" value="{field("qa_review_failure")}" />
+      </section>
       <section class="card full">
         <label for="after_create">after_create hook</label>
         <textarea id="after_create" name="after_create">{field("after_create")}</textarea>
@@ -543,6 +594,11 @@ def _render_setup_page(
       <section class="card full">
         <label for="before_remove">before_remove hook</label>
         <textarea id="before_remove" name="before_remove">{field("before_remove")}</textarea>
+      </section>
+      <section class="card full">
+        <label for="review_prompt">QA review prompt template</label>
+        <textarea id="review_prompt" name="review_prompt">{field("review_prompt")}</textarea>
+        <div class="muted">Optional. Used only for issues in the QA review dispatch state.</div>
       </section>
       <section class="card full">
         <label for="prompt_template">Prompt template</label>
@@ -918,6 +974,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     # --- Workflow config section ---
     wf_config = groups.get("workflow_config") or {}
     wf_transitions = wf_config.get("transitions") or {}
+    wf_qa = wf_transitions.get("qa_review") or {}
     wf_active = ", ".join(str(s) for s in (wf_config.get("active_states") or []))
     wf_terminal = ", ".join(str(s) for s in (wf_config.get("terminal_states") or []))
     transition_rule_rows = []
@@ -925,6 +982,12 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         target = wf_transitions.get(event_name)
         transition_rule_rows.append([
             escape(event_name),
+            escape(str(target)) if target else "<span class='muted'>not configured</span>",
+        ])
+    for event_name in ("dispatch", "success", "failure"):
+        target = wf_qa.get(event_name)
+        transition_rule_rows.append([
+            escape(f"qa_review.{event_name}"),
             escape(str(target)) if target else "<span class='muted'>not configured</span>",
         ])
 
@@ -936,6 +999,8 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         f"<span class='v'>{escape(wf_active) or '<span class=\"muted\">none</span>'}</span></div>"
         "<div class='kv'><span class='k'>Terminal states</span>"
         f"<span class='v'>{escape(wf_terminal) or '<span class=\"muted\">none</span>'}</span></div>"
+        "<div class='kv'><span class='k'>QA review lane</span>"
+        f"<span class='v'>{'enabled' if wf_qa.get('enabled') else 'disabled'}</span></div>"
         "<div class='table-wrap' style='margin-top: 10px'>"
         "<table><thead><tr><th>Event</th><th>Target state</th></tr></thead><tbody>"
         + "".join(
@@ -1853,12 +1918,17 @@ async def _save_workflow_from_request(request: web.Request, *, setup_mode: bool)
         "turn_timeout_ms": submitted.get("turn_timeout_ms", ""),
         "stall_timeout_ms": submitted.get("stall_timeout_ms", ""),
         "dangerously_skip_permissions": submitted.get("dangerously_skip_permissions") == "1",
+        "qa_review_enabled": submitted.get("qa_review_enabled") == "1",
+        "qa_review_dispatch": submitted.get("qa_review_dispatch", ""),
+        "qa_review_success": submitted.get("qa_review_success", ""),
+        "qa_review_failure": submitted.get("qa_review_failure", ""),
         "after_create": submitted.get("after_create", ""),
         "before_run": submitted.get("before_run", ""),
         "after_run": submitted.get("after_run", ""),
         "before_remove": submitted.get("before_remove", ""),
         "hooks_timeout_ms": submitted.get("hooks_timeout_ms", ""),
         "server_port": submitted.get("server_port", ""),
+        "review_prompt": submitted.get("review_prompt", ""),
         "prompt_template": submitted.get("prompt_template", ""),
     }
 

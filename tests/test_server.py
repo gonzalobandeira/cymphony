@@ -798,12 +798,17 @@ async def test_setup_post_writes_workflow_file(tmp_path: Path) -> None:
             "turn_timeout_ms": "3600000",
             "stall_timeout_ms": "300000",
             "dangerously_skip_permissions": "1",
+            "qa_review_enabled": "1",
+            "qa_review_dispatch": "QA Review",
+            "qa_review_success": "In Review",
+            "qa_review_failure": "Todo",
             "after_create": "git clone git@github.com:org/repo.git .",
             "before_run": "git fetch origin",
             "after_run": "git status",
             "before_remove": "",
             "hooks_timeout_ms": "120000",
             "server_port": "8080",
+            "review_prompt": "Review {{ issue.identifier }} carefully.",
             "prompt_template": "You are working on {{ issue.identifier }}.",
         },
     )
@@ -816,6 +821,13 @@ async def test_setup_post_writes_workflow_file(tmp_path: Path) -> None:
     assert saved.config["tracker"]["project_slug"] == "cymphony-b2a8d0064141"
     assert saved.config["tracker"]["assignee"] == "gonzalobandeira"
     assert saved.config["codex"]["command"] == "claude"
+    assert saved.config["transitions"]["qa_review"] == {
+        "enabled": True,
+        "dispatch": "QA Review",
+        "success": "In Review",
+        "failure": "Todo",
+    }
+    assert saved.config["review_prompt"] == "Review {{ issue.identifier }} carefully."
     assert saved.prompt_template == "You are working on {{ issue.identifier }}."
 
 
@@ -868,6 +880,12 @@ def test_render_dashboard_shows_workflow_configuration_section() -> None:
                     "failure": None,
                     "blocked": None,
                     "cancelled": None,
+                    "qa_review": {
+                        "enabled": True,
+                        "dispatch": "QA Review",
+                        "success": "In Review",
+                        "failure": "Todo",
+                    },
                 },
             },
             "transition_history": [],
@@ -880,7 +898,68 @@ def test_render_dashboard_shows_workflow_configuration_section() -> None:
     assert "dispatch" in html
     assert "In Progress" in html
     assert "In Review" in html
+    assert "QA review lane" in html
+    assert "enabled" in html
+    assert "qa_review.dispatch" in html
+    assert "QA Review" in html
     assert "not configured" in html
+
+
+@pytest.mark.asyncio
+async def test_settings_get_renders_saved_qa_review_fields(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text(
+        """---
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: cymphony
+  active_states: [Todo, In Progress]
+  terminal_states: [Done]
+workspace:
+  root: ~/cymphony-workspaces
+agent:
+  max_concurrent_agents: 2
+  max_turns: 10
+  max_retry_backoff_ms: 1000
+codex:
+  command: claude
+  turn_timeout_ms: 1000
+  stall_timeout_ms: 1000
+  dangerously_skip_permissions: true
+hooks:
+  timeout_ms: 120000
+server:
+  port: 8080
+transitions:
+  qa_review:
+    enabled: true
+    dispatch: QA Review
+    success: In Review
+    failure: Todo
+review_prompt: Review {{ issue.identifier }} carefully.
+---
+Implement {{ issue.identifier }}.
+""",
+        encoding="utf-8",
+    )
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": workflow_path,
+            "setup_mode": False,
+            "setup_error": None,
+        }
+    )
+
+    response = await server._handle_settings_get(request)
+
+    assert response.status == 200
+    assert 'name="qa_review_enabled"' in response.text
+    assert 'name="qa_review_enabled" value="1" checked' in response.text
+    assert 'name="qa_review_dispatch" value="QA Review"' in response.text
+    assert 'name="qa_review_failure" value="Todo"' in response.text
+    assert "Review {{ issue.identifier }} carefully." in response.text
 
 
 def test_render_dashboard_shows_recent_transitions() -> None:
