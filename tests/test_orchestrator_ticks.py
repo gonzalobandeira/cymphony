@@ -15,6 +15,7 @@ from cymphony.models import (
     Issue,
     LiveSession,
     PollingConfig,
+    PreflightConfig,
     ProblemRecord,
     RetryEntry,
     RunningEntry,
@@ -64,6 +65,13 @@ def _build_orchestrator() -> Orchestrator:
             dangerously_skip_permissions=True,
         ),
         server=ServerConfig(port=None),
+        preflight=PreflightConfig(
+            enabled=False,
+            required_clis=[],
+            required_env_vars=[],
+            expect_clean_worktree=False,
+            base_branch="main",
+        ),
     )
     workflow = WorkflowDefinition(config={}, prompt_template="")
     return Orchestrator(Path("WORKFLOW.md"), config, workflow)
