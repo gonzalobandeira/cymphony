@@ -202,6 +202,39 @@ src/cymphony/
   logging_.py     Structured logging helpers
 ```
 
+## Restart and Recovery
+
+Cymphony persists runtime state to a JSON file (`<workspace.root>/.cymphony_state.json`) so that restarts do not silently drop pending work.
+
+### What is persisted
+
+- **Retry queue** — issues waiting for retry timers, including attempt count, error info, and session metadata (tokens, plan, recent events)
+- **Skipped issues** — issues manually held out of dispatch by an operator
+- **Dispatch paused flag** — whether dispatching was paused before shutdown
+
+Running workers and their async tasks are *not* persisted — they cannot survive a process restart. On the next startup, any issue that was mid-execution will be picked up again by the normal poll cycle if it is still in an active state.
+
+### Startup reconciliation
+
+On startup, Cymphony loads the state file and reconciles each entry against the current Linear issue state:
+
+| Condition | Action |
+|-----------|--------|
+| Issue is now in a terminal state (Done, Cancelled, etc.) | Retry/skip entry is dropped |
+| Issue is no longer found in Linear | Retry entry is dropped |
+| Linear is unreachable | All entries are restored as-is; the next tick reconciles naturally |
+| State file is missing, corrupt, or has a version mismatch | Start fresh (no crash) |
+
+Restored retries fire immediately rather than waiting for their original timer — any backoff delay from a previous session is not carried over.
+
+### State file location
+
+The state file is stored at `<workspace.root>/.cymphony_state.json`. It is written atomically (temp file + rename) to prevent corruption on crash. To reset all persisted state, delete this file before starting Cymphony.
+
+### When state is saved
+
+State is persisted after every mutation (retry scheduled, issue skipped/requeued, worker completed, shutdown) and at the end of every poll tick as a safety net.
+
 ## Development
 
 ```bash
