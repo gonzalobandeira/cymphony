@@ -5,18 +5,15 @@ Trust posture (documented per spec §15.1):
   all tool calls are auto-approved. This is intended for trusted operator environments only.
   Operators running in untrusted or multi-tenant environments must review and tighten this posture.
 
-Adaptation mapping (spec §10 → claude CLI):
-  codex app-server subprocess         → claude --output-format stream-json --print "<prompt>"
-  thread/start → thread_id            → session_id from 'init' event
-  continuation turn on same thread    → claude --resume <session_id> --print "<guidance>"
-  turn/completed                      → result event with subtype "success"
-  turn/failed                         → result event with non-success subtype
-  turn timeout                        → asyncio.wait_for timeout
-  user input required                 → hard fail (result with subtype containing 'error' / input_required)
+Provider-agnostic runner interface:
+  BaseAgentRunner defines the contract: _build_command, _build_env, and _parse_event.
+  Each provider (Claude, Codex) implements these behind a common run_turn() method.
+  The orchestrator uses create_runner() to get the right implementation from config.
 """
 
 from __future__ import annotations
 
+import abc
 import asyncio
 import json
 import logging
@@ -30,7 +27,6 @@ from .models import (
     AgentEvent,
     AgentEventType,
     CodingAgentConfig,
-    WorkspaceError,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,12 +41,24 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class BaseAgentRunner:
-    """Shared subprocess runner logic for coding-agent providers."""
+# ---------------------------------------------------------------------------
+# Abstract runner interface
+# ---------------------------------------------------------------------------
+
+class BaseAgentRunner(abc.ABC):
+    """Provider-agnostic subprocess runner for coding agents.
+
+    Subclasses must implement:
+      - _build_command: construct the CLI invocation
+      - _parse_event: parse one stdout line into an AgentEvent
+    Optionally override:
+      - _build_env: customize subprocess environment
+    """
 
     def __init__(self, config: CodingAgentConfig) -> None:
         self._config = config
 
+    @abc.abstractmethod
     def _build_command(
         self,
         prompt: str,
@@ -59,11 +67,24 @@ class BaseAgentRunner:
         title: str,
     ) -> list[str]:
         """Build the provider CLI command list."""
-        raise NotImplementedError
 
     def _build_env(self) -> dict[str, str]:
         """Build the subprocess environment for this provider."""
         return dict(os.environ)
+
+    @abc.abstractmethod
+    def _parse_event(
+        self,
+        line: str,
+        current_session_id: str | None,
+        issue_id: str,
+        issue_identifier: str,
+        pid: int,
+    ) -> tuple[AgentEvent | None, str | None, bool | None, str | None]:
+        """Parse one stdout line into an AgentEvent.
+
+        Returns (event, new_session_id, turn_succeeded, turn_error).
+        """
 
     async def run_turn(
         self,
@@ -114,8 +135,8 @@ class BaseAgentRunner:
             )
         except OSError as exc:
             raise AgentError(
-                "codex_not_found",
-                f"Failed to launch claude CLI: {exc}",
+                "agent_not_found",
+                f"Failed to launch agent CLI: {exc}",
             ) from exc
 
         pid = proc.pid
@@ -189,7 +210,7 @@ class BaseAgentRunner:
         pid: int,
         on_event: OnAgentEvent,
     ) -> tuple[str | None, bool, str | None]:
-        """Stream stdout lines from claude CLI, emit events, return (session_id, succeeded, error).
+        """Stream stdout lines from agent CLI, emit events, return (session_id, succeeded, error).
 
         stdout carries protocol messages (stream-json).
         stderr is diagnostics only — logged but not parsed.
@@ -224,7 +245,7 @@ class BaseAgentRunner:
                     continue
 
                 line_str = line_bytes.decode(errors="replace")
-                event, sid, succeeded, err = _parse_stream_event(
+                event, sid, succeeded, err = self._parse_event(
                     line_str, session_id, issue_id, issue_identifier, pid
                 )
                 if sid:
@@ -260,6 +281,10 @@ class BaseAgentRunner:
         return session_id, turn_succeeded, turn_error
 
 
+# ---------------------------------------------------------------------------
+# Claude Code runner
+# ---------------------------------------------------------------------------
+
 class ClaudeAgentRunner(BaseAgentRunner):
     """Runs Claude Code as a subprocess and streams AgentEvents (spec §10)."""
 
@@ -294,11 +319,93 @@ class ClaudeAgentRunner(BaseAgentRunner):
         env.pop("CLAUDECODE", None)
         return env
 
+    def _parse_event(
+        self,
+        line: str,
+        current_session_id: str | None,
+        issue_id: str,
+        issue_identifier: str,
+        pid: int,
+    ) -> tuple[AgentEvent | None, str | None, bool | None, str | None]:
+        """Parse one stream-json line from Claude CLI."""
+        return _parse_claude_stream_event(
+            line, current_session_id, issue_id, issue_identifier, pid
+        )
 
+
+# ---------------------------------------------------------------------------
+# Codex runner (stub)
+# ---------------------------------------------------------------------------
+
+class CodexAgentRunner(BaseAgentRunner):
+    """Runs OpenAI Codex CLI as a subprocess and streams AgentEvents.
+
+    This is a stub implementation. The command building and event parsing
+    will be filled in once the Codex CLI protocol is finalized.
+    """
+
+    def _build_command(
+        self,
+        prompt: str,
+        workspace_path: str,
+        session_id: str | None,
+        title: str,
+    ) -> list[str]:
+        cmd = [self._config.command, "--quiet", prompt]
+        if self._config.dangerously_skip_permissions:
+            cmd.append("--full-auto")
+        return cmd
+
+    def _parse_event(
+        self,
+        line: str,
+        current_session_id: str | None,
+        issue_id: str,
+        issue_identifier: str,
+        pid: int,
+    ) -> tuple[AgentEvent | None, str | None, bool | None, str | None]:
+        """Parse one stdout line from Codex CLI.
+
+        Codex uses the same newline-delimited JSON protocol as Claude, so
+        we reuse the Claude parser for now. This will diverge once the Codex
+        output format is finalized.
+        """
+        return _parse_claude_stream_event(
+            line, current_session_id, issue_id, issue_identifier, pid
+        )
+
+
+# ---------------------------------------------------------------------------
+# Runner factory
+# ---------------------------------------------------------------------------
+
+_PROVIDERS: dict[str, type[BaseAgentRunner]] = {
+    "claude": ClaudeAgentRunner,
+    "codex": CodexAgentRunner,
+}
+
+
+def create_runner(config: CodingAgentConfig) -> BaseAgentRunner:
+    """Create the appropriate runner for the configured provider."""
+    provider = config.provider
+    runner_cls = _PROVIDERS.get(provider)
+    if runner_cls is None:
+        raise AgentError(
+            "unknown_provider",
+            f"Unknown agent provider {provider!r}. Supported: {', '.join(_PROVIDERS)}",
+        )
+    return runner_cls(config)
+
+
+# Keep backward-compatible alias
 AgentRunner = ClaudeAgentRunner
 
 
-def _parse_stream_event(
+# ---------------------------------------------------------------------------
+# Claude stream-json parser (private)
+# ---------------------------------------------------------------------------
+
+def _parse_claude_stream_event(
     line: str,
     current_session_id: str | None,
     issue_id: str,

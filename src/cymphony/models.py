@@ -98,13 +98,13 @@ class AgentConfig:
 
 @dataclass
 class CodingAgentConfig:
-    """Config for the coding agent (Claude Code CLI, called 'codex' in spec)."""
+    """Config for the coding agent subprocess."""
     command: str
     turn_timeout_ms: int
     read_timeout_ms: int
     stall_timeout_ms: int
-    # High-trust Claude Code specific
     dangerously_skip_permissions: bool
+    provider: str = "claude"
 
 
 @dataclass
