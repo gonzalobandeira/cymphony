@@ -47,6 +47,11 @@ transitions:
   # failure: null
   # blocked: null
   # cancelled: null
+  qa_review:
+    enabled: true
+    dispatch: QA Review
+    success: In Review
+    failure: Todo
 ---
 You are a senior software engineer working on the **Cymphony** project.
 

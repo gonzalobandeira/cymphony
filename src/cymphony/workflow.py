@@ -179,6 +179,66 @@ def render_plan_prompt(workflow: WorkflowDefinition, issue: Any) -> str:  # noqa
     return tmpl.render(issue=issue_dict).strip()
 
 
+_REVIEW_PROMPT_TEMPLATE = """\
+You are a senior QA reviewer for the **{{ issue.title }}** issue.
+
+## Issue
+
+**Title:** {{ issue.title }}
+**Identifier:** {{ issue.identifier }}
+**State:** {{ issue.state }}
+{% if issue.description %}
+**Description:**
+{{ issue.description }}
+{% endif %}
+{% if issue.comments %}
+
+**Comments:**
+{% for c in issue.comments %}
+- **{{ c.author }}** ({{ c.created_at }}): {{ c.body }}
+{% endfor %}
+{% endif %}
+
+## Review instructions
+
+You are running in **review mode**. Your job is to review the implementation — NOT to write new code.
+
+1. Read the issue description and any reviewer comments carefully.
+2. Explore the workspace: check the branch, recent commits, and changed files.
+3. Review the code changes for correctness, style, test coverage, and adherence to the issue requirements.
+4. If the implementation is acceptable, comment with your approval on the Linear issue using the create-linear-task skill or by updating the issue state.
+5. If changes are needed, leave a detailed comment on the Linear issue describing what must be fixed, then stop.
+
+Do NOT create new branches, push code, or open PRs. Your output is a review verdict only.
+"""
+
+
+def render_review_prompt(workflow: WorkflowDefinition, issue: Any) -> str:
+    """Render the QA review prompt for review-mode workers."""
+    # Use the review_prompt from workflow config if provided, otherwise use built-in template.
+    review_template = (workflow.config.get("review_prompt") or "").strip()
+    if not review_template:
+        review_template = _REVIEW_PROMPT_TEMPLATE
+
+    env = Environment(undefined=StrictUndefined, autoescape=False)
+    try:
+        tmpl = env.from_string(review_template)
+    except TemplateSyntaxError as exc:
+        raise WorkflowError(
+            "review_template_parse_error",
+            f"Review template syntax error: {exc}",
+        ) from exc
+
+    issue_dict = _issue_to_dict(issue)
+    try:
+        return tmpl.render(issue=issue_dict).strip()
+    except UndefinedError as exc:
+        raise WorkflowError(
+            "review_template_render_error",
+            f"Review template render error: {exc}",
+        ) from exc
+
+
 def _issue_to_dict(issue: Any) -> dict[str, Any]:
     """Recursively convert issue dataclass to template-friendly dict."""
     from .models import Issue, BlockerRef
