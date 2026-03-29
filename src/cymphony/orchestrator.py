@@ -1406,6 +1406,11 @@ class Orchestrator:
                 # Use attempt=None for continuation turns (spec §7.1)
                 attempt = None
 
+            # Capture the review result before after_run hooks run. Hooks may
+            # clean workspace files as part of post-processing.
+            if is_review:
+                entry.review_result = parse_review_result(workspace.path)
+
         finally:
             # Run after_run hook as an independent task so that a concurrent
             # reconciler cancel() on this worker task cannot interrupt it.
@@ -1614,8 +1619,11 @@ class Orchestrator:
     ) -> str | None:
         """Map a completed review run to the configured QA transition target."""
         qa = self._config.transitions.qa_review
-        workspace_path = str(WorkspaceManager(self._config).get_path(identifier))
-        result = parse_review_result(workspace_path)
+        if entry.review_result is not None:
+            result = entry.review_result
+        else:
+            workspace_path = str(WorkspaceManager(self._config).get_path(identifier))
+            result = parse_review_result(workspace_path)
 
         if result.decision is None:
             self._record_problem(

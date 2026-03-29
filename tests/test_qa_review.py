@@ -27,6 +27,8 @@ from cymphony.models import (
     PollingConfig,
     PreflightConfig,
     QAReviewConfig,
+    ReviewDecision,
+    ReviewResult,
     RetryEntry,
     RunningEntry,
     RunStatus,
@@ -419,6 +421,41 @@ class TestWorkerDoneTransitions:
         assert transitions == [(issue.id, "Todo")]
         assert len(orch._state.recent_problems) == 1
         assert orch._state.recent_problems[0].kind == "qa_review_parse_error"
+
+    @pytest.mark.asyncio
+    async def test_review_uses_cached_result_after_file_is_removed(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch = _build_orchestrator()
+        issue = _build_issue(state="QA Review", identifier="BAP-202")
+        entry = _build_running_entry(issue, mode=ExecutionMode.REVIEW)
+        entry.review_result = ReviewResult(
+            decision=ReviewDecision.PASS,
+            summary="Cached before after_run",
+        )
+        orch._state.running[issue.id] = entry
+
+        async def noop():
+            pass
+
+        task = asyncio.ensure_future(noop())
+        await task
+        entry.task = task
+
+        transitions: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            orch, "_transition_issue_state",
+            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+        )
+        monkeypatch.setattr(
+            orch, "_schedule_retry",
+            AsyncMock(),
+        )
+
+        await orch._on_worker_done(issue.id, issue.identifier, entry, task)
+
+        assert transitions == [(issue.id, "In Review")]
+        assert not orch._state.recent_problems
 
     @pytest.mark.asyncio
     async def test_build_success_uses_top_level_success_target(
