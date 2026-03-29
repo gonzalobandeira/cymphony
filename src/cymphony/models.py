@@ -141,6 +141,14 @@ class TransitionsConfig:
     blocked: str | None = None
     cancelled: str | None = None
 
+    def resolve(self, event: str) -> str | None:
+        """Look up the target state for a lifecycle event.
+
+        Returns the configured state name, or ``None`` if no transition
+        is configured (meaning the orchestrator should skip the state change).
+        """
+        return getattr(self, event, None)
+
 
 @dataclass
 class ServiceConfig:

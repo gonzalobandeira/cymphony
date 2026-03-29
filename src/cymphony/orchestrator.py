@@ -908,7 +908,7 @@ class Orchestrator:
 
     def _maybe_transition_blocked_issue(self, issue: Issue) -> None:
         """Apply the configured blocked transition when an issue is gated by dependencies."""
-        blocked_state = self._config.transitions.blocked
+        blocked_state = self._config.transitions.resolve("blocked")
         if not blocked_state:
             return
         if issue.state.lower() == blocked_state.lower():
@@ -937,8 +937,8 @@ class Orchestrator:
         if issue.id in self._state.skipped:
             return False
 
-        # Blocker check for active work that should not run with unresolved dependencies.
-        if state_lower in {"todo", "in progress"} and self._unresolved_blockers(issue):
+        # Blocker check: do not dispatch issues with unresolved dependencies.
+        if self._unresolved_blockers(issue):
             return False
 
         return True
@@ -1018,8 +1018,9 @@ class Orchestrator:
             issue.id, issue.identifier,
             attempt=attempt,
         )
-        if self._config.transitions.dispatch:
-            self._transition_issue_state_background(issue.id, self._config.transitions.dispatch)
+        target = self._config.transitions.resolve("dispatch")
+        if target:
+            self._transition_issue_state_background(issue.id, target)
 
     # ------------------------------------------------------------------
     # Worker (spec §16.5)
@@ -1300,13 +1301,14 @@ class Orchestrator:
                 "worker_cancelled",
                 issue_id, identifier,
             )
-            if self._config.transitions.cancelled:
-                self._transition_issue_state_background(issue_id, self._config.transitions.cancelled)
+            target = self._config.transitions.resolve("cancelled")
+            if target:
+                self._transition_issue_state_background(issue_id, target)
             return
 
         if exc is None:
-            # Normal exit → move to "In Review" if still in an active state,
-            # then schedule continuation retry (spec §8.4)
+            # Normal exit → apply configured success transition if still in
+            # an active state, then schedule continuation retry (spec §8.4)
             entry.status = RunStatus.SUCCEEDED
             self._state.completed.add(issue_id)
             issue_log(
@@ -1314,10 +1316,11 @@ class Orchestrator:
                 "worker_exited_normal",
                 issue_id, identifier,
             )
-            if self._config.transitions.success:
+            target = self._config.transitions.resolve("success")
+            if target:
                 active_lower = [s.lower() for s in self._config.tracker.active_states]
                 if entry.issue.state.lower() in active_lower:
-                    await self._transition_issue_state(issue_id, self._config.transitions.success)
+                    await self._transition_issue_state(issue_id, target)
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=1,
@@ -1343,8 +1346,9 @@ class Orchestrator:
                 error=error_str,
                 run_status=entry.status.value,
             )
-            if self._config.transitions.failure:
-                self._transition_issue_state_background(issue_id, self._config.transitions.failure)
+            target = self._config.transitions.resolve("failure")
+            if target:
+                self._transition_issue_state_background(issue_id, target)
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=next_attempt,

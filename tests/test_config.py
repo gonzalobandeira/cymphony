@@ -145,3 +145,25 @@ def test_transitions_partial_override() -> None:
     assert config.transitions.dispatch == "In Progress"
     assert config.transitions.success == "Completed"
     assert config.transitions.failure is None
+
+
+def test_transitions_resolve_returns_configured_state() -> None:
+    from cymphony.models import TransitionsConfig
+    t = TransitionsConfig(dispatch="Working", success="Done", failure="Failed")
+    assert t.resolve("dispatch") == "Working"
+    assert t.resolve("success") == "Done"
+    assert t.resolve("failure") == "Failed"
+
+
+def test_transitions_resolve_returns_none_for_unconfigured_event() -> None:
+    from cymphony.models import TransitionsConfig
+    t = TransitionsConfig()
+    assert t.resolve("failure") is None
+    assert t.resolve("blocked") is None
+    assert t.resolve("cancelled") is None
+
+
+def test_transitions_resolve_returns_none_for_unknown_event() -> None:
+    from cymphony.models import TransitionsConfig
+    t = TransitionsConfig()
+    assert t.resolve("nonexistent") is None
