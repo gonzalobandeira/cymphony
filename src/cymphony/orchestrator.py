@@ -941,11 +941,20 @@ class Orchestrator:
         asyncio.create_task(_do())
 
     async def _transition_issue_state(
-        self, issue_id: str, state_name: str, *, trigger: str = "unknown",
+        self,
+        issue_id: str,
+        state_name: str,
+        *,
+        trigger: str = "unknown",
+        issue_identifier: str | None = None,
+        from_state: str | None = None,
     ) -> bool:
         """Move an issue to the named workflow state. Returns True on success."""
-        identifier = self._resolve_identifier(issue_id)
-        from_state = self._resolve_current_state(issue_id)
+        identifier = issue_identifier or self._resolve_identifier(issue_id)
+        current_state = (
+            from_state if issue_identifier is not None or from_state is not None
+            else self._resolve_current_state(issue_id)
+        )
         try:
             client = LinearClient(self._config.tracker)
             team_id = await client.fetch_issue_team_id(issue_id)
@@ -955,7 +964,7 @@ class Orchestrator:
                     f"state={state_name!r} reason=team_id_not_found"
                 )
                 self._record_transition(
-                    issue_id, identifier, from_state, state_name, trigger, success=False,
+                    issue_id, identifier, current_state, state_name, trigger, success=False,
                 )
                 return False
 
@@ -969,7 +978,7 @@ class Orchestrator:
                     f"state={state_name!r} team_id={team_id} reason=state_id_not_found"
                 )
                 self._record_transition(
-                    issue_id, identifier, from_state, state_name, trigger, success=False,
+                    issue_id, identifier, current_state, state_name, trigger, success=False,
                 )
                 return False
 
@@ -981,7 +990,7 @@ class Orchestrator:
                 f"team_id={team_id}"
             )
             self._record_transition(
-                issue_id, identifier, from_state, state_name, trigger, success=True,
+                issue_id, identifier, current_state, state_name, trigger, success=True,
             )
             return True
         except Exception as exc:
@@ -996,16 +1005,28 @@ class Orchestrator:
                 f"state={state_name!r} error={exc}"
             )
             self._record_transition(
-                issue_id, identifier, from_state, state_name, trigger, success=False,
+                issue_id, identifier, current_state, state_name, trigger, success=False,
             )
             return False
 
     def _transition_issue_state_background(
-        self, issue_id: str, state_name: str, *, trigger: str = "unknown",
+        self,
+        issue_id: str,
+        state_name: str,
+        *,
+        trigger: str = "unknown",
+        issue_identifier: str | None = None,
+        from_state: str | None = None,
     ) -> None:
         """Schedule a state transition without blocking the caller."""
         asyncio.create_task(
-            self._transition_issue_state(issue_id, state_name, trigger=trigger)
+            self._transition_issue_state(
+                issue_id,
+                state_name,
+                trigger=trigger,
+                issue_identifier=issue_identifier,
+                from_state=from_state,
+            )
         )
 
     def _resolve_identifier(self, issue_id: str) -> str:
@@ -1466,7 +1487,13 @@ class Orchestrator:
             )
             target = self._config.transitions.resolve("cancelled")
             if target:
-                self._transition_issue_state_background(issue_id, target, trigger="cancelled")
+                self._transition_issue_state_background(
+                    issue_id,
+                    target,
+                    trigger="cancelled",
+                    issue_identifier=identifier,
+                    from_state=entry.issue.state,
+                )
             return
 
         if exc is None:
@@ -1483,7 +1510,13 @@ class Orchestrator:
             if target:
                 active_lower = [s.lower() for s in self._config.tracker.active_states]
                 if entry.issue.state.lower() in active_lower:
-                    await self._transition_issue_state(issue_id, target, trigger="success")
+                    await self._transition_issue_state(
+                        issue_id,
+                        target,
+                        trigger="success",
+                        issue_identifier=identifier,
+                        from_state=entry.issue.state,
+                    )
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=1,
@@ -1511,7 +1544,13 @@ class Orchestrator:
             )
             target = self._config.transitions.resolve("failure")
             if target:
-                self._transition_issue_state_background(issue_id, target, trigger="failure")
+                self._transition_issue_state_background(
+                    issue_id,
+                    target,
+                    trigger="failure",
+                    issue_identifier=identifier,
+                    from_state=entry.issue.state,
+                )
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=next_attempt,

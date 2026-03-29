@@ -800,6 +800,82 @@ async def test_on_worker_done_waits_for_in_review_transition_before_retry(
 
 
 @pytest.mark.asyncio
+async def test_on_worker_done_preserves_transition_metadata_after_running_entry_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    issue = _build_issue(state="In Progress")
+    entry = RunningEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        issue=issue,
+        task=None,
+        session=LiveSession(
+            session_id=None,
+            pid=None,
+            last_event=None,
+            last_event_timestamp=None,
+            last_message=None,
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            last_reported_input_tokens=0,
+            last_reported_output_tokens=0,
+            last_reported_total_tokens=0,
+            turn_count=0,
+        ),
+        retry_attempt=None,
+        started_at=datetime.now(timezone.utc),
+    )
+    orchestrator._state.running[issue.id] = entry
+
+    class FakeLinearClient:
+        def __init__(self, _config: object) -> None:
+            pass
+
+        async def fetch_issue_team_id(self, issue_id: str) -> str:
+            assert issue_id == issue.id
+            return "team-1"
+
+        async def fetch_team_workflow_state_id(self, team_id: str, state_name: str) -> str:
+            assert team_id == "team-1"
+            assert state_name == "In Review"
+            return "state-1"
+
+        async def set_issue_state(self, issue_id: str, state_id: str) -> None:
+            assert issue_id == issue.id
+            assert state_id == "state-1"
+
+    async def fake_schedule_retry(
+        issue_id: str,
+        identifier: str,
+        attempt: int,
+        delay_ms: float | None = None,
+        error: str | None = None,
+        entry: RunningEntry | None = None,
+    ) -> None:
+        return None
+
+    async def fake_worker() -> None:
+        return None
+
+    monkeypatch.setattr("cymphony.orchestrator.LinearClient", FakeLinearClient)
+    monkeypatch.setattr(orchestrator, "_schedule_retry", fake_schedule_retry)
+
+    task = asyncio.create_task(fake_worker())
+    await task
+    await orchestrator._on_worker_done(issue.id, issue.identifier, entry, task)
+
+    assert len(orchestrator._state.transition_history) == 1
+    record = orchestrator._state.transition_history[0]
+    assert record.issue_identifier == issue.identifier
+    assert record.from_state == "In Progress"
+    assert record.to_state == "In Review"
+    assert record.trigger == "success"
+    assert record.success is True
+
+
+@pytest.mark.asyncio
 async def test_on_worker_done_uses_custom_success_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
