@@ -208,3 +208,13 @@ pytest
 ```
 
 Dependencies: `pyyaml`, `jinja2`, `aiohttp`, `watchdog`. Python ≥ 3.11.
+
+## Dashboard Smoke Test
+
+For a live operator pass against a real orchestrator process without invoking the real Claude CLI, use:
+
+```bash
+CYMPHONY_FAKE_CLAUDE_MODE=success ./scripts/run_dashboard_smoke_test.sh
+```
+
+The detailed checklist lives in [`docs/dashboard-smoke-test.md`](docs/dashboard-smoke-test.md).

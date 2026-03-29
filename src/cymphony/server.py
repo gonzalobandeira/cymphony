@@ -449,7 +449,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     summary = groups["summary"]
     totals = groups["totals"]
     generated_at = _format_timestamp(groups.get("generated_at"))
-    now = datetime.now(timezone.utc)
+    now = _now_utc()
     controls = groups.get("controls", {})
     dispatch_paused = bool(controls.get("dispatch_paused"))
     recent_controls = list(controls.get("recent_actions", []))
