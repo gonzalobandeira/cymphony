@@ -958,7 +958,6 @@ def _render_dashboard(groups: dict[str, object]) -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="15">
 <title>Cymphony Operator Dashboard</title>
 <style>
   :root {{
@@ -967,8 +966,8 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     --panel: rgba(255, 252, 246, 0.92);
     --panel-strong: #fffaf0;
     --ink: #1f2933;
-    --muted: #5f6c72;
-    --line: rgba(31, 41, 51, 0.12);
+    --muted: #4a5568;
+    --line: rgba(31, 41, 51, 0.22);
     --good: #166534;
     --warn: #b45309;
     --danger: #b91c1c;
@@ -1021,7 +1020,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     justify-content: center;
   }}
   .meta-label {{
-    font-size: 0.78rem;
+    font-size: 0.84rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--muted);
@@ -1122,7 +1121,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   .operator-meta-label {{
     color: var(--muted);
-    font-size: 0.76rem;
+    font-size: 0.84rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     font-family: "Avenir Next", "Segoe UI", sans-serif;
@@ -1197,7 +1196,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     background: rgba(15, 118, 110, 0.1);
     color: var(--accent);
     font-family: "Avenir Next", "Segoe UI", sans-serif;
-    font-size: 0.78rem;
+    font-size: 0.84rem;
   }}
   .event-list {{
     margin: 0;
@@ -1323,7 +1322,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   th {{
     color: var(--muted);
-    font-size: 0.76rem;
+    font-size: 0.82rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
   }}
@@ -1363,6 +1362,60 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     }}
   }}
 </style>
+<script>
+window.cym = {{
+  _refreshTimer: null,
+  _INTERVAL: 15000,
+
+  /** POST an action, then refresh the dashboard content in place. */
+  post: function(url, body) {{
+    fetch(url, {{
+      method: "POST",
+      headers: {{"Content-Type": "application/x-www-form-urlencoded"}},
+      body: body || ""
+    }}).then(function() {{ cym.refresh(); }});
+  }},
+
+  killApp: function() {{
+    var armed = document.getElementById("kill-arm");
+    if (!armed || !armed.checked) return;
+    cym.post("/api/v1/app/kill", "confirm_kill=true");
+  }},
+
+  /** Fetch the dashboard HTML and swap <main> content in place. */
+  refresh: function() {{
+    fetch("/", {{headers: {{"Accept": "text/html"}}}}).then(function(r) {{
+      return r.text();
+    }}).then(function(html) {{
+      var parser = new DOMParser();
+      var doc = parser.parseFromString(html, "text/html");
+      var fresh = doc.querySelector("main");
+      var current = document.querySelector("main");
+      if (!fresh || !current) return;
+
+      // Remember which <details> elements are open (by index).
+      var openSet = new Set();
+      current.querySelectorAll("details").forEach(function(d, i) {{
+        if (d.open) openSet.add(i);
+      }});
+
+      // Swap content.
+      current.innerHTML = fresh.innerHTML;
+
+      // Restore open state.
+      current.querySelectorAll("details").forEach(function(d, i) {{
+        if (openSet.has(i)) d.open = true;
+      }});
+    }}).catch(function() {{}});
+  }},
+
+  startAutoRefresh: function() {{
+    if (cym._refreshTimer) clearInterval(cym._refreshTimer);
+    cym._refreshTimer = setInterval(cym.refresh, cym._INTERVAL);
+  }}
+}};
+document.addEventListener("DOMContentLoaded", cym.startAutoRefresh);
+</script>
 </head>
 <body>
 <main>
@@ -1429,7 +1482,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
 
   <p class="footer">
     <a href="/api/v1/state">JSON state</a>
-    · Auto-refresh every 15 seconds
+    · Live refresh every 15 seconds
     · Input tokens {totals.get("input_tokens", 0):,}
     · Output tokens {totals.get("output_tokens", 0):,}
   </p>
@@ -1754,9 +1807,8 @@ def _post_button(action: str, label: str) -> str:
     safe_action = html.escape(action, quote=True)
     safe_label = html.escape(label)
     return (
-        f"<form method='post' action='{safe_action}'>"
-        f"<button type='submit'>{safe_label}</button>"
-        "</form>"
+        f"<button type='button' onclick=\"cym.post('{safe_action}')\">"
+        f"{safe_label}</button>"
     )
 
 
@@ -1765,13 +1817,15 @@ def _kill_app_switch(shutdown_requested: bool) -> str:
     disabled = " disabled" if shutdown_requested else ""
     button_label = "Kill Requested" if shutdown_requested else "Kill App"
     return (
-        "<form method='post' action='/api/v1/app/kill' class='switch-form'>"
+        "<div class='switch-form'>"
         "<label class='switch-label'>"
-        f"<input type='checkbox' name='confirm_kill' value='true'{checked}{disabled}>"
+        f"<input type='checkbox' id='kill-arm' value='true'{checked}{disabled}>"
         "<span>Arm kill</span>"
         "</label>"
-        f"<button type='submit' class='danger-button'{disabled}>{escape(button_label)}</button>"
-        "</form>"
+        f"<button type='button' class='danger-button'{disabled} "
+        "onclick=\"cym.killApp()\">"
+        f"{escape(button_label)}</button>"
+        "</div>"
     )
 
 
