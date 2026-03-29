@@ -542,18 +542,12 @@ class Orchestrator:
         # Part A: stall detection
         stall_timeout_ms = self._config.coding_agent.stall_timeout_ms
         if stall_timeout_ms > 0:
-            now_ms = _monotonic_ms()
+            now_utc = _now_utc()
             stalled: list[str] = []
             for issue_id, entry in list(self._state.running.items()):
                 last_event_ts = entry.session.last_event_timestamp
-                if last_event_ts:
-                    elapsed_ms = (
-                        _now_utc() - last_event_ts
-                    ).total_seconds() * 1000.0
-                else:
-                    elapsed_ms = (
-                        _now_utc() - entry.started_at
-                    ).total_seconds() * 1000.0
+                ref = last_event_ts if last_event_ts else entry.started_at
+                elapsed_ms = (now_utc - ref).total_seconds() * 1000.0
 
                 if elapsed_ms > stall_timeout_ms:
                     stalled.append(issue_id)
