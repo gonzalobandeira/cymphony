@@ -213,6 +213,30 @@ Do NOT create new branches, push code, or open PRs. Your output is a review verd
 """
 
 
+_REVIEW_DECISION_CONTRACT = """
+
+## Decision format (REQUIRED)
+
+After completing your review, you MUST write a file called `REVIEW_RESULT.json` at the
+workspace root with your decision. The file must contain valid JSON with this exact structure:
+
+**If the changes look good:**
+```json
+{"decision": "pass", "summary": "Brief explanation of why the changes are acceptable."}
+```
+
+**If changes are needed:**
+```json
+{"decision": "changes_requested", "summary": "Brief explanation of what needs to change."}
+```
+
+The `decision` field is REQUIRED and must be exactly `"pass"` or `"changes_requested"`.
+The `summary` field is optional but recommended.
+
+Do NOT write any other value for `decision`. Do NOT skip writing the file.
+"""
+
+
 def render_review_prompt(workflow: WorkflowDefinition, issue: Any) -> str:
     """Render the QA review prompt for review-mode workers."""
     # Use the review_prompt from workflow config if provided, otherwise use built-in template.
@@ -231,12 +255,13 @@ def render_review_prompt(workflow: WorkflowDefinition, issue: Any) -> str:
 
     issue_dict = _issue_to_dict(issue)
     try:
-        return tmpl.render(issue=issue_dict).strip()
+        rendered = tmpl.render(issue=issue_dict).strip()
     except UndefinedError as exc:
         raise WorkflowError(
             "review_template_render_error",
             f"Review template render error: {exc}",
         ) from exc
+    return f"{rendered}\n{_REVIEW_DECISION_CONTRACT}".strip()
 
 
 def _issue_to_dict(issue: Any) -> dict[str, Any]:

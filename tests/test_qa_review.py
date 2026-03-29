@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -37,6 +38,7 @@ from cymphony.models import (
     WorkspaceConfig,
 )
 from cymphony.orchestrator import Orchestrator
+from cymphony.review import REVIEW_RESULT_FILENAME
 from cymphony.workflow import render_review_prompt
 
 
@@ -163,6 +165,15 @@ def _build_running_entry(
         retry_attempt=None,
         started_at=datetime.now(timezone.utc),
         mode=mode,
+    )
+
+
+def _write_review_result(orch: Orchestrator, identifier: str, decision: str, summary: str) -> None:
+    workspace_dir = Path(orch._config.workspace.root) / identifier
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    (workspace_dir / REVIEW_RESULT_FILENAME).write_text(
+        json.dumps({"decision": decision, "summary": summary}),
+        encoding="utf-8",
     )
 
 
@@ -294,6 +305,7 @@ class TestWorkerDoneTransitions:
         task = asyncio.ensure_future(noop())
         await task  # let it complete
         entry.task = task
+        _write_review_result(orch, issue.identifier, "pass", "Looks good")
 
         transitions: list[tuple[str, str]] = []
         monkeypatch.setattr(
@@ -311,7 +323,7 @@ class TestWorkerDoneTransitions:
         assert transitions == [(issue.id, "In Review")]
 
     @pytest.mark.asyncio
-    async def test_review_failure_uses_qa_review_failure_target(
+    async def test_review_process_failure_uses_qa_review_failure_target(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         orch = _build_orchestrator()
@@ -344,6 +356,69 @@ class TestWorkerDoneTransitions:
 
         # Should use qa_review.failure = "Todo"
         assert transitions == [(issue.id, "Todo")]
+
+    @pytest.mark.asyncio
+    async def test_review_changes_requested_uses_qa_review_failure_target(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch = _build_orchestrator()
+        issue = _build_issue(state="QA Review")
+        entry = _build_running_entry(issue, mode=ExecutionMode.REVIEW)
+        orch._state.running[issue.id] = entry
+
+        async def noop():
+            pass
+
+        task = asyncio.ensure_future(noop())
+        await task
+        entry.task = task
+        _write_review_result(orch, issue.identifier, "changes_requested", "Needs tests")
+
+        transitions: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            orch, "_transition_issue_state",
+            AsyncMock(side_effect=lambda iid, state: transitions.append((iid, state))),
+        )
+        monkeypatch.setattr(
+            orch, "_schedule_retry",
+            AsyncMock(),
+        )
+
+        await orch._on_worker_done(issue.id, issue.identifier, entry, task)
+
+        assert transitions == [(issue.id, "Todo")]
+
+    @pytest.mark.asyncio
+    async def test_review_missing_result_file_falls_back_to_failure_target(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch = _build_orchestrator()
+        issue = _build_issue(state="QA Review", identifier="BAP-201")
+        entry = _build_running_entry(issue, mode=ExecutionMode.REVIEW)
+        orch._state.running[issue.id] = entry
+
+        async def noop():
+            pass
+
+        task = asyncio.ensure_future(noop())
+        await task
+        entry.task = task
+
+        transitions: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            orch, "_transition_issue_state",
+            AsyncMock(side_effect=lambda iid, state: transitions.append((iid, state))),
+        )
+        monkeypatch.setattr(
+            orch, "_schedule_retry",
+            AsyncMock(),
+        )
+
+        await orch._on_worker_done(issue.id, issue.identifier, entry, task)
+
+        assert transitions == [(issue.id, "Todo")]
+        assert len(orch._state.recent_problems) == 1
+        assert orch._state.recent_problems[0].kind == "qa_review_parse_error"
 
     @pytest.mark.asyncio
     async def test_build_success_uses_top_level_success_target(
@@ -388,6 +463,7 @@ class TestRenderReviewPrompt:
         prompt = render_review_prompt(workflow, issue)
         assert "review mode" in prompt.lower()
         assert "Test issue" in prompt
+        assert "REVIEW_RESULT.json" in prompt
 
     def test_custom_review_prompt_from_config(self) -> None:
         workflow = WorkflowDefinition(
@@ -396,7 +472,8 @@ class TestRenderReviewPrompt:
         )
         issue = _build_issue()
         prompt = render_review_prompt(workflow, issue)
-        assert prompt == "Custom review for Test issue"
+        assert "Custom review for Test issue" in prompt
+        assert "REVIEW_RESULT.json" in prompt
 
 
 # ---------------------------------------------------------------------------

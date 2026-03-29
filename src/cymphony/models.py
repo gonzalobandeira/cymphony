@@ -184,6 +184,25 @@ class ServiceConfig:
 
 
 # ---------------------------------------------------------------------------
+# QA review decision contract
+# ---------------------------------------------------------------------------
+
+class ReviewDecision(str, Enum):
+    """Machine-readable outcome of a QA review run."""
+    PASS = "pass"
+    CHANGES_REQUESTED = "changes_requested"
+
+
+@dataclass
+class ReviewResult:
+    """Parsed result from a QA review agent run."""
+    decision: ReviewDecision | None
+    summary: str | None = None
+    error: str | None = None
+    raw_output: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # Workspace model
 # ---------------------------------------------------------------------------
 

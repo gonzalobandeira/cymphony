@@ -24,6 +24,7 @@ from .models import (
     LiveSession,
     OrchestratorState,
     ProblemRecord,
+    ReviewDecision,
     RetryEntry,
     RunningEntry,
     RunStatus,
@@ -33,6 +34,7 @@ from .models import (
     WorkflowError,
 )
 from .preflight import PreflightResult, run_preflight_checks
+from .review import parse_review_result
 from .state import StateManager
 from .workflow import WorkflowWatcher, load_workflow, render_plan_prompt, render_prompt, render_review_prompt
 from .workspace import WorkspaceManager
@@ -1546,7 +1548,7 @@ class Orchestrator:
                 mode=entry.mode.value,
             )
             if is_review:
-                target = qa.success if qa.enabled else None
+                target = self._resolve_review_completion_target(issue_id, identifier, entry)
             else:
                 target = self._config.transitions.resolve("success")
             if target:
@@ -1603,6 +1605,44 @@ class Orchestrator:
                 error=error_str,
                 entry=entry,
             )
+
+    def _resolve_review_completion_target(
+        self,
+        issue_id: str,
+        identifier: str,
+        entry: RunningEntry,
+    ) -> str | None:
+        """Map a completed review run to the configured QA transition target."""
+        qa = self._config.transitions.qa_review
+        workspace_path = str(WorkspaceManager(self._config).get_path(identifier))
+        result = parse_review_result(workspace_path)
+
+        if result.decision is None:
+            self._record_problem(
+                kind="qa_review_parse_error",
+                summary="QA review result could not be parsed",
+                detail=result.error or "unknown parse error",
+                issue_id=issue_id,
+                issue_identifier=identifier,
+            )
+            issue_log(
+                logger, logging.WARNING,
+                "qa_review_parse_failed",
+                issue_id, identifier,
+                error=result.error,
+            )
+            return qa.failure if qa.enabled else None
+
+        issue_log(
+            logger, logging.INFO,
+            "qa_review_decision",
+            issue_id, identifier,
+            decision=result.decision.value,
+            summary=result.summary,
+        )
+        if result.decision == ReviewDecision.PASS:
+            return qa.success if qa.enabled else None
+        return qa.failure if qa.enabled else None
 
     # ------------------------------------------------------------------
     # Retry scheduling (spec §8.4)
