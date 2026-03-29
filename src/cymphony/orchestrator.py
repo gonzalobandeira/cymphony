@@ -27,6 +27,7 @@ from .models import (
     RunningEntry,
     RunStatus,
     SkippedEntry,
+    TransitionRecord,
     WorkflowDefinition,
     WorkflowError,
 )
@@ -52,6 +53,7 @@ def _monotonic_ms() -> float:
 _CONTINUATION_RETRY_DELAY_MS = 1000.0
 _MAX_RECENT_PROBLEMS = 25
 _CONTROL_HISTORY_LIMIT = 50
+_MAX_TRANSITION_HISTORY = 50
 
 
 class Orchestrator:
@@ -938,8 +940,12 @@ class Orchestrator:
 
         asyncio.create_task(_do())
 
-    async def _transition_issue_state(self, issue_id: str, state_name: str) -> bool:
+    async def _transition_issue_state(
+        self, issue_id: str, state_name: str, *, trigger: str = "unknown",
+    ) -> bool:
         """Move an issue to the named workflow state. Returns True on success."""
+        identifier = self._resolve_identifier(issue_id)
+        from_state = self._resolve_current_state(issue_id)
         try:
             client = LinearClient(self._config.tracker)
             team_id = await client.fetch_issue_team_id(issue_id)
@@ -947,6 +953,9 @@ class Orchestrator:
                 logger.warning(
                     f"action=state_transition_skipped issue_id={issue_id} "
                     f"state={state_name!r} reason=team_id_not_found"
+                )
+                self._record_transition(
+                    issue_id, identifier, from_state, state_name, trigger, success=False,
                 )
                 return False
 
@@ -959,6 +968,9 @@ class Orchestrator:
                     f"action=state_transition_skipped issue_id={issue_id} "
                     f"state={state_name!r} team_id={team_id} reason=state_id_not_found"
                 )
+                self._record_transition(
+                    issue_id, identifier, from_state, state_name, trigger, success=False,
+                )
                 return False
 
             if cache_key not in self._state_id_cache:
@@ -967,6 +979,9 @@ class Orchestrator:
             logger.info(
                 f"action=issue_state_set issue_id={issue_id} state={state_name!r} "
                 f"team_id={team_id}"
+            )
+            self._record_transition(
+                issue_id, identifier, from_state, state_name, trigger, success=True,
             )
             return True
         except Exception as exc:
@@ -980,11 +995,59 @@ class Orchestrator:
                 f"action=state_transition_failed issue_id={issue_id} "
                 f"state={state_name!r} error={exc}"
             )
+            self._record_transition(
+                issue_id, identifier, from_state, state_name, trigger, success=False,
+            )
             return False
 
-    def _transition_issue_state_background(self, issue_id: str, state_name: str) -> None:
+    def _transition_issue_state_background(
+        self, issue_id: str, state_name: str, *, trigger: str = "unknown",
+    ) -> None:
         """Schedule a state transition without blocking the caller."""
-        asyncio.create_task(self._transition_issue_state(issue_id, state_name))
+        asyncio.create_task(
+            self._transition_issue_state(issue_id, state_name, trigger=trigger)
+        )
+
+    def _resolve_identifier(self, issue_id: str) -> str:
+        """Best-effort lookup of issue identifier from running/retry state."""
+        entry = self._state.running.get(issue_id)
+        if entry:
+            return entry.identifier
+        retry = self._state.retry_attempts.get(issue_id)
+        if retry:
+            return retry.identifier
+        return issue_id
+
+    def _resolve_current_state(self, issue_id: str) -> str | None:
+        """Best-effort lookup of the issue's current Linear state."""
+        entry = self._state.running.get(issue_id)
+        if entry:
+            return entry.issue.state
+        return None
+
+    def _record_transition(
+        self,
+        issue_id: str,
+        identifier: str,
+        from_state: str | None,
+        to_state: str,
+        trigger: str,
+        *,
+        success: bool,
+    ) -> None:
+        self._state.transition_history.insert(
+            0,
+            TransitionRecord(
+                timestamp=_now_utc(),
+                issue_id=issue_id,
+                issue_identifier=identifier,
+                from_state=from_state,
+                to_state=to_state,
+                trigger=trigger,
+                success=success,
+            ),
+        )
+        del self._state.transition_history[_MAX_TRANSITION_HISTORY:]
 
     # ------------------------------------------------------------------
     # Dispatch (spec §8.2, §16.4)
@@ -1014,7 +1077,7 @@ class Orchestrator:
         if issue.state.lower() == blocked_state.lower():
             return
         if self._unresolved_blockers(issue):
-            self._transition_issue_state_background(issue.id, blocked_state)
+            self._transition_issue_state_background(issue.id, blocked_state, trigger="blocked")
 
     def _is_dispatch_eligible(self, issue: Issue) -> bool:
         """Check non-slot dispatch eligibility (spec §8.2)."""
@@ -1120,7 +1183,7 @@ class Orchestrator:
         )
         target = self._config.transitions.resolve("dispatch")
         if target:
-            self._transition_issue_state_background(issue.id, target)
+            self._transition_issue_state_background(issue.id, target, trigger="dispatch")
 
     # ------------------------------------------------------------------
     # Worker (spec §16.5)
@@ -1403,7 +1466,7 @@ class Orchestrator:
             )
             target = self._config.transitions.resolve("cancelled")
             if target:
-                self._transition_issue_state_background(issue_id, target)
+                self._transition_issue_state_background(issue_id, target, trigger="cancelled")
             return
 
         if exc is None:
@@ -1420,7 +1483,7 @@ class Orchestrator:
             if target:
                 active_lower = [s.lower() for s in self._config.tracker.active_states]
                 if entry.issue.state.lower() in active_lower:
-                    await self._transition_issue_state(issue_id, target)
+                    await self._transition_issue_state(issue_id, target, trigger="success")
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=1,
@@ -1448,7 +1511,7 @@ class Orchestrator:
             )
             target = self._config.transitions.resolve("failure")
             if target:
-                self._transition_issue_state_background(issue_id, target)
+                self._transition_issue_state_background(issue_id, target, trigger="failure")
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=next_attempt,
@@ -1775,6 +1838,29 @@ class Orchestrator:
             "rate_limits": self._state.codex_rate_limits,
             "preflight_errors": list(self._state.last_preflight_errors),
             "validation_errors": list(self._state.last_validation_errors),
+            "workflow_config": {
+                "active_states": list(self._config.tracker.active_states),
+                "terminal_states": list(self._config.tracker.terminal_states),
+                "transitions": {
+                    "dispatch": self._config.transitions.dispatch,
+                    "success": self._config.transitions.success,
+                    "failure": self._config.transitions.failure,
+                    "blocked": self._config.transitions.blocked,
+                    "cancelled": self._config.transitions.cancelled,
+                },
+            },
+            "transition_history": [
+                {
+                    "timestamp": t.timestamp.isoformat(),
+                    "issue_id": t.issue_id,
+                    "issue_identifier": t.issue_identifier,
+                    "from_state": t.from_state,
+                    "to_state": t.to_state,
+                    "trigger": t.trigger,
+                    "success": t.success,
+                }
+                for t in self._state.transition_history
+            ],
         }
 
     def _record_problem(

@@ -915,7 +915,63 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         for row in recent_controls[:10]
     ]
 
+    # --- Workflow config section ---
+    wf_config = groups.get("workflow_config") or {}
+    wf_transitions = wf_config.get("transitions") or {}
+    wf_active = ", ".join(str(s) for s in (wf_config.get("active_states") or []))
+    wf_terminal = ", ".join(str(s) for s in (wf_config.get("terminal_states") or []))
+    transition_rule_rows = []
+    for event_name in ("dispatch", "success", "failure", "blocked", "cancelled"):
+        target = wf_transitions.get(event_name)
+        transition_rule_rows.append([
+            escape(event_name),
+            escape(str(target)) if target else "<span class='muted'>not configured</span>",
+        ])
+
+    workflow_config_section = (
+        "<section class='panel'>"
+        "<div class='panel-head'><h2>Workflow Configuration</h2>"
+        "<p>Active states, terminal states, and transition rules from WORKFLOW.md.</p></div>"
+        "<div class='kv'><span class='k'>Active states</span>"
+        f"<span class='v'>{escape(wf_active) or '<span class=\"muted\">none</span>'}</span></div>"
+        "<div class='kv'><span class='k'>Terminal states</span>"
+        f"<span class='v'>{escape(wf_terminal) or '<span class=\"muted\">none</span>'}</span></div>"
+        "<div class='table-wrap' style='margin-top: 10px'>"
+        "<table><thead><tr><th>Event</th><th>Target state</th></tr></thead><tbody>"
+        + "".join(
+            f"<tr><td>{row[0]}</td><td>{row[1]}</td></tr>"
+            for row in transition_rule_rows
+        )
+        + "</tbody></table></div></section>"
+    )
+
+    # --- Recent transitions section ---
+    transition_history = list(groups.get("transition_history") or [])[:20]
+    transition_rows = [
+        [
+            escape(str(row.get("issue_identifier") or "")),
+            escape(str(row.get("trigger") or "")),
+            escape(str(row.get("from_state") or "?")),
+            escape(str(row.get("to_state") or "")),
+            "<span class='pill active'>ok</span>" if row.get("success") else "<span class='pill paused'>fail</span>",
+            escape(_format_timestamp(row.get("timestamp"))),
+        ]
+        for row in transition_history
+    ]
+
     queue_sections = []
+
+    queue_sections.append(workflow_config_section)
+    queue_sections.append(
+        _render_table(
+            f"Recent Transitions ({len(transition_rows)})",
+            "State transitions applied to issues by the orchestrator.",
+            ["Issue", "Trigger", "From", "To", "Result", "At"],
+            transition_rows,
+            "No transitions recorded yet.",
+        )
+    )
+
     for key, title, subtitle, empty in [
         ("ready", "Ready To Dispatch", "Work that can start as soon as capacity is available.", "No immediately dispatchable issues."),
         ("waiting", "Waiting", "Eligible work that is queued behind current capacity limits.", "No queued work is waiting for slots."),
@@ -1946,6 +2002,8 @@ async def _handle_dashboard(request: web.Request) -> web.Response:
     groups["recent_problems"] = list(snap.get("problems", []))
     groups["skipped"] = list(snap.get("skipped", []))
     groups["controls"] = dict(snap.get("controls", {}))
+    groups["workflow_config"] = dict(snap.get("workflow_config", {}))
+    groups["transition_history"] = list(snap.get("transition_history", []))
     return _html_response(_render_dashboard(groups))
 
 

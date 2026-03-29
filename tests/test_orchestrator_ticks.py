@@ -124,7 +124,7 @@ def test_maybe_transition_blocked_issue_uses_configured_state(monkeypatch: pytes
     monkeypatch.setattr(
         orchestrator,
         "_transition_issue_state_background",
-        lambda issue_id, state_name: transitions.append((issue_id, state_name)),
+        lambda issue_id, state_name, **kw: transitions.append((issue_id, state_name)),
     )
 
     orchestrator._maybe_transition_blocked_issue(issue)
@@ -146,7 +146,7 @@ def test_maybe_transition_blocked_issue_skips_when_already_in_blocked_state(
     monkeypatch.setattr(
         orchestrator,
         "_transition_issue_state_background",
-        lambda issue_id, state_name: transitions.append((issue_id, state_name)),
+        lambda issue_id, state_name, **kw: transitions.append((issue_id, state_name)),
     )
 
     orchestrator._maybe_transition_blocked_issue(issue)
@@ -769,7 +769,7 @@ async def test_on_worker_done_waits_for_in_review_transition_before_retry(
     )
     events: list[str] = []
 
-    async def fake_transition(issue_id: str, state_name: str) -> bool:
+    async def fake_transition(issue_id: str, state_name: str, **kw: object) -> bool:
         events.append(f"transition:{issue_id}:{state_name}")
         return True
 
@@ -831,7 +831,7 @@ async def test_on_worker_done_uses_custom_success_transition(
     )
     events: list[str] = []
 
-    async def fake_transition(issue_id: str, state_name: str) -> bool:
+    async def fake_transition(issue_id: str, state_name: str, **kw: object) -> bool:
         events.append(f"transition:{issue_id}:{state_name}")
         return True
 
@@ -893,7 +893,7 @@ async def test_on_worker_done_skips_transition_when_success_is_none(
     )
     events: list[str] = []
 
-    async def fake_transition(issue_id: str, state_name: str) -> bool:
+    async def fake_transition(issue_id: str, state_name: str, **kw: object) -> bool:
         events.append(f"transition:{issue_id}:{state_name}")
         return True
 
@@ -956,7 +956,7 @@ async def test_retry_releases_blocked_issue_and_applies_blocked_transition(
     monkeypatch.setattr(
         orchestrator,
         "_transition_issue_state_background",
-        lambda issue_id, state_name: transitions.append((issue_id, state_name)),
+        lambda issue_id, state_name, **kw: transitions.append((issue_id, state_name)),
     )
 
     await orchestrator._on_retry_timer(issue.id)
@@ -979,7 +979,7 @@ async def test_dispatch_skips_transition_when_dispatch_is_none(
     monkeypatch.setattr(
         orchestrator,
         "_transition_issue_state_background",
-        lambda issue_id, state_name: transitions.append((issue_id, state_name)),
+        lambda issue_id, state_name, **kw: transitions.append((issue_id, state_name)),
     )
 
     async def fake_worker(issue, attempt, entry):
@@ -1005,7 +1005,7 @@ async def test_dispatch_uses_custom_dispatch_transition(
     monkeypatch.setattr(
         orchestrator,
         "_transition_issue_state_background",
-        lambda issue_id, state_name: transitions.append((issue_id, state_name)),
+        lambda issue_id, state_name, **kw: transitions.append((issue_id, state_name)),
     )
 
     async def fake_worker(issue, attempt, entry):
@@ -1016,3 +1016,50 @@ async def test_dispatch_uses_custom_dispatch_transition(
     await orchestrator._dispatch_issue(issue, attempt=None)
 
     assert transitions == [(issue.id, "Working")]
+
+
+def test_snapshot_includes_workflow_config_and_transition_history() -> None:
+    orchestrator = _build_orchestrator()
+    orchestrator._config.transitions = TransitionsConfig(
+        dispatch="In Progress",
+        success="In Review",
+        failure="Failed",
+        blocked=None,
+        cancelled=None,
+    )
+
+    # Record a transition manually
+    orchestrator._record_transition(
+        "issue-1", "BAP-100", "Todo", "In Progress", "dispatch", success=True,
+    )
+
+    snap = orchestrator.snapshot()
+
+    assert "workflow_config" in snap
+    wc = snap["workflow_config"]
+    assert wc["active_states"] == ["Todo", "In Progress"]
+    assert wc["terminal_states"] == ["Done"]
+    assert wc["transitions"]["dispatch"] == "In Progress"
+    assert wc["transitions"]["success"] == "In Review"
+    assert wc["transitions"]["failure"] == "Failed"
+    assert wc["transitions"]["blocked"] is None
+
+    assert "transition_history" in snap
+    assert len(snap["transition_history"]) == 1
+    t = snap["transition_history"][0]
+    assert t["issue_identifier"] == "BAP-100"
+    assert t["from_state"] == "Todo"
+    assert t["to_state"] == "In Progress"
+    assert t["trigger"] == "dispatch"
+    assert t["success"] is True
+
+
+def test_record_transition_caps_history_size() -> None:
+    orchestrator = _build_orchestrator()
+    for i in range(60):
+        orchestrator._record_transition(
+            f"issue-{i}", f"BAP-{i}", "Todo", "In Progress", "dispatch", success=True,
+        )
+
+    assert len(orchestrator._state.transition_history) == 50
+    assert orchestrator._state.transition_history[0].issue_identifier == "BAP-59"
