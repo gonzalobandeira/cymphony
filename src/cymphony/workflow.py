@@ -206,10 +206,10 @@ You are running in **review mode**. Your job is to review the implementation —
 1. Read the issue description and any reviewer comments carefully.
 2. Explore the workspace: check the branch, recent commits, and changed files.
 3. Review the code changes for correctness, style, test coverage, and adherence to the issue requirements.
-4. If the implementation is acceptable, comment with your approval on the Linear issue using the create-linear-task skill or by updating the issue state.
-5. If changes are needed, leave a detailed comment on the Linear issue describing what must be fixed, then stop.
+4. If the implementation is acceptable, record a `pass` verdict with a concise rationale in `REVIEW_RESULT.json`.
+5. If changes are needed, record a `changes_requested` verdict with an actionable summary in `REVIEW_RESULT.json`.
 
-Do NOT create new branches, push code, or open PRs. Your output is a review verdict only.
+Do NOT create new branches, push code, open PRs, or post directly to Linear. Cymphony will publish your review result to Linear after the run completes.
 """
 
 

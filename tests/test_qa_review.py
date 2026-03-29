@@ -324,9 +324,15 @@ class TestWorkerDoneTransitions:
         _write_review_result(orch, issue.identifier, "pass", "Looks good")
 
         transitions: list[tuple[str, str]] = []
+        comments: list[tuple[str, str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
             AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+        )
+        monkeypatch.setattr(
+            orch,
+            "_post_review_result_comment",
+            AsyncMock(side_effect=lambda iid, ident, result: comments.append((iid, ident, result.summary or ""))),
         )
         monkeypatch.setattr(
             orch, "_schedule_retry",
@@ -337,6 +343,7 @@ class TestWorkerDoneTransitions:
 
         # Should use qa_review.success = "In Review"
         assert transitions == [(issue.id, "In Review")]
+        assert comments == [(issue.id, issue.identifier, "Looks good")]
 
     @pytest.mark.asyncio
     async def test_review_process_failure_retries_in_review_without_failure_transition(
@@ -402,9 +409,15 @@ class TestWorkerDoneTransitions:
         _write_review_result(orch, issue.identifier, "changes_requested", "Needs tests")
 
         transitions: list[tuple[str, str]] = []
+        comments: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
             AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+        )
+        monkeypatch.setattr(
+            orch,
+            "_post_review_result_comment",
+            AsyncMock(side_effect=lambda iid, ident, result: comments.append((iid, result.decision.value if result.decision else "none"))),
         )
         monkeypatch.setattr(
             orch, "_schedule_retry",
@@ -414,9 +427,10 @@ class TestWorkerDoneTransitions:
         await orch._on_worker_done(issue.id, issue.identifier, entry, task)
 
         assert transitions == [(issue.id, "Todo")]
+        assert comments == [(issue.id, "changes_requested")]
 
     @pytest.mark.asyncio
-    async def test_review_missing_result_file_retries_review_mode(
+    async def test_review_missing_result_file_skips_transition_and_posts_parse_failure(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         orch = _build_orchestrator()
@@ -433,7 +447,7 @@ class TestWorkerDoneTransitions:
 
         transitions: list[tuple[str, str]] = []
         retries: list[tuple[str, int, str | None, ExecutionMode]] = []
-
+        comments: list[str] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
             AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
@@ -451,6 +465,11 @@ class TestWorkerDoneTransitions:
             retries.append((issue_id, attempt, error, entry.mode))
 
         monkeypatch.setattr(orch, "_schedule_retry", fake_schedule_retry)
+        monkeypatch.setattr(
+            orch,
+            "_post_review_result_comment",
+            AsyncMock(side_effect=lambda iid, ident, result: comments.append(result.error or "")),
+        )
 
         await orch._on_worker_done(issue.id, issue.identifier, entry, task)
 
@@ -462,6 +481,7 @@ class TestWorkerDoneTransitions:
         assert retries[0][2] is not None
         assert retries[0][2].startswith("Review result file not found: ")
         assert f"{issue.identifier}/REVIEW_RESULT.json" in retries[0][2]
+        assert comments and "not found" in comments[0]
         assert len(orch._state.recent_problems) == 1
         assert orch._state.recent_problems[0].kind == "qa_review_parse_error"
 
@@ -489,6 +509,11 @@ class TestWorkerDoneTransitions:
         monkeypatch.setattr(
             orch, "_transition_issue_state",
             AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+        )
+        monkeypatch.setattr(
+            orch,
+            "_post_review_result_comment",
+            AsyncMock(),
         )
         monkeypatch.setattr(
             orch, "_schedule_retry",
@@ -528,7 +553,37 @@ class TestWorkerDoneTransitions:
 
         await orch._on_worker_done(issue.id, issue.identifier, entry, task)
 
-        # Should use top-level success = "In Review"
+        # Build-mode success should hand off to the QA review lane when enabled.
+        assert transitions == [(issue.id, "QA Review")]
+
+    @pytest.mark.asyncio
+    async def test_build_success_uses_top_level_success_target_when_qa_review_disabled(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch = _build_orchestrator(qa_enabled=False)
+        issue = _build_issue(state="In Progress")
+        entry = _build_running_entry(issue, mode=ExecutionMode.BUILD)
+        orch._state.running[issue.id] = entry
+
+        async def noop():
+            pass
+
+        task = asyncio.ensure_future(noop())
+        await task
+        entry.task = task
+
+        transitions: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            orch, "_transition_issue_state",
+            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+        )
+        monkeypatch.setattr(
+            orch, "_schedule_retry",
+            AsyncMock(),
+        )
+
+        await orch._on_worker_done(issue.id, issue.identifier, entry, task)
+
         assert transitions == [(issue.id, "In Review")]
 
     @pytest.mark.asyncio
@@ -606,6 +661,7 @@ class TestRenderReviewPrompt:
         assert "review mode" in prompt.lower()
         assert "Test issue" in prompt
         assert "REVIEW_RESULT.json" in prompt
+        assert "Do NOT create new branches, push code, open PRs, or post directly to Linear." in prompt
 
     def test_custom_review_prompt_from_config(self) -> None:
         workflow = WorkflowDefinition(
@@ -616,6 +672,33 @@ class TestRenderReviewPrompt:
         prompt = render_review_prompt(workflow, issue)
         assert "Custom review for Test issue" in prompt
         assert "REVIEW_RESULT.json" in prompt
+
+
+class TestRenderReviewResultComment:
+    def test_pass_comment_renders_summary(self) -> None:
+        orch = _build_orchestrator()
+        body = orch._render_review_result_comment(
+            ReviewResult(decision=ReviewDecision.PASS, summary="Looks good")
+        )
+
+        assert "**QA review passed**" in body
+        assert "Decision: `pass`" in body
+        assert "Looks good" in body
+
+    def test_parse_failure_comment_includes_error_and_raw_output(self) -> None:
+        orch = _build_orchestrator()
+        body = orch._render_review_result_comment(
+            ReviewResult(
+                decision=None,
+                error="Review result file not found",
+                raw_output='{"decision":"maybe"}',
+            )
+        )
+
+        assert "**QA review result could not be applied**" in body
+        assert "did not apply a QA transition" in body
+        assert "Review result file not found" in body
+        assert '{"decision":"maybe"}' in body
 
 
 # ---------------------------------------------------------------------------
