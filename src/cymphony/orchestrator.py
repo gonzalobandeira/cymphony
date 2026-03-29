@@ -733,8 +733,8 @@ class Orchestrator:
         if issue.id in self._state.skipped:
             return False
 
-        # Blocker check for Todo state (spec §8.2)
-        if state_lower == "todo":
+        # Blocker check for active work that should not run with unresolved dependencies.
+        if state_lower in {"todo", "in progress"}:
             terminal_lower_set = set(terminal_lower)
             for blocker in issue.blocked_by:
                 blocker_state = (blocker.state or "").lower()
@@ -1534,7 +1534,7 @@ class Orchestrator:
                 "detail": "The orchestrator has already reserved this issue for work.",
             }
 
-        if state_lower == "todo":
+        if state_lower in {"todo", "in progress"}:
             blockers = [
                 blocker for blocker in issue.blocked_by
                 if (blocker.state or "").lower() not in terminal_lower

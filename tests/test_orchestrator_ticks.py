@@ -91,6 +91,17 @@ def _build_issue(
     )
 
 
+def test_should_dispatch_blocks_in_progress_issue_with_unresolved_dependencies() -> None:
+    orchestrator = _build_orchestrator()
+    issue = _build_issue(issue_id="issue-2", identifier="BAN-217", state="In Progress")
+    issue.blocked_by = [
+        BlockerRef(id="blocker-1", identifier="BAN-196", state="Todo"),
+        BlockerRef(id="blocker-2", identifier="BAN-216", state="In Progress"),
+    ]
+
+    assert orchestrator._should_dispatch(issue) is False
+
+
 @pytest.mark.asyncio
 async def test_request_immediate_poll_coalesces_while_tick_is_running(monkeypatch: pytest.MonkeyPatch) -> None:
     orchestrator = _build_orchestrator()
