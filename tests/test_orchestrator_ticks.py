@@ -600,11 +600,9 @@ async def test_transition_state_cache_is_scoped_by_team(monkeypatch: pytest.Monk
 
     monkeypatch.setattr("cymphony.orchestrator.LinearClient", FakeLinearClient)
 
-    orchestrator._transition_issue_state("issue-a", "In Review")
-    orchestrator._transition_issue_state("issue-b", "In Review")
-    orchestrator._transition_issue_state("issue-a", "In Review")
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    await orchestrator._transition_issue_state("issue-a", "In Review")
+    await orchestrator._transition_issue_state("issue-b", "In Review")
+    await orchestrator._transition_issue_state("issue-a", "In Review")
 
     assert state_calls == [
         ("team-a", "In Review"),
@@ -619,3 +617,63 @@ async def test_transition_state_cache_is_scoped_by_team(monkeypatch: pytest.Monk
         ("team-a", "in review"): "state-a-review",
         ("team-b", "in review"): "state-b-review",
     }
+
+
+@pytest.mark.asyncio
+async def test_on_worker_done_waits_for_in_review_transition_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    issue = _build_issue(state="In Progress")
+    entry = RunningEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        issue=issue,
+        task=None,
+        session=LiveSession(
+            session_id=None,
+            pid=None,
+            last_event=None,
+            last_event_timestamp=None,
+            last_message=None,
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            last_reported_input_tokens=0,
+            last_reported_output_tokens=0,
+            last_reported_total_tokens=0,
+            turn_count=0,
+        ),
+        retry_attempt=None,
+        started_at=datetime.now(timezone.utc),
+    )
+    events: list[str] = []
+
+    async def fake_transition(issue_id: str, state_name: str) -> bool:
+        events.append(f"transition:{issue_id}:{state_name}")
+        return True
+
+    async def fake_schedule_retry(
+        issue_id: str,
+        identifier: str,
+        attempt: int,
+        delay_ms: float | None = None,
+        error: str | None = None,
+        entry: RunningEntry | None = None,
+    ) -> None:
+        events.append(f"retry:{issue_id}:{attempt}")
+
+    async def fake_worker() -> None:
+        return None
+
+    monkeypatch.setattr(orchestrator, "_transition_issue_state", fake_transition)
+    monkeypatch.setattr(orchestrator, "_schedule_retry", fake_schedule_retry)
+
+    task = asyncio.create_task(fake_worker())
+    await task
+    await orchestrator._on_worker_done(issue.id, issue.identifier, entry, task)
+
+    assert events == [
+        f"transition:{issue.id}:In Review",
+        f"retry:{issue.id}:1",
+    ]

@@ -696,50 +696,53 @@ class Orchestrator:
 
         asyncio.create_task(_do())
 
-    def _transition_issue_state(self, issue_id: str, state_name: str) -> None:
-        """Fire-and-forget: move an issue to the named workflow state; never raises."""
-        async def _do() -> None:
-            try:
-                client = LinearClient(self._config.tracker)
-                team_id = await client.fetch_issue_team_id(issue_id)
-                if not team_id:
-                    logger.warning(
-                        f"action=state_transition_skipped issue_id={issue_id} "
-                        f"state={state_name!r} reason=team_id_not_found"
-                    )
-                    return
-
-                cache_key = (team_id, state_name.lower())
-                state_id = self._state_id_cache.get(cache_key)
-                if not state_id:
-                    state_id = await client.fetch_team_workflow_state_id(team_id, state_name)
-                if not state_id:
-                    logger.warning(
-                        f"action=state_transition_skipped issue_id={issue_id} "
-                        f"state={state_name!r} team_id={team_id} reason=state_id_not_found"
-                    )
-                    return
-
-                if cache_key not in self._state_id_cache:
-                    self._state_id_cache[cache_key] = state_id
-                await client.set_issue_state(issue_id, state_id)
-                logger.info(
-                    f"action=issue_state_set issue_id={issue_id} state={state_name!r} "
-                    f"team_id={team_id}"
-                )
-            except Exception as exc:
-                self._record_problem(
-                    kind="transition_failed",
-                    summary=f"State transition to {state_name!r} failed",
-                    detail=str(exc),
-                    issue_id=issue_id,
-                )
+    async def _transition_issue_state(self, issue_id: str, state_name: str) -> bool:
+        """Move an issue to the named workflow state. Returns True on success."""
+        try:
+            client = LinearClient(self._config.tracker)
+            team_id = await client.fetch_issue_team_id(issue_id)
+            if not team_id:
                 logger.warning(
-                    f"action=state_transition_failed issue_id={issue_id} "
-                    f"state={state_name!r} error={exc}"
+                    f"action=state_transition_skipped issue_id={issue_id} "
+                    f"state={state_name!r} reason=team_id_not_found"
                 )
+                return False
 
-        asyncio.create_task(_do())
+            cache_key = (team_id, state_name.lower())
+            state_id = self._state_id_cache.get(cache_key)
+            if not state_id:
+                state_id = await client.fetch_team_workflow_state_id(team_id, state_name)
+            if not state_id:
+                logger.warning(
+                    f"action=state_transition_skipped issue_id={issue_id} "
+                    f"state={state_name!r} team_id={team_id} reason=state_id_not_found"
+                )
+                return False
+
+            if cache_key not in self._state_id_cache:
+                self._state_id_cache[cache_key] = state_id
+            await client.set_issue_state(issue_id, state_id)
+            logger.info(
+                f"action=issue_state_set issue_id={issue_id} state={state_name!r} "
+                f"team_id={team_id}"
+            )
+            return True
+        except Exception as exc:
+            self._record_problem(
+                kind="transition_failed",
+                summary=f"State transition to {state_name!r} failed",
+                detail=str(exc),
+                issue_id=issue_id,
+            )
+            logger.warning(
+                f"action=state_transition_failed issue_id={issue_id} "
+                f"state={state_name!r} error={exc}"
+            )
+            return False
+
+    def _transition_issue_state_background(self, issue_id: str, state_name: str) -> None:
+        """Schedule a state transition without blocking the caller."""
+        asyncio.create_task(self._transition_issue_state(issue_id, state_name))
 
     # ------------------------------------------------------------------
     # Dispatch (spec §8.2, §16.4)
@@ -859,7 +862,7 @@ class Orchestrator:
             issue.id, issue.identifier,
             attempt=attempt,
         )
-        self._transition_issue_state(issue.id, "In Progress")
+        self._transition_issue_state_background(issue.id, "In Progress")
 
     # ------------------------------------------------------------------
     # Worker (spec §16.5)
@@ -1128,7 +1131,7 @@ class Orchestrator:
             )
             active_lower = [s.lower() for s in self._config.tracker.active_states]
             if entry.issue.state.lower() in active_lower:
-                self._transition_issue_state(issue_id, "In Review")
+                await self._transition_issue_state(issue_id, "In Review")
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=1,
