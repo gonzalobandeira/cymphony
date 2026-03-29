@@ -295,6 +295,35 @@ class ClaudeAgentRunner(BaseAgentRunner):
         return env
 
 
+class CodexAgentRunner(BaseAgentRunner):
+    """Runs OpenAI Codex CLI as a subprocess and streams AgentEvents."""
+
+    def _build_command(
+        self,
+        prompt: str,
+        workspace_path: str,
+        session_id: str | None,
+        title: str,
+    ) -> list[str]:
+        """Build the codex CLI command list."""
+        cmd = [self._config.command, "--output-format", "stream-json", "--verbose", "--print", prompt]
+
+        if session_id:
+            cmd.extend(["--resume", session_id])
+
+        if self._config.dangerously_skip_permissions:
+            cmd.append("--dangerously-skip-permissions")
+
+        return cmd
+
+
+def create_agent_runner(provider: str, config: CodingAgentConfig) -> BaseAgentRunner:
+    """Factory that returns the correct runner for the configured provider."""
+    if provider == "codex":
+        return CodexAgentRunner(config)
+    return ClaudeAgentRunner(config)
+
+
 AgentRunner = ClaudeAgentRunner
 
 

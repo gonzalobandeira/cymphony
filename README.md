@@ -99,6 +99,7 @@ workspace:
   root: ~/my-workspaces        # ~ and $VAR are expanded
 
 agent:
+  provider: claude               # agent provider: "claude" or "codex"
   max_concurrent_agents: 5     # max parallel agents across all issues
   max_turns: 20                # max agent turns per issue before giving up
   max_retry_backoff_ms: 300000 # 5 min cap for exponential backoff on failures

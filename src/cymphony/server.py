@@ -36,6 +36,7 @@ _DEFAULT_SETUP_FORM = {
     "max_concurrent_agents": "5",
     "max_turns": "20",
     "max_retry_backoff_ms": "300000",
+    "provider": "claude",
     "command": "claude",
     "turn_timeout_ms": "3600000",
     "stall_timeout_ms": "300000",
@@ -270,6 +271,7 @@ def _workflow_form_data(
                 "max_concurrent_agents": str(agent.get("max_concurrent_agents") or data["max_concurrent_agents"]),
                 "max_turns": str(agent.get("max_turns") or data["max_turns"]),
                 "max_retry_backoff_ms": str(agent.get("max_retry_backoff_ms") or data["max_retry_backoff_ms"]),
+                "provider": str(agent.get("provider") or data["provider"]),
                 "command": str(codex.get("command") or data["command"]),
                 "turn_timeout_ms": str(codex.get("turn_timeout_ms") or data["turn_timeout_ms"]),
                 "stall_timeout_ms": str(codex.get("stall_timeout_ms") or data["stall_timeout_ms"]),
@@ -326,6 +328,7 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
             "max_concurrent_agents": int(str(form.get("max_concurrent_agents") or "5")),
             "max_turns": int(str(form.get("max_turns") or "20")),
             "max_retry_backoff_ms": int(str(form.get("max_retry_backoff_ms") or "300000")),
+            "provider": str(form.get("provider") or "claude").strip().lower(),
         },
         "codex": {
             "command": str(form.get("command") or "claude").strip(),
@@ -363,6 +366,11 @@ def _validate_workflow_form(form: dict[str, object]) -> list[str]:
         errors.append("workspace.root is required.")
     if not workflow.config["codex"].get("command"):
         errors.append("codex.command is required.")
+
+    from .models import SUPPORTED_PROVIDERS
+    agent_provider = workflow.config.get("agent", {}).get("provider", "claude")
+    if agent_provider not in SUPPORTED_PROVIDERS:
+        errors.append(f"agent.provider must be one of: {', '.join(SUPPORTED_PROVIDERS)}.")
 
     config = build_config(workflow)
     if config.agent.max_concurrent_agents <= 0:
@@ -492,6 +500,13 @@ def _render_setup_page(
       <section class="card">
         <label for="max_retry_backoff_ms">Max retry backoff (ms)</label>
         <input id="max_retry_backoff_ms" name="max_retry_backoff_ms" value="{field("max_retry_backoff_ms")}" required />
+      </section>
+      <section class="card">
+        <label for="provider">Agent provider</label>
+        <select id="provider" name="provider">
+          <option value="claude"{"" if field("provider") == "codex" else " selected"}>claude</option>
+          <option value="codex"{" selected" if field("provider") == "codex" else ""}>codex</option>
+        </select>
       </section>
       <section class="card">
         <label for="command">Agent command</label>

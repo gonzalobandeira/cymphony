@@ -21,6 +21,7 @@ workspace:
   root: ~/windguruspots-workspaces
 
 agent:
+  provider: claude                  # claude | codex
   max_concurrent_agents: 2
   max_turns: 15
   max_retry_backoff_ms: 300000    # 5 minutes
