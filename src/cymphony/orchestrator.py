@@ -17,6 +17,7 @@ from .models import (
     AgentEvent,
     AgentEventType,
     AgentError,
+    ControlAction,
     CodexTotals,
     Issue,
     LiveSession,
@@ -25,6 +26,7 @@ from .models import (
     RetryEntry,
     RunningEntry,
     RunStatus,
+    SkippedEntry,
     WorkflowDefinition,
     WorkflowError,
 )
@@ -45,6 +47,7 @@ def _monotonic_ms() -> float:
 # Continuation retry delay after clean exit (spec §8.4)
 _CONTINUATION_RETRY_DELAY_MS = 1000.0
 _MAX_RECENT_PROBLEMS = 25
+_CONTROL_HISTORY_LIMIT = 50
 
 
 class Orchestrator:
@@ -271,6 +274,215 @@ class Orchestrator:
         """
         return self._enqueue_tick(delay_ms=0.0)
 
+    def trigger_refresh(self) -> dict[str, Any]:
+        """Queue an immediate refresh and record the operator action."""
+        coalesced = self.request_immediate_poll()
+        detail = "coalesced with pending tick" if coalesced else "tick queued"
+        self._record_control(
+            action="refresh",
+            scope="global",
+            outcome="accepted",
+            detail=detail,
+        )
+        return {
+            "ok": True,
+            "action": "refresh",
+            "scope": "global",
+            "coalesced": coalesced,
+            "detail": detail,
+        }
+
+    def pause_dispatching(self) -> dict[str, Any]:
+        """Pause new dispatches while leaving active workers alone."""
+        already_paused = self._state.dispatch_paused
+        self._state.dispatch_paused = True
+        outcome = "noop" if already_paused else "accepted"
+        detail = "dispatching already paused" if already_paused else "dispatching paused"
+        self._record_control(
+            action="pause_dispatching",
+            scope="global",
+            outcome=outcome,
+            detail=detail,
+        )
+        return {
+            "ok": True,
+            "action": "pause_dispatching",
+            "scope": "global",
+            "already_paused": already_paused,
+            "detail": detail,
+        }
+
+    def resume_dispatching(self) -> dict[str, Any]:
+        """Resume dispatching and immediately poll for eligible work."""
+        was_paused = self._state.dispatch_paused
+        self._state.dispatch_paused = False
+        refresh = self.request_immediate_poll()
+        outcome = "accepted" if was_paused else "noop"
+        detail = (
+            "dispatching resumed; refresh queued"
+            if was_paused
+            else "dispatching already active; refresh queued"
+        )
+        self._record_control(
+            action="resume_dispatching",
+            scope="global",
+            outcome=outcome,
+            detail=detail,
+        )
+        return {
+            "ok": True,
+            "action": "resume_dispatching",
+            "scope": "global",
+            "was_paused": was_paused,
+            "refresh_coalesced": refresh,
+            "detail": detail,
+        }
+
+    async def cancel_worker(self, identifier: str) -> dict[str, Any]:
+        """Cancel a running worker without requeueing it automatically."""
+        issue_identifier = identifier.upper()
+        match = self._find_tracked_issue(issue_identifier)
+        if not match or match["kind"] != "running":
+            detail = "issue is not currently running"
+            self._record_control(
+                action="cancel_worker",
+                scope="issue",
+                outcome="rejected",
+                issue_identifier=issue_identifier,
+                detail=detail,
+            )
+            return {
+                "ok": False,
+                "action": "cancel_worker",
+                "scope": "issue",
+                "issue_identifier": issue_identifier,
+                "detail": detail,
+            }
+
+        issue_id = str(match["issue_id"])
+        await self._terminate_running_issue(issue_id, cleanup_workspace=False)
+        self._state.claimed.discard(issue_id)
+        self._state.completed.discard(issue_id)
+        self._state.retry_attempts.pop(issue_id, None)
+        detail = "worker cancelled and issue released"
+        self._record_control(
+            action="cancel_worker",
+            scope="issue",
+            outcome="accepted",
+            issue_id=issue_id,
+            issue_identifier=issue_identifier,
+            detail=detail,
+        )
+        return {
+            "ok": True,
+            "action": "cancel_worker",
+            "scope": "issue",
+            "issue_id": issue_id,
+            "issue_identifier": issue_identifier,
+            "detail": detail,
+        }
+
+    async def requeue_issue(self, identifier: str) -> dict[str, Any]:
+        """Release an issue from manual holds and ask the scheduler to pick it up again."""
+        issue_identifier = identifier.upper()
+        match = self._find_tracked_issue(issue_identifier)
+        if not match:
+            detail = "issue is not currently tracked"
+            self._record_control(
+                action="requeue_issue",
+                scope="issue",
+                outcome="rejected",
+                issue_identifier=issue_identifier,
+                detail=detail,
+            )
+            return {
+                "ok": False,
+                "action": "requeue_issue",
+                "scope": "issue",
+                "issue_identifier": issue_identifier,
+                "detail": detail,
+            }
+
+        issue_id = str(match["issue_id"])
+        if match["kind"] == "running":
+            await self._terminate_running_issue(issue_id, cleanup_workspace=False)
+
+        self._state.retry_attempts.pop(issue_id, None)
+        self._state.skipped.pop(issue_id, None)
+        self._state.claimed.discard(issue_id)
+        self._state.completed.discard(issue_id)
+        coalesced = self.request_immediate_poll()
+        detail = "issue released for redispatch"
+        self._record_control(
+            action="requeue_issue",
+            scope="issue",
+            outcome="accepted",
+            issue_id=issue_id,
+            issue_identifier=issue_identifier,
+            detail=detail,
+        )
+        return {
+            "ok": True,
+            "action": "requeue_issue",
+            "scope": "issue",
+            "issue_id": issue_id,
+            "issue_identifier": issue_identifier,
+            "refresh_coalesced": coalesced,
+            "detail": detail,
+        }
+
+    async def skip_issue(self, identifier: str) -> dict[str, Any]:
+        """Hold an issue out of dispatch until an operator requeues it."""
+        issue_identifier = identifier.upper()
+        match = self._find_tracked_issue(issue_identifier)
+        if not match:
+            detail = "issue is not currently tracked"
+            self._record_control(
+                action="skip_issue",
+                scope="issue",
+                outcome="rejected",
+                issue_identifier=issue_identifier,
+                detail=detail,
+            )
+            return {
+                "ok": False,
+                "action": "skip_issue",
+                "scope": "issue",
+                "issue_identifier": issue_identifier,
+                "detail": detail,
+            }
+
+        issue_id = str(match["issue_id"])
+        if match["kind"] == "running":
+            await self._terminate_running_issue(issue_id, cleanup_workspace=False)
+
+        self._state.retry_attempts.pop(issue_id, None)
+        self._state.claimed.discard(issue_id)
+        self._state.completed.discard(issue_id)
+        self._state.skipped[issue_id] = SkippedEntry(
+            issue_id=issue_id,
+            identifier=issue_identifier,
+            created_at=_now_utc(),
+            reason="operator_skip",
+        )
+        detail = "issue marked as skipped"
+        self._record_control(
+            action="skip_issue",
+            scope="issue",
+            outcome="accepted",
+            issue_id=issue_id,
+            issue_identifier=issue_identifier,
+            detail=detail,
+        )
+        return {
+            "ok": True,
+            "action": "skip_issue",
+            "scope": "issue",
+            "issue_id": issue_id,
+            "issue_identifier": issue_identifier,
+            "detail": detail,
+        }
+
     # ------------------------------------------------------------------
     # Reconciliation (spec §8.5)
     # ------------------------------------------------------------------
@@ -486,6 +698,8 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _has_slots(self) -> bool:
+        if self._state.dispatch_paused:
+            return False
         global_available = max(
             self._state.max_concurrent_agents - len(self._state.running), 0
         )
@@ -508,6 +722,8 @@ class Orchestrator:
         if issue.id in self._state.running:
             return False
         if issue.id in self._state.claimed:
+            return False
+        if issue.id in self._state.skipped:
             return False
 
         # Blocker check for Todo state (spec §8.2)
@@ -1080,6 +1296,26 @@ class Orchestrator:
             }
             for problem in self._state.recent_problems
         ]
+        skipped_rows = []
+        for issue_id, skipped in self._state.skipped.items():
+            skipped_rows.append({
+                "issue_id": issue_id,
+                "issue_identifier": skipped.identifier,
+                "reason": skipped.reason,
+                "created_at": skipped.created_at.isoformat(),
+            })
+
+        control_rows = []
+        for action in self._state.control_actions:
+            control_rows.append({
+                "timestamp": action.timestamp.isoformat(),
+                "action": action.action,
+                "scope": action.scope,
+                "outcome": action.outcome,
+                "issue_id": action.issue_id,
+                "issue_identifier": action.issue_identifier,
+                "detail": action.detail,
+            })
 
         return {
             "generated_at": now.isoformat(),
@@ -1088,11 +1324,17 @@ class Orchestrator:
                 "retrying": len(retrying_rows),
                 "waiting": len(waiting_rows),
                 "problems": len(problem_rows),
+                "skipped": len(skipped_rows),
+            },
+            "controls": {
+                "dispatch_paused": self._state.dispatch_paused,
+                "recent_actions": control_rows,
             },
             "running": running_rows,
             "retrying": retrying_rows,
             "waiting": waiting_rows,
             "problems": problem_rows,
+            "skipped": skipped_rows,
             "codex_totals": {
                 "input_tokens": totals.input_tokens,
                 "output_tokens": totals.output_tokens,
@@ -1260,6 +1502,47 @@ class Orchestrator:
 
         return None
 
+    def _find_tracked_issue(self, identifier: str) -> dict[str, str] | None:
+        """Locate an issue in running, retry, or skipped collections by identifier."""
+        target = identifier.upper()
+        for issue_id, entry in self._state.running.items():
+            if entry.identifier.upper() == target:
+                return {"kind": "running", "issue_id": issue_id}
+        for issue_id, retry in self._state.retry_attempts.items():
+            if retry.identifier.upper() == target:
+                return {"kind": "retrying", "issue_id": issue_id}
+        for issue_id, skipped in self._state.skipped.items():
+            if skipped.identifier.upper() == target:
+                return {"kind": "skipped", "issue_id": issue_id}
+        return None
+
+    def _record_control(
+        self,
+        action: str,
+        scope: str,
+        outcome: str,
+        issue_id: str | None = None,
+        issue_identifier: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        record = ControlAction(
+            timestamp=_now_utc(),
+            action=action,
+            scope=scope,
+            outcome=outcome,
+            issue_id=issue_id,
+            issue_identifier=issue_identifier,
+            detail=detail,
+        )
+        self._state.control_actions.append(record)
+        if len(self._state.control_actions) > _CONTROL_HISTORY_LIMIT:
+            self._state.control_actions = self._state.control_actions[-_CONTROL_HISTORY_LIMIT:]
+
+        logger.info(
+            "action=operator_control "
+            f"control_action={action} scope={scope} outcome={outcome} "
+            f"issue_id={issue_id!r} issue_identifier={issue_identifier!r} detail={detail!r}"
+        )
 
 # ---------------------------------------------------------------------------
 # Helpers

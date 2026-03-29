@@ -236,6 +236,27 @@ class ProblemRecord:
 
 
 @dataclass
+class SkippedEntry:
+    """Issue manually skipped by an operator."""
+    issue_id: str
+    identifier: str
+    created_at: datetime
+    reason: str
+
+
+@dataclass
+class ControlAction:
+    """Auditable operator control action."""
+    timestamp: datetime
+    action: str
+    scope: str
+    outcome: str
+    issue_id: str | None = None
+    issue_identifier: str | None = None
+    detail: str | None = None
+
+
+@dataclass
 class CodexTotals:
     input_tokens: int = 0
     output_tokens: int = 0
@@ -251,7 +272,10 @@ class OrchestratorState:
     running: dict[str, RunningEntry] = field(default_factory=dict)
     claimed: set[str] = field(default_factory=set)
     retry_attempts: dict[str, RetryEntry] = field(default_factory=dict)
+    skipped: dict[str, SkippedEntry] = field(default_factory=dict)
     completed: set[str] = field(default_factory=set)
+    dispatch_paused: bool = False
+    control_actions: list[ControlAction] = field(default_factory=list)
     codex_totals: CodexTotals = field(default_factory=CodexTotals)
     codex_rate_limits: dict[str, Any] | None = None
     last_candidates: list[Issue] = field(default_factory=list)

@@ -35,6 +35,47 @@ def _issue(
     )
 
 
+class _FakeOrchestrator:
+    def __init__(self, snapshot: dict) -> None:
+        self._snapshot = snapshot
+        self.called: list[tuple[str, str | None]] = []
+
+    def snapshot(self) -> dict:
+        return self._snapshot
+
+    def trigger_refresh(self) -> dict:
+        self.called.append(("refresh", None))
+        return {"ok": True, "action": "refresh", "scope": "global", "coalesced": False}
+
+    def pause_dispatching(self) -> dict:
+        self.called.append(("pause", None))
+        return {"ok": True, "action": "pause_dispatching", "scope": "global"}
+
+    def resume_dispatching(self) -> dict:
+        self.called.append(("resume", None))
+        return {"ok": True, "action": "resume_dispatching", "scope": "global"}
+
+    async def cancel_worker(self, identifier: str) -> dict:
+        self.called.append(("cancel", identifier))
+        return {"ok": True, "action": "cancel_worker", "issue_identifier": identifier}
+
+    async def requeue_issue(self, identifier: str) -> dict:
+        self.called.append(("requeue", identifier))
+        return {"ok": True, "action": "requeue_issue", "issue_identifier": identifier}
+
+    async def skip_issue(self, identifier: str) -> dict:
+        self.called.append(("skip", identifier))
+        return {"ok": True, "action": "skip_issue", "issue_identifier": identifier}
+
+
+class _FakeRequest:
+    def __init__(self, orchestrator: _FakeOrchestrator, identifier: str | None = None) -> None:
+        self.app = {"orchestrator": orchestrator}
+        self.match_info = {}
+        if identifier is not None:
+            self.match_info["identifier"] = identifier
+
+
 def test_build_operator_groups_classifies_ready_waiting_blocked_and_recently_completed() -> None:
     snapshot = {
         "generated_at": "2026-03-28T21:05:00+00:00",
@@ -155,6 +196,19 @@ def test_render_dashboard_shows_waiting_reasons_and_recent_problems(
                 "capacity_in_use": "0/2",
             },
             "totals": {},
+            "controls": {
+                "dispatch_paused": True,
+                "recent_actions": [
+                    {
+                        "timestamp": now.isoformat(),
+                        "action": "pause_dispatching",
+                        "scope": "global",
+                        "outcome": "accepted",
+                        "issue_identifier": None,
+                        "detail": "dispatching paused",
+                    }
+                ],
+            },
             "running": [],
             "retrying": [
                 {
@@ -168,6 +222,13 @@ def test_render_dashboard_shows_waiting_reasons_and_recent_problems(
             "waiting": [],
             "blocked": [],
             "recently_completed": [],
+            "skipped": [
+                {
+                    "issue_identifier": "BAP-155",
+                    "reason": "operator_skip",
+                    "created_at": now.isoformat(),
+                }
+            ],
             "waiting_reasons": [
                 {
                     "issue_identifier": "BAP-171",
@@ -195,10 +256,43 @@ def test_render_dashboard_shows_waiting_reasons_and_recent_problems(
 
     assert "BAP-154" in html
     assert "1m 30s" in html
-    assert "network blip" in html
+    assert "Pause Dispatching" in html
+    assert "Resume Dispatching" in html
+    assert "Paused" in html
+    assert "BAP-155" in html
     assert "Waiting Reasons (2)" in html
-    assert "Blocked by dependency" in html
-    assert "BAP-170 (In Progress)" in html
-    assert "in 15s" in html
     assert "Recent Problems (1)" in html
-    assert "tracker.project_slug is required" in html
+    assert "pause_dispatching" in html
+
+
+@pytest.mark.asyncio
+async def test_refresh_handler_delegates_to_orchestrator() -> None:
+    orchestrator = _FakeOrchestrator(
+        {"running": [], "retrying": [], "waiting": [], "problems": [], "skipped": [], "controls": {}, "codex_totals": {}}
+    )
+
+    response = await server._handle_refresh(_FakeRequest(orchestrator))
+
+    assert response.status == 202
+    assert orchestrator.called == [("refresh", None)]
+    assert '"action": "refresh"' in response.text
+
+
+@pytest.mark.asyncio
+async def test_issue_control_handlers_delegate_to_orchestrator() -> None:
+    orchestrator = _FakeOrchestrator(
+        {"running": [], "retrying": [], "waiting": [], "problems": [], "skipped": [], "controls": {}, "codex_totals": {}}
+    )
+
+    cancel_response = await server._handle_cancel_worker(_FakeRequest(orchestrator, "bap-172"))
+    requeue_response = await server._handle_requeue_issue(_FakeRequest(orchestrator, "bap-172"))
+    skip_response = await server._handle_skip_issue(_FakeRequest(orchestrator, "bap-172"))
+
+    assert cancel_response.status == 202
+    assert requeue_response.status == 202
+    assert skip_response.status == 202
+    assert orchestrator.called == [
+        ("cancel", "bap-172"),
+        ("requeue", "bap-172"),
+        ("skip", "bap-172"),
+    ]

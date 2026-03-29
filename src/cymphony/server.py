@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import math
@@ -302,6 +303,9 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     totals = groups["totals"]
     generated_at = _format_timestamp(groups.get("generated_at"))
     now = datetime.now(timezone.utc)
+    controls = groups.get("controls", {})
+    dispatch_paused = bool(controls.get("dispatch_paused"))
+    recent_controls = list(controls.get("recent_actions", []))
 
     running_rows = [
         [
@@ -315,6 +319,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
             escape(str(row.get("turn_count") or 0)),
             escape(_format_timestamp(row.get("started_at"))),
             escape(str(row.get("session_id") or "-")),
+            _issue_controls(str(row.get("issue_identifier") or ""), include_cancel=True),
         ]
         for row in groups["running"]
     ]
@@ -325,8 +330,18 @@ def _render_dashboard(groups: dict[str, object]) -> str:
             escape(str(row.get("attempt") or "")),
             escape(_format_relative_due(row.get("due_at"), now)),
             escape(str(row.get("error") or "Continuation retry")),
+            _issue_controls(str(row.get("issue_identifier") or "")),
         ]
         for row in groups["retrying"]
+    ]
+    skipped_rows = [
+        [
+            escape(str(row.get("issue_identifier") or "")),
+            escape(str(row.get("reason") or "")),
+            escape(_format_timestamp(row.get("created_at"))),
+            _issue_controls(str(row.get("issue_identifier") or ""), requeue_only=True),
+        ]
+        for row in groups.get("skipped", [])
     ]
     waiting_reason_rows = [
         [
@@ -345,6 +360,17 @@ def _render_dashboard(groups: dict[str, object]) -> str:
             escape(_format_timestamp(row.get("observed_at"))),
         ]
         for row in groups.get("recent_problems", [])
+    ]
+    recent_control_rows = [
+        [
+            escape(_format_timestamp(row.get("timestamp"))),
+            escape(str(row.get("action") or "")),
+            escape(str(row.get("scope") or "")),
+            escape(str(row.get("outcome") or "")),
+            escape(str(row.get("issue_identifier") or "-")),
+            escape(str(row.get("detail") or "")),
+        ]
+        for row in recent_controls[:10]
     ]
 
     queue_sections = []
@@ -390,6 +416,24 @@ def _render_dashboard(groups: dict[str, object]) -> str:
             "No recent orchestration problems captured.",
         )
     )
+    queue_sections.append(
+        _render_table(
+            f"Skipped ({len(skipped_rows)})",
+            "Issues manually skipped by an operator until they are requeued.",
+            ["Issue", "Reason", "Skipped", "Actions"],
+            skipped_rows,
+            "No issues are currently skipped.",
+        )
+    )
+    queue_sections.append(
+        _render_table(
+            f"Recent Controls ({len(recent_control_rows)})",
+            "Recent operator actions and their outcomes.",
+            ["At", "Action", "Scope", "Outcome", "Issue", "Detail"],
+            recent_control_rows,
+            "No operator actions recorded yet.",
+        )
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -422,6 +466,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   a {{ color: var(--accent); text-decoration: none; }}
   a:hover {{ text-decoration: underline; }}
+  form {{ display: inline; margin: 0; }}
   main {{ max-width: 1440px; margin: 0 auto; padding: 32px; }}
   .hero {{
     display: grid;
@@ -506,6 +551,45 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     padding: 20px 22px;
     overflow: hidden;
   }}
+  .control-toolbar, .issue-actions {{
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+  }}
+  .issue-actions {{
+    min-width: 180px;
+  }}
+  button {{
+    border: 1px solid var(--line);
+    background: var(--panel-strong);
+    color: var(--ink);
+    border-radius: 999px;
+    padding: 8px 12px;
+    font: inherit;
+    cursor: pointer;
+  }}
+  button:hover {{
+    border-color: rgba(15, 118, 110, 0.35);
+    background: #f7f2e7;
+  }}
+  .pill {{
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 8px 12px;
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.9rem;
+    font-weight: 700;
+  }}
+  .pill.active {{
+    background: rgba(22, 101, 52, 0.12);
+    color: var(--good);
+  }}
+  .pill.paused {{
+    background: rgba(185, 28, 28, 0.12);
+    color: var(--danger);
+  }}
   .panel-head {{
     display: flex;
     justify-content: space-between;
@@ -581,6 +665,10 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         <div class="meta-label">Runtime</div>
         <div class="meta-value">{escape(_format_elapsed_seconds(totals.get("seconds_running")))}</div>
       </div>
+      <div>
+        <div class="meta-label">Dispatch</div>
+        <div class="meta-value">{'Paused' if dispatch_paused else 'Active'}</div>
+      </div>
     </aside>
   </section>
 
@@ -595,8 +683,20 @@ def _render_dashboard(groups: dict[str, object]) -> str:
 
   <section class="layout">
     <div class="stack">
-      {_render_table("Running", "Active workers and current execution status.", ["Issue", "Tracker State", "Run Status", "Turns", "Started", "Session"], running_rows, "No active agents.")}
-      {_render_table("Retrying", "Retries scheduled after failures or continuation hand-offs.", ["Issue", "Attempt", "Due In", "Why"], retry_rows, "No retries scheduled.")}
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Operator Controls</h2>
+          <p>Intervene safely without leaving the dashboard.</p>
+        </div>
+        <div class="control-toolbar">
+          <span class="pill {'paused' if dispatch_paused else 'active'}">{'Paused' if dispatch_paused else 'Active'}</span>
+          {_post_button("/api/v1/refresh", "Refresh Now")}
+          {_post_button("/api/v1/dispatch/pause", "Pause Dispatching")}
+          {_post_button("/api/v1/dispatch/resume", "Resume Dispatching")}
+        </div>
+      </section>
+      {_render_table("Running", "Active workers and current execution status.", ["Issue", "Tracker State", "Run Status", "Turns", "Started", "Session", "Actions"], running_rows, "No active agents.")}
+      {_render_table("Retrying", "Retries scheduled after failures or continuation hand-offs.", ["Issue", "Attempt", "Due In", "Why", "Actions"], retry_rows, "No retries scheduled.")}
     </div>
     <div class="stack">
       {''.join(queue_sections)}
@@ -621,6 +721,11 @@ def build_app(orchestrator: "Orchestrator") -> web.Application:
     app.router.add_get("/", _handle_dashboard)
     app.router.add_get("/api/v1/state", _handle_state)
     app.router.add_post("/api/v1/refresh", _handle_refresh)
+    app.router.add_post("/api/v1/dispatch/pause", _handle_pause_dispatch)
+    app.router.add_post("/api/v1/dispatch/resume", _handle_resume_dispatch)
+    app.router.add_post("/api/v1/issues/{identifier}/cancel", _handle_cancel_worker)
+    app.router.add_post("/api/v1/issues/{identifier}/requeue", _handle_requeue_issue)
+    app.router.add_post("/api/v1/issues/{identifier}/skip", _handle_skip_issue)
     app.router.add_get("/api/v1/{identifier}", _handle_issue)
     return app
 
@@ -640,13 +745,49 @@ async def _handle_state(request: web.Request) -> web.Response:
 async def _handle_refresh(request: web.Request) -> web.Response:
     """POST /api/v1/refresh — trigger immediate poll."""
     orch: Orchestrator = request.app["orchestrator"]
-    coalesced = orch.request_immediate_poll()
-    return _json_response({
-        "queued": True,
-        "coalesced": coalesced,
-        "requested_at": _now_utc().isoformat(),
-        "operations": ["reconcile", "dispatch"],
-    }, status=202)
+    result = orch.trigger_refresh()
+    return _json_response(
+        {
+            **result,
+            "queued": True,
+            "requested_at": _now_utc().isoformat(),
+            "operations": ["reconcile", "dispatch"],
+        },
+        status=202,
+    )
+
+
+async def _handle_pause_dispatch(request: web.Request) -> web.Response:
+    """POST /api/v1/dispatch/pause — pause new dispatches."""
+    orch: Orchestrator = request.app["orchestrator"]
+    return _json_response(orch.pause_dispatching(), status=202)
+
+
+async def _handle_resume_dispatch(request: web.Request) -> web.Response:
+    """POST /api/v1/dispatch/resume — resume new dispatches."""
+    orch: Orchestrator = request.app["orchestrator"]
+    return _json_response(orch.resume_dispatching(), status=202)
+
+
+async def _handle_cancel_worker(request: web.Request) -> web.Response:
+    """POST /api/v1/issues/<identifier>/cancel — cancel a running worker."""
+    orch: Orchestrator = request.app["orchestrator"]
+    result = await orch.cancel_worker(request.match_info["identifier"])
+    return _json_response(result, status=202 if result.get("ok") else 404)
+
+
+async def _handle_requeue_issue(request: web.Request) -> web.Response:
+    """POST /api/v1/issues/<identifier>/requeue — release issue for redispatch."""
+    orch: Orchestrator = request.app["orchestrator"]
+    result = await orch.requeue_issue(request.match_info["identifier"])
+    return _json_response(result, status=202 if result.get("ok") else 404)
+
+
+async def _handle_skip_issue(request: web.Request) -> web.Response:
+    """POST /api/v1/issues/<identifier>/skip — mark issue as skipped."""
+    orch: Orchestrator = request.app["orchestrator"]
+    result = await orch.skip_issue(request.match_info["identifier"])
+    return _json_response(result, status=202 if result.get("ok") else 404)
 
 
 async def _handle_issue(request: web.Request) -> web.Response:
@@ -709,6 +850,8 @@ async def _handle_dashboard(request: web.Request) -> web.Response:
     groups = await _load_operator_groups(orch, snap)
     groups["waiting_reasons"] = list(snap.get("waiting", []))
     groups["recent_problems"] = list(snap.get("problems", []))
+    groups["skipped"] = list(snap.get("skipped", []))
+    groups["controls"] = dict(snap.get("controls", {}))
     return _html_response(_render_dashboard(groups))
 
 
@@ -726,3 +869,28 @@ async def start_server(orchestrator: "Orchestrator", port: int) -> web.AppRunner
     await site.start()
     logger.info(f"action=http_server_started host=127.0.0.1 port={port}")
     return runner
+
+
+def _post_button(action: str, label: str) -> str:
+    safe_action = html.escape(action, quote=True)
+    safe_label = html.escape(label)
+    return (
+        f"<form method='post' action='{safe_action}'>"
+        f"<button type='submit'>{safe_label}</button>"
+        "</form>"
+    )
+
+
+def _issue_controls(
+    identifier: str,
+    *,
+    include_cancel: bool = False,
+    requeue_only: bool = False,
+) -> str:
+    safe_identifier = html.escape(identifier, quote=True)
+    buttons = [_post_button(f"/api/v1/issues/{safe_identifier}/requeue", "Requeue")]
+    if not requeue_only:
+        buttons.append(_post_button(f"/api/v1/issues/{safe_identifier}/skip", "Skip"))
+    if include_cancel:
+        buttons.insert(0, _post_button(f"/api/v1/issues/{safe_identifier}/cancel", "Cancel Worker"))
+    return f"<div class='issue-actions'>{''.join(buttons)}</div>"
