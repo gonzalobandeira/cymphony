@@ -375,6 +375,50 @@ class LinearClient:
         )
         return issues
 
+    async def fetch_project_team_ids(self) -> list[str]:
+        """Return all team IDs that have issues in the configured project."""
+        query = """
+query ProjectTeams($projectSlug: String!) {
+  issues(
+    first: 50,
+    filter: { project: { slugId: { eq: $projectSlug } } }
+  ) {
+    nodes { team { id } }
+  }
+}
+"""
+        async with aiohttp.ClientSession(
+            headers=self._headers(), timeout=_NETWORK_TIMEOUT
+        ) as session:
+            data = await self._request(session, query, {
+                "projectSlug": self._config.project_slug,
+            })
+
+        nodes = (data.get("issues") or {}).get("nodes") or []
+        team_ids: set[str] = set()
+        for node in nodes:
+            tid = (node.get("team") or {}).get("id")
+            if tid:
+                team_ids.add(tid)
+        return sorted(team_ids)
+
+    async def fetch_team_workflow_state_names(self, team_id: str) -> list[str]:
+        """Return all workflow state names for a Linear team."""
+        query = """
+query TeamWorkflowStates($teamId: ID!) {
+  workflowStates(filter: { team: { id: { eq: $teamId } } }) {
+    nodes { id name }
+  }
+}
+"""
+        async with aiohttp.ClientSession(
+            headers=self._headers(), timeout=_NETWORK_TIMEOUT
+        ) as session:
+            data = await self._request(session, query, {"teamId": team_id})
+
+        nodes = (data.get("workflowStates") or {}).get("nodes") or []
+        return [n.get("name") for n in nodes if n.get("name")]
+
     async def fetch_issue_team_id(self, issue_id: str) -> str | None:
         """Return the owning Linear team ID for an issue."""
         team_query = """
