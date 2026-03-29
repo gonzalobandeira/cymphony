@@ -1004,7 +1004,8 @@ class Orchestrator:
             issue.id, issue.identifier,
             attempt=attempt,
         )
-        self._transition_issue_state_background(issue.id, "In Progress")
+        if self._config.transitions.dispatch:
+            self._transition_issue_state_background(issue.id, self._config.transitions.dispatch)
 
     # ------------------------------------------------------------------
     # Worker (spec §16.5)
@@ -1285,6 +1286,8 @@ class Orchestrator:
                 "worker_cancelled",
                 issue_id, identifier,
             )
+            if self._config.transitions.cancelled:
+                self._transition_issue_state_background(issue_id, self._config.transitions.cancelled)
             return
 
         if exc is None:
@@ -1297,9 +1300,10 @@ class Orchestrator:
                 "worker_exited_normal",
                 issue_id, identifier,
             )
-            active_lower = [s.lower() for s in self._config.tracker.active_states]
-            if entry.issue.state.lower() in active_lower:
-                await self._transition_issue_state(issue_id, "In Review")
+            if self._config.transitions.success:
+                active_lower = [s.lower() for s in self._config.tracker.active_states]
+                if entry.issue.state.lower() in active_lower:
+                    await self._transition_issue_state(issue_id, self._config.transitions.success)
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=1,
@@ -1325,6 +1329,8 @@ class Orchestrator:
                 error=error_str,
                 run_status=entry.status.value,
             )
+            if self._config.transitions.failure:
+                self._transition_issue_state_background(issue_id, self._config.transitions.failure)
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=next_attempt,
