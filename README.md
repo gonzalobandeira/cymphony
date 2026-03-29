@@ -182,6 +182,7 @@ When `server.port` is configured:
 | `GET` | `/` | Live HTML dashboard |
 | `GET` | `/api/v1/state` | Full orchestrator snapshot (JSON) |
 | `POST` | `/api/v1/refresh` | Trigger an immediate poll |
+| `POST` | `/api/v1/app/kill` | Stop the orchestrator and cancel active workers |
 | `GET` | `/api/v1/<IDENTIFIER>` | Per-issue debug details |
 
 ## Architecture

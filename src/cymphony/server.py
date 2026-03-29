@@ -849,6 +849,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     now = _now_utc()
     controls = groups.get("controls", {})
     dispatch_paused = bool(controls.get("dispatch_paused"))
+    shutdown_requested = bool(controls.get("shutdown_requested"))
     recent_controls = list(controls.get("recent_actions", []))
 
     skipped_rows = [
@@ -1077,6 +1078,15 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     flex-wrap: wrap;
     align-items: center;
   }}
+  .control-toolbar {{
+    justify-content: space-between;
+  }}
+  .control-group {{
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+  }}
   .issue-actions {{
     min-width: 180px;
     justify-content: flex-end;
@@ -1217,6 +1227,58 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     border-color: rgba(15, 118, 110, 0.35);
     background: #f7f2e7;
   }}
+  .danger-button {{
+    border-color: rgba(185, 28, 28, 0.28);
+    background: rgba(185, 28, 28, 0.08);
+    color: var(--danger);
+  }}
+  .danger-button:hover {{
+    border-color: rgba(185, 28, 28, 0.42);
+    background: rgba(185, 28, 28, 0.14);
+  }}
+  .switch-form {{
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }}
+  .switch-label {{
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    color: var(--muted);
+  }}
+  .switch-label input {{
+    appearance: none;
+    width: 44px;
+    height: 26px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: rgba(31, 41, 51, 0.1);
+    position: relative;
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease;
+  }}
+  .switch-label input::after {{
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: white;
+    box-shadow: 0 1px 3px rgba(31, 41, 51, 0.2);
+    transition: transform 120ms ease;
+  }}
+  .switch-label input:checked {{
+    background: rgba(185, 28, 28, 0.72);
+    border-color: rgba(185, 28, 28, 0.72);
+  }}
+  .switch-label input:checked::after {{
+    transform: translateX(18px);
+  }}
   .pill {{
     display: inline-flex;
     align-items: center;
@@ -1346,10 +1408,15 @@ def _render_dashboard(groups: dict[str, object]) -> str:
           <p>Intervene safely without leaving the dashboard.</p>
         </div>
         <div class="control-toolbar">
-          <span class="pill {'paused' if dispatch_paused else 'active'}">{'Paused' if dispatch_paused else 'Active'}</span>
-          {_post_button("/api/v1/refresh", "Refresh Now")}
-          {_post_button("/api/v1/dispatch/pause", "Pause Dispatching")}
-          {_post_button("/api/v1/dispatch/resume", "Resume Dispatching")}
+          <div class="control-group">
+            <span class="pill {'paused' if dispatch_paused else 'active'}">{'Paused' if dispatch_paused else 'Active'}</span>
+            {_post_button("/api/v1/refresh", "Refresh Now")}
+            {_post_button("/api/v1/dispatch/pause", "Pause Dispatching")}
+            {_post_button("/api/v1/dispatch/resume", "Resume Dispatching")}
+          </div>
+          <div class="control-group">
+            {_kill_app_switch(shutdown_requested)}
+          </div>
         </div>
       </section>
       {_render_operator_cards("Running", "Active workers and current execution status.", list(groups["running"]), empty="No active agents.", mode="running")}
@@ -1394,6 +1461,7 @@ def build_app(
         app.router.add_post("/api/v1/refresh", _handle_refresh)
         app.router.add_post("/api/v1/dispatch/pause", _handle_pause_dispatch)
         app.router.add_post("/api/v1/dispatch/resume", _handle_resume_dispatch)
+        app.router.add_post("/api/v1/app/kill", _handle_shutdown_app)
         app.router.add_post("/api/v1/issues/{identifier}/cancel", _handle_cancel_worker)
         app.router.add_post("/api/v1/issues/{identifier}/requeue", _handle_requeue_issue)
         app.router.add_post("/api/v1/issues/{identifier}/skip", _handle_skip_issue)
@@ -1560,6 +1628,24 @@ async def _handle_resume_dispatch(request: web.Request) -> web.Response:
     return _json_response(orch.resume_dispatching(), status=202)
 
 
+async def _handle_shutdown_app(request: web.Request) -> web.Response:
+    """POST /api/v1/app/kill — stop the orchestrator process."""
+    orch: Orchestrator = request.app["orchestrator"]
+    form = await request.post()
+    if form.get("confirm_kill") != "true":
+        return _json_response(
+            {
+                "ok": False,
+                "action": "shutdown_app",
+                "scope": "global",
+                "detail": "confirm_kill must be enabled before killing the app",
+            },
+            status=400,
+        )
+    result = await orch.shutdown_app()
+    return _json_response(result, status=202)
+
+
 async def _handle_cancel_worker(request: web.Request) -> web.Response:
     """POST /api/v1/issues/<identifier>/cancel — cancel a running worker."""
     orch = _require_orchestrator(request)
@@ -1670,6 +1756,21 @@ def _post_button(action: str, label: str) -> str:
     return (
         f"<form method='post' action='{safe_action}'>"
         f"<button type='submit'>{safe_label}</button>"
+        "</form>"
+    )
+
+
+def _kill_app_switch(shutdown_requested: bool) -> str:
+    checked = " checked" if shutdown_requested else ""
+    disabled = " disabled" if shutdown_requested else ""
+    button_label = "Kill Requested" if shutdown_requested else "Kill App"
+    return (
+        "<form method='post' action='/api/v1/app/kill' class='switch-form'>"
+        "<label class='switch-label'>"
+        f"<input type='checkbox' name='confirm_kill' value='true'{checked}{disabled}>"
+        "<span>Arm kill</span>"
+        "</label>"
+        f"<button type='submit' class='danger-button'{disabled}>{escape(button_label)}</button>"
         "</form>"
     )
 

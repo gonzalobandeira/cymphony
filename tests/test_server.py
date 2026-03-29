@@ -58,6 +58,10 @@ class _FakeOrchestrator:
         self.called.append(("resume", None))
         return {"ok": True, "action": "resume_dispatching", "scope": "global"}
 
+    async def shutdown_app(self) -> dict:
+        self.called.append(("shutdown", None))
+        return {"ok": True, "action": "shutdown_app", "scope": "global"}
+
     async def cancel_worker(self, identifier: str) -> dict:
         self.called.append(("cancel", identifier))
         return {"ok": True, "action": "cancel_worker", "issue_identifier": identifier}
@@ -214,6 +218,7 @@ def test_render_dashboard_shows_waiting_reasons_and_recent_problems(
             "totals": {},
             "controls": {
                 "dispatch_paused": True,
+                "shutdown_requested": False,
                 "recent_actions": [
                     {
                         "timestamp": now.isoformat(),
@@ -274,6 +279,8 @@ def test_render_dashboard_shows_waiting_reasons_and_recent_problems(
     assert "1m 30s" in html
     assert "Pause Dispatching" in html
     assert "Resume Dispatching" in html
+    assert "Arm kill" in html
+    assert "Kill App" in html
     assert "Paused" in html
     assert "BAP-155" in html
     assert "Waiting Reasons (2)" in html
@@ -292,6 +299,34 @@ async def test_refresh_handler_delegates_to_orchestrator() -> None:
     assert response.status == 202
     assert orchestrator.called == [("refresh", None)]
     assert '"action": "refresh"' in response.text
+
+
+@pytest.mark.asyncio
+async def test_shutdown_handler_requires_confirm_switch() -> None:
+    orchestrator = _FakeOrchestrator(
+        {"running": [], "retrying": [], "waiting": [], "problems": [], "skipped": [], "controls": {}, "codex_totals": {}}
+    )
+
+    response = await server._handle_shutdown_app(_FakeRequest(orchestrator))
+
+    assert response.status == 400
+    assert orchestrator.called == []
+    assert "confirm_kill must be enabled" in response.text
+
+
+@pytest.mark.asyncio
+async def test_shutdown_handler_delegates_to_orchestrator_when_switch_is_enabled() -> None:
+    orchestrator = _FakeOrchestrator(
+        {"running": [], "retrying": [], "waiting": [], "problems": [], "skipped": [], "controls": {}, "codex_totals": {}}
+    )
+
+    response = await server._handle_shutdown_app(
+        _FakeRequest(orchestrator, post_data={"confirm_kill": "true"})
+    )
+
+    assert response.status == 202
+    assert orchestrator.called == [("shutdown", None)]
+    assert '"action": "shutdown_app"' in response.text
 
 
 @pytest.mark.asyncio
@@ -394,7 +429,7 @@ def test_render_dashboard_shows_issue_drilldown_details() -> None:
                 "capacity_in_use": "1/2",
             },
             "totals": {},
-            "controls": {"dispatch_paused": False, "recent_actions": []},
+            "controls": {"dispatch_paused": False, "shutdown_requested": False, "recent_actions": []},
             "running": [
                 {
                     "issue_id": "issue-1",

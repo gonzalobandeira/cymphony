@@ -278,6 +278,8 @@ class Orchestrator:
         Returns True if the request was coalesced (a poll was already pending),
         False if a new tick was scheduled.
         """
+        if self._is_shutting_down():
+            return True
         return self._enqueue_tick(delay_ms=0.0)
 
     def trigger_refresh(self) -> dict[str, Any]:
@@ -341,6 +343,45 @@ class Orchestrator:
             "scope": "global",
             "was_paused": was_paused,
             "refresh_coalesced": refresh,
+            "detail": detail,
+        }
+
+    async def shutdown_app(self) -> dict[str, Any]:
+        """Stop dispatching, cancel active work, and shut the orchestrator down."""
+        already_requested = self._is_shutting_down()
+        self._state.dispatch_paused = True
+        self._state.shutdown_requested = True
+
+        if self._tick_handle is not None and not self._tick_handle.cancelled():
+            self._tick_handle.cancel()
+        self._tick_handle = None
+        self._tick_due_at_ms = None
+        self._tick_rerun_requested = False
+        self._state.retry_attempts.clear()
+
+        running_issue_ids = list(self._state.running.keys())
+        for issue_id in running_issue_ids:
+            await self._terminate_running_issue(issue_id, cleanup_workspace=False)
+
+        self._shutdown_event.set()
+        outcome = "noop" if already_requested else "accepted"
+        detail = (
+            "shutdown already requested"
+            if already_requested
+            else "shutdown requested; running workers cancelled"
+        )
+        self._record_control(
+            action="shutdown_app",
+            scope="global",
+            outcome=outcome,
+            detail=detail,
+        )
+        return {
+            "ok": True,
+            "action": "shutdown_app",
+            "scope": "global",
+            "already_requested": already_requested,
+            "cancelled_workers": len(running_issue_ids),
             "detail": detail,
         }
 
@@ -705,7 +746,7 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _has_slots(self) -> bool:
-        if self._state.dispatch_paused:
+        if self._state.dispatch_paused or self._is_shutting_down():
             return False
         global_available = max(
             self._state.max_concurrent_agents - len(self._state.running), 0
@@ -770,6 +811,8 @@ class Orchestrator:
 
     async def _dispatch_issue(self, issue: Issue, attempt: int | None) -> None:
         """Claim and spawn worker for issue (spec §16.4)."""
+        if self._is_shutting_down():
+            return
         self._state.claimed.add(issue.id)
         self._state.completed.discard(issue.id)
         self._state.retry_attempts.pop(issue.id, None)
@@ -1229,6 +1272,9 @@ class Orchestrator:
 
     async def _on_retry_timer(self, issue_id: str) -> None:
         """Handle retry timer firing (spec §16.6)."""
+        if self._is_shutting_down():
+            self._state.retry_attempts.pop(issue_id, None)
+            return
         retry_entry = self._state.retry_attempts.pop(issue_id, None)
         if not retry_entry:
             return
@@ -1407,6 +1453,7 @@ class Orchestrator:
             },
             "controls": {
                 "dispatch_paused": self._state.dispatch_paused,
+                "shutdown_requested": self._state.shutdown_requested,
                 "recent_actions": control_rows,
             },
             "running": running_rows,
@@ -1630,6 +1677,9 @@ class Orchestrator:
             f"control_action={action} scope={scope} outcome={outcome} "
             f"issue_id={issue_id!r} issue_identifier={issue_identifier!r} detail={detail!r}"
         )
+
+    def _is_shutting_down(self) -> bool:
+        return self._state.shutdown_requested or self._shutdown_event.is_set()
 
     def _snapshot_running_entry(
         self,

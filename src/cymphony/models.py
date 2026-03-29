@@ -296,6 +296,7 @@ class OrchestratorState:
     skipped: dict[str, SkippedEntry] = field(default_factory=dict)
     completed: set[str] = field(default_factory=set)
     dispatch_paused: bool = False
+    shutdown_requested: bool = False
     control_actions: list[ControlAction] = field(default_factory=list)
     codex_totals: CodexTotals = field(default_factory=CodexTotals)
     codex_rate_limits: dict[str, Any] | None = None
