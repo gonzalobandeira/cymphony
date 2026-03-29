@@ -184,6 +184,8 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
     if not command:
         command = _DEFAULT_CLAUDE_COMMAND
 
+    provider = _to_str(codex_raw.get("provider"), "claude")
+
     coding_agent = CodingAgentConfig(
         command=command,
         turn_timeout_ms=_to_int(codex_raw.get("turn_timeout_ms"), _DEFAULT_TURN_TIMEOUT_MS),
@@ -192,6 +194,7 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
         dangerously_skip_permissions=bool(
             codex_raw.get("dangerously_skip_permissions", True)
         ),
+        provider=provider,
     )
 
     # --- server (optional extension) ---
