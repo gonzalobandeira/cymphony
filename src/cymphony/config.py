@@ -262,6 +262,12 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
     else:
         qa_review = QAReviewConfig()
 
+    # A QA review lane is agent-driven only if the review state is dispatchable.
+    if qa_review.enabled and qa_review.dispatch:
+        active_lower = {state.lower() for state in tracker.active_states}
+        if qa_review.dispatch.lower() not in active_lower:
+            tracker.active_states = [*tracker.active_states, qa_review.dispatch]
+
     transitions = TransitionsConfig(
         dispatch=_to_optional_str(
             transitions_raw.get("dispatch", _MISSING), _TRANSITION_DEFAULTS.dispatch

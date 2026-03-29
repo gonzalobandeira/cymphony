@@ -196,6 +196,7 @@ def test_qa_review_shorthand_true() -> None:
     assert qa.dispatch == "QA Review"
     assert qa.success == "In Review"
     assert qa.failure == "Todo"
+    assert "QA Review" in config.tracker.active_states
 
 
 def test_qa_review_enabled_with_defaults() -> None:
@@ -223,6 +224,7 @@ def test_qa_review_custom_states() -> None:
     assert qa.dispatch == "QA"
     assert qa.success == "Ready to Merge"
     assert qa.failure == "Needs Work"
+    assert "QA" in config.tracker.active_states
 
 
 def test_qa_review_disable_individual_transitions() -> None:
@@ -281,3 +283,10 @@ def test_qa_review_backward_compat_legacy_workflow() -> None:
     assert config.transitions.dispatch == "In Progress"
     assert config.transitions.success == "In Review"
     assert config.transitions.qa_review.enabled is False
+
+
+def test_qa_review_disabled_does_not_extend_active_states() -> None:
+    config = build_config(_workflow_with_transitions({
+        "qa_review": {"enabled": False, "dispatch": "QA Review"},
+    }))
+    assert "QA Review" not in config.tracker.active_states
