@@ -180,6 +180,8 @@ class LiveSession:
     last_reported_total_tokens: int
     turn_count: int
     plan_comment_id: str | None = None
+    latest_plan: str | None = None
+    recent_events: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +224,25 @@ class RetryEntry:
     attempt: int
     due_at_ms: float  # monotonic clock
     error: str | None
+    state: str | None = None
+    run_status: str | None = None
+    session_id: str | None = None
+    turn_count: int = 0
+    last_event: str | None = None
+    last_message: str | None = None
+    last_event_at: datetime | None = None
+    workspace_path: str | None = None
+    tokens: dict[str, int] = field(default_factory=dict)
+    started_at: datetime | None = None
+    retry_attempt: int | None = None
+    plan_comment_id: str | None = None
+    latest_plan: str | None = None
+    recent_events: list[dict[str, Any]] = field(default_factory=list)
+    issue_title: str | None = None
+    issue_url: str | None = None
+    issue_description: str | None = None
+    issue_labels: list[str] = field(default_factory=list)
+    issue_comments: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

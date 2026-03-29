@@ -48,6 +48,8 @@ def _format_waiting_timing(waiting_row: dict) -> str:
     if not due_at_raw:
         return ""
     return _format_retry_timing(waiting_row)
+
+
 def _json_response(data: object, status: int = 200) -> web.Response:
     return web.Response(
         status=status,
@@ -58,6 +60,151 @@ def _json_response(data: object, status: int = 200) -> web.Response:
 
 def _html_response(html: str) -> web.Response:
     return web.Response(content_type="text/html", text=html)
+
+
+def _find_issue_snapshot(snapshot: dict, identifier: str) -> dict | None:
+    for entry in snapshot.get("running", []):
+        if entry.get("issue_identifier") == identifier:
+            return {
+                "tracked": True,
+                "status": "running",
+                **entry,
+            }
+
+    for entry in snapshot.get("retrying", []):
+        if entry.get("issue_identifier") == identifier:
+            return {
+                "tracked": True,
+                "status": "retry_scheduled",
+                "last_error": entry.get("error"),
+                **entry,
+            }
+
+    return None
+
+
+def _render_key_value(label: str, value: str | None) -> str:
+    if not value:
+        return ""
+    return (
+        f"<div class='kv'>"
+        f"<span class='k'>{escape(label)}</span>"
+        f"<span class='v'>{escape(value)}</span>"
+        f"</div>"
+    )
+
+
+def _render_issue_comments(comments: list[dict]) -> str:
+    if not comments:
+        return "<p class='empty small'>No issue comments captured.</p>"
+
+    items = []
+    for comment in comments:
+        author = escape(str(comment.get("author") or "Unknown"))
+        created_at = escape(str(comment.get("created_at") or ""))
+        body = escape(str(comment.get("body") or ""))
+        items.append(
+            f"<li><strong>{author}</strong>"
+            f"{f' <span class=\"muted\">{created_at}</span>' if created_at else ''}"
+            f"<pre>{body}</pre></li>"
+        )
+    return f"<ul class='event-list'>{''.join(items)}</ul>"
+
+
+def _render_recent_events(events: list[dict]) -> str:
+    if not events:
+        return "<p class='empty small'>No recent runtime events yet.</p>"
+
+    items = []
+    for event in reversed(events):
+        label = escape(str(event.get("event") or "unknown"))
+        timestamp = escape(str(event.get("timestamp") or ""))
+        message = escape(str(event.get("message") or ""))
+        usage = event.get("usage") or {}
+        usage_text = ""
+        if usage:
+            usage_text = (
+                f"tokens in/out: {usage.get('input_tokens', 0)}/"
+                f"{usage.get('output_tokens', 0)}"
+            )
+        details = " · ".join(part for part in [timestamp, message, usage_text] if part)
+        items.append(
+            f"<li><strong>{label}</strong>"
+            f"{f'<div class=\"muted\">{details}</div>' if details else ''}"
+            f"</li>"
+        )
+    return f"<ul class='event-list'>{''.join(items)}</ul>"
+
+
+def _render_issue_drilldown(entry: dict, retry_due: str | None = None) -> str:
+    title = entry.get("issue_title") or entry.get("issue_identifier") or "Issue"
+    issue_url = entry.get("issue_url")
+    labels = entry.get("issue_labels") or []
+    tokens = entry.get("tokens") or {}
+    latest_plan = entry.get("latest_plan")
+
+    summary_bits = [
+        f"status: {entry.get('run_status') or entry.get('status') or 'unknown'}",
+        f"last event: {entry.get('last_event') or 'n/a'}",
+    ]
+    if retry_due:
+        summary_bits.append(retry_due)
+
+    issue_link = (
+        f"<a href='{escape(str(issue_url))}' target='_blank' rel='noreferrer'>{escape(str(title))}</a>"
+        if issue_url
+        else escape(str(title))
+    )
+    labels_html = (
+        "".join(f"<span class='tag'>{escape(str(label))}</span>" for label in labels)
+        if labels
+        else "<span class='empty small'>No labels</span>"
+    )
+
+    sections = [
+        _render_key_value("Issue", entry.get("issue_identifier")),
+        _render_key_value("State", entry.get("state")),
+        _render_key_value("Run status", entry.get("run_status") or entry.get("status")),
+        _render_key_value("Session", entry.get("session_id")),
+        _render_key_value("Workspace", entry.get("workspace_path")),
+        _render_key_value("Started", entry.get("started_at")),
+        _render_key_value("Last event at", entry.get("last_event_at")),
+        _render_key_value("Retry attempt", str(entry.get("retry_attempt")) if entry.get("retry_attempt") is not None else None),
+        _render_key_value("Queued retry", retry_due),
+        _render_key_value("Plan comment", entry.get("plan_comment_id")),
+        _render_key_value("Last error", entry.get("error") or entry.get("last_error")),
+    ]
+
+    return f"""
+<details class="issue-drilldown">
+  <summary>{escape(str(entry.get("issue_identifier") or ""))} <span class="muted">{escape(" · ".join(summary_bits))}</span></summary>
+  <div class="drill-grid">
+    <section class="detail-card detail-wide">
+      <h3>{issue_link}</h3>
+      <div class="tag-row">{labels_html}</div>
+      <pre>{escape(str(entry.get("issue_description") or "No issue description available."))}</pre>
+    </section>
+    <section class="detail-card">
+      <h3>Runtime</h3>
+      {''.join(sections)}
+      <div class='kv'><span class='k'>Turns</span><span class='v'>{int(entry.get("turn_count") or 0)}</span></div>
+      <div class='kv'><span class='k'>Tokens</span><span class='v'>{int(tokens.get("input_tokens", 0))}/{int(tokens.get("output_tokens", 0))}/{int(tokens.get("total_tokens", 0))} in/out/total</span></div>
+      <div class='kv'><span class='k'>Last message</span><span class='v'>{escape(str(entry.get("last_message") or "")) or "—"}</span></div>
+    </section>
+    <section class="detail-card">
+      <h3>Latest Plan</h3>
+      <pre>{escape(str(latest_plan or "No TodoWrite plan captured yet."))}</pre>
+    </section>
+    <section class="detail-card">
+      <h3>Recent Events</h3>
+      {_render_recent_events(entry.get("recent_events") or [])}
+    </section>
+    <section class="detail-card detail-wide">
+      <h3>Issue Comments</h3>
+      {_render_issue_comments(entry.get("issue_comments") or [])}
+    </section>
+  </div>
+</details>"""
 
 
 def _format_timestamp(raw: str | None) -> str:
@@ -309,11 +456,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
 
     running_rows = [
         [
-            _render_issue_link(
-                row.get("issue_identifier", ""),
-                str(row.get("run_status", "Running")),
-                f"/api/v1/{escape(str(row.get('issue_identifier', '')))}",
-            ),
+            _render_issue_drilldown(row),
             escape(str(row.get("state") or "")),
             escape(str(row.get("run_status") or "")),
             escape(str(row.get("turn_count") or 0)),
@@ -326,7 +469,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
 
     retry_rows = [
         [
-            escape(str(row.get("issue_identifier") or "")),
+            _render_issue_drilldown(row, retry_due=_format_relative_due(row.get("due_at"), now)),
             escape(str(row.get("attempt") or "")),
             escape(_format_relative_due(row.get("due_at"), now)),
             escape(str(row.get("error") or "Continuation retry")),
@@ -559,6 +702,83 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   .issue-actions {{
     min-width: 180px;
+  }}
+  .small {{ font-size: 0.9rem; }}
+  .muted {{ color: var(--muted); }}
+  .issue-drilldown summary {{
+    cursor: pointer;
+    font-weight: 700;
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+  }}
+  .issue-drilldown[open] summary {{
+    margin-bottom: 12px;
+  }}
+  .drill-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 12px;
+    margin-top: 12px;
+  }}
+  .detail-card {{
+    background: var(--panel-strong);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 14px;
+  }}
+  .detail-wide {{
+    grid-column: span 2;
+  }}
+  .detail-card h3 {{
+    margin: 0 0 8px;
+    font-size: 0.95rem;
+    color: var(--accent);
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+  }}
+  .kv {{
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--line);
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.9rem;
+  }}
+  .k {{
+    color: var(--muted);
+  }}
+  .v {{
+    text-align: right;
+    word-break: break-word;
+  }}
+  .tag-row {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+  }}
+  .tag {{
+    display: inline-block;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: rgba(15, 118, 110, 0.1);
+    color: var(--accent);
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.78rem;
+  }}
+  .event-list {{
+    margin: 0;
+    padding-left: 18px;
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+  }}
+  pre {{
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0;
+    padding: 10px;
+    border-radius: 12px;
+    background: rgba(31, 41, 51, 0.04);
+    font-family: "SFMono-Regular", "Menlo", monospace;
+    font-size: 0.84rem;
   }}
   button {{
     border: 1px solid var(--line);
@@ -795,29 +1015,7 @@ async def _handle_issue(request: web.Request) -> web.Response:
     identifier = request.match_info["identifier"].upper()
     orch: Orchestrator = request.app["orchestrator"]
     snap = orch.snapshot()
-
-    # Look for issue in running or retrying lists (snapshot key: issue_identifier)
-    issue_data: dict | None = None
-
-    for entry in snap.get("running", []):
-        if entry.get("issue_identifier") == identifier:
-            issue_data = {
-                "tracked": True,
-                "status": "running",
-                **entry,
-            }
-            break
-
-    if issue_data is None:
-        for entry in snap.get("retrying", []):
-            if entry.get("issue_identifier") == identifier:
-                issue_data = {
-                    "tracked": True,
-                    "status": "retry_scheduled",
-                    "last_error": entry.get("error"),
-                    **entry,
-                }
-                break
+    issue_data = _find_issue_snapshot(snap, identifier)
 
     if issue_data is None:
         for entry in snap.get("waiting", []):
