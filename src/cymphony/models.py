@@ -184,6 +184,25 @@ class ServiceConfig:
 
 
 # ---------------------------------------------------------------------------
+# QA review decision contract
+# ---------------------------------------------------------------------------
+
+class ReviewDecision(str, Enum):
+    """Machine-readable outcome of a QA review run."""
+    PASS = "pass"
+    CHANGES_REQUESTED = "changes_requested"
+
+
+@dataclass
+class ReviewResult:
+    """Parsed result from a QA review agent run."""
+    decision: ReviewDecision | None
+    summary: str | None = None
+    error: str | None = None
+    raw_output: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # Workspace model
 # ---------------------------------------------------------------------------
 
@@ -198,6 +217,12 @@ class Workspace:
 # ---------------------------------------------------------------------------
 # Agent / session models
 # ---------------------------------------------------------------------------
+
+class ExecutionMode(str, Enum):
+    """Whether the orchestrator is running a build (implementation) or review (QA) flow."""
+    BUILD = "build"
+    REVIEW = "review"
+
 
 class AgentEventType(str, Enum):
     SESSION_STARTED = "session_started"
@@ -272,6 +297,7 @@ class RunningEntry:
     session: LiveSession
     retry_attempt: int | None  # None = first run
     started_at: datetime
+    mode: ExecutionMode = field(default=ExecutionMode.BUILD)
     status: RunStatus = field(default=RunStatus.PREPARING_WORKSPACE)
 
 
@@ -283,6 +309,7 @@ class RetryEntry:
     attempt: int
     due_at_ms: float  # monotonic clock
     error: str | None
+    mode: str = "build"
     state: str | None = None
     run_status: str | None = None
     session_id: str | None = None

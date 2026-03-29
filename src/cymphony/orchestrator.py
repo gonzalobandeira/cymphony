@@ -19,10 +19,12 @@ from .models import (
     AgentError,
     ControlAction,
     CodexTotals,
+    ExecutionMode,
     Issue,
     LiveSession,
     OrchestratorState,
     ProblemRecord,
+    ReviewDecision,
     RetryEntry,
     RunningEntry,
     RunStatus,
@@ -32,8 +34,9 @@ from .models import (
     WorkflowError,
 )
 from .preflight import PreflightResult, run_preflight_checks
+from .review import parse_review_result
 from .state import StateManager
-from .workflow import WorkflowWatcher, load_workflow, render_plan_prompt, render_prompt
+from .workflow import WorkflowWatcher, load_workflow, render_plan_prompt, render_prompt, render_review_prompt
 from .workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -1159,6 +1162,14 @@ class Orchestrator:
         """Continuation retries come from a clean worker exit, not an error path."""
         return retry_entry.error is None
 
+    def _resolve_execution_mode(self, issue: Issue) -> ExecutionMode:
+        """Determine whether an issue should run in build or review mode."""
+        qa = self._config.transitions.qa_review
+        if qa.enabled and qa.dispatch:
+            if issue.state.lower() == qa.dispatch.lower():
+                return ExecutionMode.REVIEW
+        return ExecutionMode.BUILD
+
     async def _dispatch_issue(self, issue: Issue, attempt: int | None) -> None:
         """Claim and spawn worker for issue (spec §16.4)."""
         if self._is_shutting_down():
@@ -1166,6 +1177,8 @@ class Orchestrator:
         self._state.claimed.add(issue.id)
         self._state.completed.discard(issue.id)
         self._state.retry_attempts.pop(issue.id, None)
+
+        mode = self._resolve_execution_mode(issue)
 
         session = LiveSession(
             session_id=None,
@@ -1189,6 +1202,7 @@ class Orchestrator:
             session=session,
             retry_attempt=attempt,
             started_at=_now_utc(),
+            mode=mode,
         )
         self._state.running[issue.id] = entry
 
@@ -1208,10 +1222,20 @@ class Orchestrator:
             "issue_dispatched",
             issue.id, issue.identifier,
             attempt=attempt,
+            mode=mode.value,
         )
-        target = self._config.transitions.resolve("dispatch")
-        if target:
-            self._transition_issue_state_background(issue.id, target, trigger="dispatch")
+        # Review-mode issues are already in the QA dispatch state; skip the
+        # normal dispatch transition to avoid fighting with the review lane.
+        if mode == ExecutionMode.BUILD:
+            target = self._config.transitions.resolve("dispatch")
+            if target:
+                self._transition_issue_state_background(
+                    issue.id,
+                    target,
+                    trigger="dispatch",
+                    issue_identifier=issue.identifier,
+                    from_state=issue.state,
+                )
 
     # ------------------------------------------------------------------
     # Worker (spec §16.5)
@@ -1272,40 +1296,41 @@ class Orchestrator:
         max_turns = self._config.agent.max_turns
         session_id: str | None = None
         turn_number = 1
+        is_review = entry.mode == ExecutionMode.REVIEW
 
         async def on_event(event: AgentEvent) -> None:
             await self._handle_agent_event(issue.id, entry, event)
 
         try:
-            # Planning turn: agent produces a TodoWrite checklist only, no code changes.
-            # Reset plan_comment_id so a new comment is always created for this plan,
-            # even if a previous plan comment exists from an earlier attempt.
-            entry.session.plan_comment_id = None
-            entry.status = RunStatus.PLANNING
-            plan_prompt = render_plan_prompt(self._workflow, issue)
-            issue_log(
-                logger, logging.INFO,
-                "planning_turn_start",
-                issue.id, issue.identifier,
-            )
-            title = f"{issue.identifier}: {issue.title}"
-            session_id = await agent.run_turn(
-                workspace_path=workspace.path,
-                prompt=plan_prompt,
-                issue_id=issue.id,
-                issue_identifier=issue.identifier,
-                session_id=None,
-                title=title,
-                on_event=on_event,
-            )
-            issue_log(
-                logger, logging.INFO,
-                "planning_turn_completed",
-                issue.id, issue.identifier,
-                session_id=session_id,
-            )
-            entry.session.turn_count += 1
-            turn_number += 1  # planning turn consumed one slot
+            # Planning turn (build mode only): agent produces a TodoWrite checklist.
+            # Review mode skips planning — the review prompt is self-contained.
+            if not is_review:
+                entry.session.plan_comment_id = None
+                entry.status = RunStatus.PLANNING
+                plan_prompt = render_plan_prompt(self._workflow, issue)
+                issue_log(
+                    logger, logging.INFO,
+                    "planning_turn_start",
+                    issue.id, issue.identifier,
+                )
+                title = f"{issue.identifier}: {issue.title}"
+                session_id = await agent.run_turn(
+                    workspace_path=workspace.path,
+                    prompt=plan_prompt,
+                    issue_id=issue.id,
+                    issue_identifier=issue.identifier,
+                    session_id=None,
+                    title=title,
+                    on_event=on_event,
+                )
+                issue_log(
+                    logger, logging.INFO,
+                    "planning_turn_completed",
+                    issue.id, issue.identifier,
+                    session_id=session_id,
+                )
+                entry.session.turn_count += 1
+                turn_number += 1  # planning turn consumed one slot
 
             first_execution_turn = True
             while True:
@@ -1314,7 +1339,10 @@ class Orchestrator:
                 entry.status = RunStatus.BUILDING_PROMPT
                 if first_execution_turn:
                     try:
-                        prompt = render_prompt(self._workflow, issue, attempt)
+                        if is_review:
+                            prompt = render_review_prompt(self._workflow, issue)
+                        else:
+                            prompt = render_prompt(self._workflow, issue, attempt)
                     except WorkflowError as exc:
                         entry.status = RunStatus.FAILED
                         raise AgentError("prompt_error", str(exc)) from exc
@@ -1503,6 +1531,11 @@ class Orchestrator:
                 )
             return
 
+        # Resolve transitions based on execution mode: review-mode workers
+        # use the qa_review sub-config, build-mode workers use top-level transitions.
+        is_review = entry.mode == ExecutionMode.REVIEW
+        qa = self._config.transitions.qa_review
+
         if exc is None:
             # Normal exit → apply configured success transition if still in
             # an active state, then schedule continuation retry (spec §8.4)
@@ -1512,8 +1545,12 @@ class Orchestrator:
                 logger, logging.INFO,
                 "worker_exited_normal",
                 issue_id, identifier,
+                mode=entry.mode.value,
             )
-            target = self._config.transitions.resolve("success")
+            if is_review:
+                target = self._resolve_review_completion_target(issue_id, identifier, entry)
+            else:
+                target = self._config.transitions.resolve("success")
             if target:
                 active_lower = [s.lower() for s in self._config.tracker.active_states]
                 if entry.issue.state.lower() in active_lower:
@@ -1532,7 +1569,7 @@ class Orchestrator:
                 entry=entry,
             )
         else:
-            # Abnormal exit → set status based on error type, then retry
+            # Abnormal exit ��� set status based on error type, then retry
             if isinstance(exc, AgentError) and exc.code == "stall_timeout":
                 entry.status = RunStatus.STALLED
             elif isinstance(exc, AgentError) and exc.code == "turn_timeout":
@@ -1548,8 +1585,12 @@ class Orchestrator:
                 attempt=next_attempt,
                 error=error_str,
                 run_status=entry.status.value,
+                mode=entry.mode.value,
             )
-            target = self._config.transitions.resolve("failure")
+            if is_review:
+                target = qa.failure if qa.enabled else None
+            else:
+                target = self._config.transitions.resolve("failure")
             if target:
                 self._transition_issue_state_background(
                     issue_id,
@@ -1564,6 +1605,44 @@ class Orchestrator:
                 error=error_str,
                 entry=entry,
             )
+
+    def _resolve_review_completion_target(
+        self,
+        issue_id: str,
+        identifier: str,
+        entry: RunningEntry,
+    ) -> str | None:
+        """Map a completed review run to the configured QA transition target."""
+        qa = self._config.transitions.qa_review
+        workspace_path = str(WorkspaceManager(self._config).get_path(identifier))
+        result = parse_review_result(workspace_path)
+
+        if result.decision is None:
+            self._record_problem(
+                kind="qa_review_parse_error",
+                summary="QA review result could not be parsed",
+                detail=result.error or "unknown parse error",
+                issue_id=issue_id,
+                issue_identifier=identifier,
+            )
+            issue_log(
+                logger, logging.WARNING,
+                "qa_review_parse_failed",
+                issue_id, identifier,
+                error=result.error,
+            )
+            return qa.failure if qa.enabled else None
+
+        issue_log(
+            logger, logging.INFO,
+            "qa_review_decision",
+            issue_id, identifier,
+            decision=result.decision.value,
+            summary=result.summary,
+        )
+        if result.decision == ReviewDecision.PASS:
+            return qa.success if qa.enabled else None
+        return qa.failure if qa.enabled else None
 
     # ------------------------------------------------------------------
     # Retry scheduling (spec §8.4)
@@ -1603,6 +1682,7 @@ class Orchestrator:
             error=error,
         )
         if entry is not None:
+            retry_entry.mode = entry.mode.value
             retry_entry.state = entry.issue.state
             retry_entry.run_status = entry.status.value
             retry_entry.session_id = entry.session.session_id
@@ -1801,6 +1881,7 @@ class Orchestrator:
                 "attempt": retry.attempt,
                 "due_at": due_at.isoformat(),
                 "error": retry.error,
+                "mode": retry.mode,
                 "state": retry.state,
                 "run_status": retry.run_status,
                 "session_id": retry.session_id,
@@ -2138,6 +2219,7 @@ class Orchestrator:
                 for comment in entry.issue.comments
             ],
             "state": entry.issue.state,
+            "mode": entry.mode.value,
             "run_status": entry.status.value,
             "session_id": s.session_id,
             "turn_count": s.turn_count,
