@@ -1788,12 +1788,8 @@ class Orchestrator:
                 "detail": "The orchestrator has already reserved this issue for work.",
             }
 
-        if state_lower in {"todo", "in progress"}:
-            blockers = [
-                blocker for blocker in issue.blocked_by
-                if (blocker.state or "").lower() not in terminal_lower
-            ]
-            if blockers:
+        blockers = self._unresolved_blockers(issue)
+        if blockers:
                 blocker_desc = ", ".join(
                     f"{blocker.identifier or blocker.id or 'unknown'} ({blocker.state or 'unknown'})"
                     for blocker in blockers
