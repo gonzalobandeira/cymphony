@@ -1137,7 +1137,9 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   [data-tooltip] {{
     position: relative;
   }}
-  [data-tooltip]:hover::after {{
+  [data-tooltip]:hover::after,
+  [data-tooltip]:focus-visible::after,
+  [data-tooltip]:focus-within::after {{
     content: attr(data-tooltip);
     position: absolute;
     bottom: calc(100% + 6px);
@@ -1155,7 +1157,9 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     z-index: 10;
     box-shadow: 0 2px 8px rgba(31, 41, 51, 0.18);
   }}
-  [data-tooltip]:hover::before {{
+  [data-tooltip]:hover::before,
+  [data-tooltip]:focus-visible::before,
+  [data-tooltip]:focus-within::before {{
     content: "";
     position: absolute;
     bottom: calc(100% + 1px);
@@ -1633,12 +1637,12 @@ document.addEventListener("DOMContentLoaded", function() {{
         <div class="control-toolbar">
           <div class="control-group">
             <span class="control-group-label">Status</span>
-            <span class="pill {'paused' if dispatch_paused else 'active'}" data-tooltip="Current dispatch state">{'Paused' if dispatch_paused else 'Active'}</span>
+            <span class="pill {'paused' if dispatch_paused else 'active'}" title="Current dispatch state" data-tooltip="Current dispatch state">{'Paused' if dispatch_paused else 'Active'}</span>
           </div>
           <div class="control-group">
             <span class="control-group-label">View</span>
             {_post_button("/api/v1/refresh", "Refresh Now", tooltip="Fetch the latest orchestration state immediately.")}
-            <button type="button" id="pause-refresh" data-tooltip="Pause the automatic 15-second dashboard refresh" onclick="cym.toggleAutoRefresh()">Pause Auto-Refresh</button>
+            <button type="button" id="pause-refresh" title="Pause the automatic 15-second dashboard refresh" data-tooltip="Pause the automatic 15-second dashboard refresh" onclick="cym.toggleAutoRefresh()">Pause Auto-Refresh</button>
           </div>
           <div class="control-group">
             <span class="control-group-label">Dispatch</span>
@@ -1991,8 +1995,9 @@ def _post_button(
 ) -> str:
     safe_action = html.escape(action, quote=True)
     safe_label = html.escape(label)
+    safe_tooltip = html.escape(tooltip, quote=True)
     tooltip_attr = (
-        f" data-tooltip='{html.escape(tooltip, quote=True)}'" if tooltip else ""
+        f" title='{safe_tooltip}' data-tooltip='{safe_tooltip}'" if tooltip else ""
     )
     class_attr = f" class='{html.escape(css_class, quote=True)}'" if css_class else ""
     return (
@@ -2009,11 +2014,13 @@ def _kill_app_switch(shutdown_requested: bool) -> str:
     button_label = "Kill Requested" if shutdown_requested else "Kill App"
     return (
         "<div class='switch-form'>"
-        "<label class='switch-label' data-tooltip='Enable the kill switch to allow shutdown'>"
-        f"<input type='checkbox' id='kill-arm' value='true'{checked}{disabled}>"
+        "<label class='switch-label' title='Enable the kill switch to allow shutdown'"
+        " data-tooltip='Enable the kill switch to allow shutdown'>"
+        f"<input type='checkbox' id='kill-arm' value='true' title='Enable the kill switch to allow shutdown'{checked}{disabled}>"
         "<span>Arm</span>"
         "</label>"
         f"<button type='button' id='kill-app-button' class='danger-button'"
+        f" title='Terminate the Cymphony process (requires arming first)'"
         f" data-tooltip='Terminate the Cymphony process (requires arming first)'"
         f"{button_disabled} "
         "onclick=\"cym.killApp()\">"

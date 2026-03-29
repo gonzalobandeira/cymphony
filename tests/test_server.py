@@ -328,10 +328,13 @@ def test_render_dashboard_shows_waiting_reasons_and_recent_problems(
     assert ">Arm<" in html
     assert "Kill App" in html
     assert "Fetch the latest orchestration state immediately." in html
+    assert "title='Fetch the latest orchestration state immediately.'" in html
     assert "Stop launching new work; active agents continue." in html
     assert "Allow the orchestrator to start queued work again." in html
     assert "Enable the kill switch to allow shutdown" in html
+    assert "title='Enable the kill switch to allow shutdown'" in html
     assert "Terminate the Cymphony process (requires arming first)" in html
+    assert "title='Terminate the Cymphony process (requires arming first)'" in html
     assert "id='kill-app-button'" in html
     assert "danger-button" in html
     assert "disabled" in html
@@ -576,6 +579,7 @@ def test_render_dashboard_includes_js_refresh_and_toast() -> None:
     assert "Pause Auto-Refresh" in html
     assert "toggleAutoRefresh" in html
     assert "Pause the automatic 15-second dashboard refresh" in html
+    assert "title=\"Pause the automatic 15-second dashboard refresh\"" in html
     assert "syncKillButton" in html
 
     # Scroll position preservation
