@@ -832,6 +832,8 @@ def _render_operator_cards(
                     ("Attempt", str(row.get("attempt") or "")),
                     ("Due in", _format_relative_due(row.get("due_at"), _now_utc())),
                     ("Why", str(row.get("error") or "Continuation retry")),
+                    ("Started", _format_timestamp(row.get("started_at"))),
+                    ("Last event", _format_timestamp(row.get("last_event_at"))),
                 ]
                 action_html = _issue_controls(str(row.get("issue_identifier") or ""))
                 drilldown = _render_issue_drilldown(
@@ -923,7 +925,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         headers = (
             ["Issue", "State", "Project", "Last worked on", "Linear"]
             if key == "recently_completed"
-            else ["Issue", "State", "Priority", "Reason"]
+            else ["Issue", "State", "Priority", "Reason", "Updated"]
         )
         rows = []
         for item in groups[key]:
@@ -941,6 +943,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
                     escape(str(item.get("state") or "")),
                     escape(_render_priority(item.get("priority")) if "priority" in item else "-"),
                     escape(str(item.get("reason") or "")),
+                    escape(_format_timestamp(item.get("updated_at"))),
                 ])
         queue_sections.append(
             _render_table(
