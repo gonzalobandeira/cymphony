@@ -31,6 +31,7 @@ from .models import (
     WorkflowError,
 )
 from .preflight import PreflightResult, run_preflight_checks
+from .state import StateManager
 from .workflow import WorkflowWatcher, load_workflow, render_plan_prompt, render_prompt
 from .workspace import WorkspaceManager
 
@@ -69,6 +70,9 @@ class Orchestrator:
             poll_interval_ms=config.polling.interval_ms,
             max_concurrent_agents=config.agent.max_concurrent_agents,
         )
+        self._state_manager = StateManager(
+            Path(config.workspace.root) / ".cymphony_state.json"
+        )
         self._observers: list[Any] = []
         self._server: Any = None
         self._shutdown_event = asyncio.Event()
@@ -102,6 +106,9 @@ class Orchestrator:
                 self._config.server.port,
                 self._workflow_path,
             )
+
+        # Restore persisted state from previous run
+        await self._restore_persisted_state()
 
         # Startup terminal workspace cleanup (spec §8.6)
         await self._startup_terminal_cleanup()
@@ -159,6 +166,114 @@ class Orchestrator:
                 f"action=startup_terminal_cleanup_failed "
                 f"project_slug={self._config.tracker.project_slug} "
                 f"error={exc} (continuing)"
+            )
+
+    # ------------------------------------------------------------------
+    # State persistence
+    # ------------------------------------------------------------------
+
+    def _persist_state(self) -> None:
+        """Save current runtime state to disk. Best-effort; never raises."""
+        try:
+            self._state_manager.save(
+                retry_attempts=self._state.retry_attempts,
+                skipped=self._state.skipped,
+                dispatch_paused=self._state.dispatch_paused,
+            )
+        except Exception as exc:
+            logger.warning(f"action=state_persist_failed error={exc}")
+
+    async def _restore_persisted_state(self) -> None:
+        """Restore persisted state and reconcile against current Linear state."""
+        retry_attempts, skipped, dispatch_paused = self._state_manager.restore()
+
+        if not retry_attempts and not skipped and not dispatch_paused:
+            return
+
+        # Reconcile: fetch current issue states from Linear to drop stale entries
+        all_issue_ids = list(set(list(retry_attempts.keys()) + list(skipped.keys())))
+        current_states: dict[str, str] | None = None
+        try:
+            client = LinearClient(self._config.tracker)
+            issues = await client.fetch_issue_states_by_ids(all_issue_ids)
+            current_states = {i.id: i.state for i in issues}
+        except Exception as exc:
+            logger.warning(
+                f"action=state_reconcile_fetch_failed error={exc} "
+                "(restoring all persisted entries without reconciliation)"
+            )
+            # If we can't reach Linear, still restore what we have — the next
+            # tick will reconcile naturally.
+
+        terminal_lower = {s.lower() for s in self._config.tracker.terminal_states}
+        wm = WorkspaceManager(self._config)
+
+        # Reconcile retry attempts
+        restored_retries = 0
+        dropped_retries = 0
+        for issue_id, entry in list(retry_attempts.items()):
+            if current_states is not None:
+                issue_state = current_states.get(issue_id)
+
+                # Drop retries for issues in terminal states
+                if issue_state is not None and issue_state.lower() in terminal_lower:
+                    logger.info(
+                        f"action=state_reconcile_drop_retry issue_id={issue_id} "
+                        f"identifier={entry.identifier} reason=terminal_state "
+                        f"state={issue_state}"
+                    )
+                    dropped_retries += 1
+                    continue
+
+                # Drop retries for issues no longer found in Linear
+                if issue_id not in current_states:
+                    logger.info(
+                        f"action=state_reconcile_drop_retry issue_id={issue_id} "
+                        f"identifier={entry.identifier} reason=not_found_in_linear"
+                    )
+                    dropped_retries += 1
+                    continue
+
+            # Restore: set due_at_ms to fire immediately on next tick
+            entry.due_at_ms = _monotonic_ms()
+            self._state.retry_attempts[issue_id] = entry
+            self._state.claimed.add(issue_id)
+            restored_retries += 1
+
+        # Reconcile skipped entries
+        restored_skipped = 0
+        dropped_skipped = 0
+        for issue_id, entry in list(skipped.items()):
+            if current_states is not None:
+                issue_state = current_states.get(issue_id)
+
+                # Drop skips for terminal issues
+                if issue_state is not None and issue_state.lower() in terminal_lower:
+                    logger.info(
+                        f"action=state_reconcile_drop_skip issue_id={issue_id} "
+                        f"identifier={entry.identifier} reason=terminal_state "
+                        f"state={issue_state}"
+                    )
+                    dropped_skipped += 1
+                    continue
+
+            self._state.skipped[issue_id] = entry
+            restored_skipped += 1
+
+        if dispatch_paused:
+            self._state.dispatch_paused = True
+
+        logger.info(
+            f"action=state_reconcile_complete "
+            f"restored_retries={restored_retries} dropped_retries={dropped_retries} "
+            f"restored_skipped={restored_skipped} dropped_skipped={dropped_skipped} "
+            f"dispatch_paused={dispatch_paused}"
+        )
+
+        # Schedule timers for restored retries
+        for issue_id in list(self._state.retry_attempts.keys()):
+            asyncio.get_event_loop().call_soon(
+                lambda iid=issue_id: asyncio.create_task(self._on_retry_timer(iid)),
             )
 
     # ------------------------------------------------------------------
@@ -260,6 +375,8 @@ class Orchestrator:
 
         except Exception as exc:
             logger.error(f"action=tick_error error={exc}", exc_info=True)
+        finally:
+            self._persist_state()
 
     def _schedule_tick(self, delay_ms: float | None = None) -> None:
         if delay_ms is None:
@@ -391,6 +508,7 @@ class Orchestrator:
         for issue_id in running_issue_ids:
             await self._terminate_running_issue(issue_id, cleanup_workspace=False)
 
+        self._persist_state()
         self._shutdown_event.set()
         outcome = "noop" if already_requested else "accepted"
         detail = (
@@ -486,6 +604,7 @@ class Orchestrator:
         self._state.skipped.pop(issue_id, None)
         self._state.claimed.discard(issue_id)
         self._state.completed.discard(issue_id)
+        self._persist_state()
         coalesced = self.request_immediate_poll()
         detail = "issue released for redispatch"
         self._record_control(
@@ -540,6 +659,7 @@ class Orchestrator:
             created_at=_now_utc(),
             reason="operator_skip",
         )
+        self._persist_state()
         detail = "issue marked as skipped"
         self._record_control(
             action="skip_issue",
@@ -1326,6 +1446,8 @@ class Orchestrator:
             delay_ms / 1000.0,
             lambda: asyncio.create_task(self._on_retry_timer(issue_id)),
         )
+
+        self._persist_state()
 
     async def _on_retry_timer(self, issue_id: str) -> None:
         """Handle retry timer firing (spec §16.6)."""
