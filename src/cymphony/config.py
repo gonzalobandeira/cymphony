@@ -14,6 +14,7 @@ from .models import (
     HooksConfig,
     PollingConfig,
     PreflightConfig,
+    QAReviewConfig,
     ServerConfig,
     ServiceConfig,
     TrackerConfig,
@@ -237,6 +238,36 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
     # --- transitions ---
     transitions_raw: dict[str, Any] = raw.get("transitions") or {}
     _TRANSITION_DEFAULTS = TransitionsConfig()
+
+    # --- qa_review sub-config ---
+    qa_raw: Any = transitions_raw.get("qa_review")
+    _QA_DEFAULTS = QAReviewConfig()
+    if isinstance(qa_raw, dict):
+        qa_enabled = qa_raw.get("enabled")
+        qa_review = QAReviewConfig(
+            enabled=bool(qa_enabled) if qa_enabled is not None else _QA_DEFAULTS.enabled,
+            dispatch=_to_optional_str(
+                qa_raw.get("dispatch", _MISSING), _QA_DEFAULTS.dispatch
+            ),
+            success=_to_optional_str(
+                qa_raw.get("success", _MISSING), _QA_DEFAULTS.success
+            ),
+            failure=_to_optional_str(
+                qa_raw.get("failure", _MISSING), _QA_DEFAULTS.failure
+            ),
+        )
+    elif qa_raw is True:
+        # Shorthand: `qa_review: true` enables with all defaults
+        qa_review = QAReviewConfig(enabled=True)
+    else:
+        qa_review = QAReviewConfig()
+
+    # A QA review lane is agent-driven only if the review state is dispatchable.
+    if qa_review.enabled and qa_review.dispatch:
+        active_lower = {state.lower() for state in tracker.active_states}
+        if qa_review.dispatch.lower() not in active_lower:
+            tracker.active_states = [*tracker.active_states, qa_review.dispatch]
+
     transitions = TransitionsConfig(
         dispatch=_to_optional_str(
             transitions_raw.get("dispatch", _MISSING), _TRANSITION_DEFAULTS.dispatch
@@ -253,6 +284,7 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
         cancelled=_to_optional_str(
             transitions_raw.get("cancelled", _MISSING), _TRANSITION_DEFAULTS.cancelled
         ),
+        qa_review=qa_review,
     )
 
     return ServiceConfig(
@@ -309,6 +341,13 @@ def validate_dispatch_config(config: ServiceConfig) -> ValidationResult:
         result.fail(
             f"agent.provider={config.agent.provider!r} is not supported "
             f"(expected one of {', '.join(SUPPORTED_PROVIDERS)})"
+        )
+
+    # --- qa_review validation ---
+    qa = config.transitions.qa_review
+    if qa.enabled and not qa.dispatch:
+        result.fail(
+            "transitions.qa_review.dispatch is required when qa_review is enabled"
         )
 
     return result

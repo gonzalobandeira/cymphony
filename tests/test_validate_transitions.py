@@ -14,6 +14,7 @@ from cymphony.models import (
     HooksConfig,
     PollingConfig,
     PreflightConfig,
+    QAReviewConfig,
     ServerConfig,
     ServiceConfig,
     TrackerConfig,
@@ -402,3 +403,72 @@ async def test_workflow_reload_rejects_invalid_transition_config() -> None:
     assert orch._config is original_config
     assert orch._workflow is original_workflow
     assert orch._state_id_cache == {("team-1", "in progress"): "state-1"}
+
+
+# ---------------------------------------------------------------------------
+# QA review transition validation (BAP-193)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_validate_transitions_qa_review_targets_valid() -> None:
+    """QA review targets are validated against Linear states when enabled."""
+    orch = _build_orchestrator(TransitionsConfig(
+        dispatch="In Progress",
+        success="In Review",
+        qa_review=QAReviewConfig(enabled=True, dispatch="QA Review", success="In Review", failure="Todo"),
+    ))
+
+    with patch("cymphony.orchestrator.LinearClient") as MockClient:
+        client = MockClient.return_value
+        client.fetch_project_team_ids = AsyncMock(return_value=["team-1"])
+        client.fetch_team_workflow_state_names = AsyncMock(
+            return_value=["Todo", "In Progress", "QA Review", "In Review", "Done"]
+        )
+        client.fetch_team_workflow_state_id = AsyncMock(return_value="state-id-1")
+
+        result = await orch._validate_transitions(fail_hard=False)
+
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_validate_transitions_qa_review_invalid_target() -> None:
+    """Invalid QA review target raises WorkflowError with fail_hard."""
+    orch = _build_orchestrator(TransitionsConfig(
+        dispatch="In Progress",
+        success="In Review",
+        qa_review=QAReviewConfig(enabled=True, dispatch="Nonexistent QA State"),
+    ))
+
+    with patch("cymphony.orchestrator.LinearClient") as MockClient:
+        client = MockClient.return_value
+        client.fetch_project_team_ids = AsyncMock(return_value=["team-1"])
+        client.fetch_team_workflow_state_names = AsyncMock(
+            return_value=["Todo", "In Progress", "In Review", "Done"]
+        )
+
+        with pytest.raises(WorkflowError, match="Nonexistent QA State"):
+            await orch._validate_transitions(fail_hard=True)
+
+
+@pytest.mark.asyncio
+async def test_validate_transitions_qa_review_disabled_skips_targets() -> None:
+    """QA review targets are NOT validated when qa_review is disabled."""
+    orch = _build_orchestrator(TransitionsConfig(
+        dispatch="In Progress",
+        success="In Review",
+        qa_review=QAReviewConfig(enabled=False, dispatch="Nonexistent QA State"),
+    ))
+
+    with patch("cymphony.orchestrator.LinearClient") as MockClient:
+        client = MockClient.return_value
+        client.fetch_project_team_ids = AsyncMock(return_value=["team-1"])
+        client.fetch_team_workflow_state_names = AsyncMock(
+            return_value=["Todo", "In Progress", "In Review", "Done"]
+        )
+        client.fetch_team_workflow_state_id = AsyncMock(return_value="state-id-1")
+
+        result = await orch._validate_transitions(fail_hard=False)
+
+    assert result is True

@@ -128,6 +128,24 @@ class ServerConfig:
 
 
 @dataclass
+class QAReviewConfig:
+    """Configuration for the agent-driven QA review lane (spec §4.1.9.1).
+
+    When enabled, the workflow becomes:
+        Todo -> In Progress -> QA Review -> (Todo | In Review)
+
+    Instead of transitioning directly to ``success`` after implementation,
+    the issue moves to ``dispatch`` (the QA review state).  A separate QA
+    agent run then transitions the issue to ``success`` (QA passed) or
+    ``failure`` (QA failed, back to development).
+    """
+    enabled: bool = False
+    dispatch: str | None = "QA Review"
+    success: str | None = "In Review"
+    failure: str | None = "Todo"
+
+
+@dataclass
 class TransitionsConfig:
     """Declarative workflow state transitions (spec §4.1.9).
 
@@ -140,6 +158,7 @@ class TransitionsConfig:
     failure: str | None = None
     blocked: str | None = None
     cancelled: str | None = None
+    qa_review: QAReviewConfig = field(default_factory=QAReviewConfig)
 
     def resolve(self, event: str) -> str | None:
         """Look up the target state for a lifecycle event.
