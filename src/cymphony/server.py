@@ -1437,6 +1437,13 @@ window.cym = {{
     cym.post("/api/v1/app/kill", "confirm_kill=true");
   }},
 
+  syncKillButton: function() {{
+    var armed = document.getElementById("kill-arm");
+    var button = document.getElementById("kill-app-button");
+    if (!armed || !button) return;
+    button.disabled = !armed.checked;
+  }},
+
   /** Fetch the dashboard HTML and swap <main> content in place. */
   refresh: function() {{
     fetch("/", {{headers: {{"Accept": "text/html"}}}}).then(function(r) {{
@@ -1489,7 +1496,12 @@ window.cym = {{
     cym._refreshTimer = setInterval(cym.refresh, cym._INTERVAL);
   }}
 }};
-document.addEventListener("DOMContentLoaded", cym.startAutoRefresh);
+document.addEventListener("DOMContentLoaded", function() {{
+  cym.startAutoRefresh();
+  cym.syncKillButton();
+  var armed = document.getElementById("kill-arm");
+  if (armed) armed.addEventListener("change", cym.syncKillButton);
+}});
 </script>
 </head>
 <body>
@@ -1541,7 +1553,7 @@ document.addEventListener("DOMContentLoaded", cym.startAutoRefresh);
             {_post_button("/api/v1/refresh", "Refresh Now")}
             {_post_button("/api/v1/dispatch/pause", "Pause Dispatching")}
             {_post_button("/api/v1/dispatch/resume", "Resume Dispatching")}
-            <button type="button" id="pause-refresh" onclick="cym.toggleAutoRefresh()">Pause Auto-Refresh</button>
+            <button type="button" id="pause-refresh" title="Pause or resume the automatic 15-second dashboard refresh." onclick="cym.toggleAutoRefresh()">Pause Auto-Refresh</button>
           </div>
           <div class="control-group">
             {_kill_app_switch(shutdown_requested)}
@@ -1882,8 +1894,15 @@ async def start_setup_server(
 def _post_button(action: str, label: str) -> str:
     safe_action = html.escape(action, quote=True)
     safe_label = html.escape(label)
+    button_tooltips = {
+        "Refresh Now": "Fetch the latest orchestration state immediately.",
+        "Pause Dispatching": "Stop launching new work while letting active agents continue.",
+        "Resume Dispatching": "Allow the orchestrator to start queued work again.",
+    }
+    tooltip = button_tooltips.get(label)
+    tooltip_attr = f" title='{html.escape(tooltip, quote=True)}'" if tooltip else ""
     return (
-        f"<button type='button' onclick=\"cym.post('{safe_action}')\">"
+        f"<button type='button'{tooltip_attr} onclick=\"cym.post('{safe_action}')\">"
         f"{safe_label}</button>"
     )
 
@@ -1891,14 +1910,15 @@ def _post_button(action: str, label: str) -> str:
 def _kill_app_switch(shutdown_requested: bool) -> str:
     checked = " checked" if shutdown_requested else ""
     disabled = " disabled" if shutdown_requested else ""
+    button_disabled = " disabled" if shutdown_requested or not checked else ""
     button_label = "Kill Requested" if shutdown_requested else "Kill App"
     return (
         "<div class='switch-form'>"
         "<label class='switch-label'>"
-        f"<input type='checkbox' id='kill-arm' value='true'{checked}{disabled}>"
-        "<span>Arm kill</span>"
+        f"<input type='checkbox' id='kill-arm' value='true' title='Enable the kill switch so the app can be shut down.'{checked}{disabled}>"
+        "<span title='Enable the kill switch so the app can be shut down.'>Arm kill</span>"
         "</label>"
-        f"<button type='button' class='danger-button'{disabled} "
+        f"<button type='button' id='kill-app-button' class='danger-button' title='Terminate the dashboard process after the kill switch is armed.'{button_disabled} "
         "onclick=\"cym.killApp()\">"
         f"{escape(button_label)}</button>"
         "</div>"

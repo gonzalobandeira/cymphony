@@ -281,6 +281,13 @@ def test_render_dashboard_shows_waiting_reasons_and_recent_problems(
     assert "Resume Dispatching" in html
     assert "Arm kill" in html
     assert "Kill App" in html
+    assert "Fetch the latest orchestration state immediately." in html
+    assert "Stop launching new work while letting active agents continue." in html
+    assert "Allow the orchestrator to start queued work again." in html
+    assert "Enable the kill switch so the app can be shut down." in html
+    assert "Terminate the dashboard process after the kill switch is armed." in html
+    assert "id='kill-app-button'" in html
+    assert "id='kill-app-button' class='danger-button' title='Terminate the dashboard process after the kill switch is armed.' disabled" in html
     assert "Paused" in html
     assert "BAP-155" in html
     assert "Waiting Reasons (2)" in html
@@ -521,6 +528,8 @@ def test_render_dashboard_includes_js_refresh_and_toast() -> None:
     # Pause/resume auto-refresh button
     assert "Pause Auto-Refresh" in html
     assert "toggleAutoRefresh" in html
+    assert "Pause or resume the automatic 15-second dashboard refresh." in html
+    assert "syncKillButton" in html
 
     # Scroll position preservation
     assert "scrollY" in html
