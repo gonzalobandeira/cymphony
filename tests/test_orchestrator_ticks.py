@@ -112,6 +112,48 @@ def test_should_dispatch_blocks_in_progress_issue_with_unresolved_dependencies()
     assert orchestrator._should_dispatch(issue) is False
 
 
+def test_maybe_transition_blocked_issue_uses_configured_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    orchestrator = _build_orchestrator()
+    orchestrator._config.transitions = TransitionsConfig(blocked="Blocked")
+    issue = _build_issue(issue_id="issue-2", identifier="BAN-217", state="Todo")
+    issue.blocked_by = [
+        BlockerRef(id="blocker-1", identifier="BAN-215", state="In Progress"),
+    ]
+    transitions: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_transition_issue_state_background",
+        lambda issue_id, state_name: transitions.append((issue_id, state_name)),
+    )
+
+    orchestrator._maybe_transition_blocked_issue(issue)
+
+    assert transitions == [(issue.id, "Blocked")]
+
+
+def test_maybe_transition_blocked_issue_skips_when_already_in_blocked_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    orchestrator._config.transitions = TransitionsConfig(blocked="Blocked")
+    issue = _build_issue(issue_id="issue-2", identifier="BAN-217", state="Blocked")
+    issue.blocked_by = [
+        BlockerRef(id="blocker-1", identifier="BAN-215", state="In Progress"),
+    ]
+    transitions: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_transition_issue_state_background",
+        lambda issue_id, state_name: transitions.append((issue_id, state_name)),
+    )
+
+    orchestrator._maybe_transition_blocked_issue(issue)
+
+    assert transitions == []
+
+
 @pytest.mark.asyncio
 async def test_request_immediate_poll_coalesces_while_tick_is_running(monkeypatch: pytest.MonkeyPatch) -> None:
     orchestrator = _build_orchestrator()
@@ -879,3 +921,46 @@ async def test_on_worker_done_skips_transition_when_success_is_none(
     assert events == [
         f"retry:{issue.id}:1",
     ]
+
+
+@pytest.mark.asyncio
+async def test_retry_releases_blocked_issue_and_applies_blocked_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    orchestrator._config.transitions = TransitionsConfig(blocked="Blocked")
+    issue = _build_issue(state="Todo")
+    issue.blocked_by = [
+        BlockerRef(id="blocker-1", identifier="BAP-170", state="In Progress"),
+    ]
+    orchestrator._state.claimed.add(issue.id)
+    orchestrator._state.completed.add(issue.id)
+    retry_entry = RetryEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        attempt=1,
+        due_at_ms=0.0,
+        error=None,
+    )
+    orchestrator._state.retry_attempts[issue.id] = retry_entry
+    transitions: list[tuple[str, str]] = []
+
+    class FakeLinearClient:
+        def __init__(self, tracker_config: TrackerConfig) -> None:
+            pass
+
+        async def fetch_candidate_issues(self) -> list[Issue]:
+            return [issue]
+
+    monkeypatch.setattr("cymphony.orchestrator.LinearClient", FakeLinearClient)
+    monkeypatch.setattr(
+        orchestrator,
+        "_transition_issue_state_background",
+        lambda issue_id, state_name: transitions.append((issue_id, state_name)),
+    )
+
+    await orchestrator._on_retry_timer(issue.id)
+
+    assert transitions == [(issue.id, "Blocked")]
+    assert issue.id not in orchestrator._state.claimed
+    assert issue.id not in orchestrator._state.completed

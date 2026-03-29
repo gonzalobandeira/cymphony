@@ -129,6 +129,15 @@ def test_transitions_disable_with_empty_string() -> None:
     assert config.transitions.success is None
 
 
+def test_transitions_disable_with_null() -> None:
+    config = build_config(_workflow_with_transitions({
+        "dispatch": None,
+        "success": None,
+    }))
+    assert config.transitions.dispatch is None
+    assert config.transitions.success is None
+
+
 def test_transitions_partial_override() -> None:
     config = build_config(_workflow_with_transitions({
         "success": "Completed",
