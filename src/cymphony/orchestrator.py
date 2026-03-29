@@ -96,7 +96,11 @@ class Orchestrator:
         # Start optional HTTP server
         if self._config.server.port is not None:
             from .server import start_server
-            self._server = await start_server(self, self._config.server.port)
+            self._server = await start_server(
+                self,
+                self._config.server.port,
+                self._workflow_path,
+            )
 
         # Startup terminal workspace cleanup (spec §8.6)
         await self._startup_terminal_cleanup()

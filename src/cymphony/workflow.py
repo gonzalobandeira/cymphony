@@ -23,6 +23,18 @@ DEFAULT_WORKFLOW_FILENAME = "WORKFLOW.md"
 OnChangeCallback = Callable[[WorkflowDefinition], Awaitable[None]]
 
 
+class _WorkflowDumper(yaml.SafeDumper):
+    pass
+
+
+def _represent_workflow_str(dumper: yaml.SafeDumper, value: str) -> yaml.nodes.Node:
+    style = "|" if "\n" in value else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
+
+
+_WorkflowDumper.add_representer(str, _represent_workflow_str)
+
+
 def load_workflow(path: str | Path) -> WorkflowDefinition:
     """Load and parse a WORKFLOW.md file (spec §5.2).
 
@@ -84,6 +96,26 @@ def load_workflow(path: str | Path) -> WorkflowDefinition:
 
     prompt_template = "".join(body_lines).strip()
     return WorkflowDefinition(config=config, prompt_template=prompt_template)
+
+
+def dump_workflow(config: dict[str, Any], prompt_template: str) -> str:
+    """Serialize workflow config and prompt template back to WORKFLOW.md text."""
+    front_matter = yaml.dump(
+        config,
+        Dumper=_WorkflowDumper,
+        sort_keys=False,
+        allow_unicode=False,
+    ).strip()
+    prompt_body = prompt_template.strip() or "You are working on an issue from Linear."
+    return f"---\n{front_matter}\n---\n{prompt_body}\n"
+
+
+def save_workflow(path: str | Path, config: dict[str, Any], prompt_template: str) -> None:
+    """Write a WORKFLOW.md file."""
+    Path(path).write_text(
+        dump_workflow(config, prompt_template),
+        encoding="utf-8",
+    )
 
 
 def render_prompt(

@@ -9,17 +9,45 @@ import logging
 import math
 from datetime import datetime, timezone
 from html import escape
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from aiohttp import web
 
+from .config import build_config
 from .linear import LinearClient
-from .models import Issue
+from .models import Issue, WorkflowDefinition
+from .workflow import load_workflow, save_workflow
 
 if TYPE_CHECKING:
     from .orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_SETUP_FORM = {
+    "tracker_kind": "linear",
+    "tracker_api_key": "$LINEAR_API_KEY",
+    "project_slug": "",
+    "assignee": "",
+    "active_states": "Todo, In Progress",
+    "terminal_states": "Done, Cancelled, Canceled, Duplicate, Closed",
+    "poll_interval_ms": "30000",
+    "workspace_root": "~/symphony_workspaces",
+    "max_concurrent_agents": "5",
+    "max_turns": "20",
+    "max_retry_backoff_ms": "300000",
+    "command": "claude",
+    "turn_timeout_ms": "3600000",
+    "stall_timeout_ms": "300000",
+    "dangerously_skip_permissions": True,
+    "after_create": "",
+    "before_run": "",
+    "after_run": "",
+    "before_remove": "",
+    "hooks_timeout_ms": "120000",
+    "server_port": "8080",
+    "prompt_template": """You are a senior software engineer working on the project.\n\n## Issue\n\n**Title:** {{ issue.title }}\n**Identifier:** {{ issue.identifier }}\n**State:** {{ issue.state }}\n{% if issue.description %}\n**Description:**\n{{ issue.description }}\n{% endif %}\n\n## Instructions\n\n1. Read the issue carefully.\n2. Create and checkout a branch named `agent/{{ issue.identifier | lower }}`.\n3. Implement the requested change.\n4. Update tests as needed.\n5. Keep changes minimal and consistent with the codebase.\n""",
+}
 
 
 def _now_utc() -> datetime:
@@ -60,6 +88,10 @@ def _json_response(data: object, status: int = 200) -> web.Response:
 
 def _html_response(html: str) -> web.Response:
     return web.Response(content_type="text/html", text=html)
+
+
+def _redirect(location: str) -> web.Response:
+    raise web.HTTPFound(location)
 
 
 def _find_issue_snapshot(snapshot: dict, identifier: str) -> dict | None:
@@ -205,6 +237,311 @@ def _render_issue_drilldown(entry: dict, retry_due: str | None = None) -> str:
     </section>
   </div>
 </details>"""
+
+
+def _workflow_form_data(
+    workflow_path: Path,
+    workflow: WorkflowDefinition | None = None,
+    form_overrides: dict[str, object] | None = None,
+) -> dict[str, object]:
+    data: dict[str, object] = dict(_DEFAULT_SETUP_FORM)
+    data["workflow_path"] = str(workflow_path)
+
+    if workflow is not None:
+        raw = workflow.config
+        tracker = raw.get("tracker") or {}
+        polling = raw.get("polling") or {}
+        workspace = raw.get("workspace") or {}
+        agent = raw.get("agent") or {}
+        codex = raw.get("codex") or {}
+        hooks = raw.get("hooks") or {}
+        server = raw.get("server") or {}
+
+        data.update(
+            {
+                "tracker_kind": str(tracker.get("kind") or "linear"),
+                "tracker_api_key": str(tracker.get("api_key") or "$LINEAR_API_KEY"),
+                "project_slug": str(tracker.get("project_slug") or ""),
+                "assignee": str(tracker.get("assignee") or ""),
+                "active_states": ", ".join(str(v) for v in (tracker.get("active_states") or [])) or data["active_states"],
+                "terminal_states": ", ".join(str(v) for v in (tracker.get("terminal_states") or [])) or data["terminal_states"],
+                "poll_interval_ms": str(polling.get("interval_ms") or data["poll_interval_ms"]),
+                "workspace_root": str(workspace.get("root") or data["workspace_root"]),
+                "max_concurrent_agents": str(agent.get("max_concurrent_agents") or data["max_concurrent_agents"]),
+                "max_turns": str(agent.get("max_turns") or data["max_turns"]),
+                "max_retry_backoff_ms": str(agent.get("max_retry_backoff_ms") or data["max_retry_backoff_ms"]),
+                "command": str(codex.get("command") or data["command"]),
+                "turn_timeout_ms": str(codex.get("turn_timeout_ms") or data["turn_timeout_ms"]),
+                "stall_timeout_ms": str(codex.get("stall_timeout_ms") or data["stall_timeout_ms"]),
+                "dangerously_skip_permissions": bool(codex.get("dangerously_skip_permissions", True)),
+                "after_create": str(hooks.get("after_create") or ""),
+                "before_run": str(hooks.get("before_run") or ""),
+                "after_run": str(hooks.get("after_run") or ""),
+                "before_remove": str(hooks.get("before_remove") or ""),
+                "hooks_timeout_ms": str(hooks.get("timeout_ms") or data["hooks_timeout_ms"]),
+                "server_port": str(server.get("port") or data["server_port"]),
+                "prompt_template": workflow.prompt_template or data["prompt_template"],
+            }
+        )
+
+    if form_overrides:
+        data.update(form_overrides)
+
+    return data
+
+
+def _split_csv(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
+    tracker = {
+        "kind": str(form.get("tracker_kind") or "linear"),
+        "api_key": str(form.get("tracker_api_key") or "$LINEAR_API_KEY"),
+        "project_slug": str(form.get("project_slug") or "").strip(),
+        "active_states": _split_csv(str(form.get("active_states") or "")),
+        "terminal_states": _split_csv(str(form.get("terminal_states") or "")),
+    }
+    assignee = str(form.get("assignee") or "").strip()
+    if assignee:
+        tracker["assignee"] = assignee
+
+    hooks = {
+        "timeout_ms": int(str(form.get("hooks_timeout_ms") or "120000")),
+    }
+    for key in ("after_create", "before_run", "after_run", "before_remove"):
+        value = str(form.get(key) or "").rstrip()
+        if value:
+            hooks[key] = value
+
+    config = {
+        "tracker": tracker,
+        "polling": {
+            "interval_ms": int(str(form.get("poll_interval_ms") or "30000")),
+        },
+        "workspace": {
+            "root": str(form.get("workspace_root") or "").strip(),
+        },
+        "agent": {
+            "max_concurrent_agents": int(str(form.get("max_concurrent_agents") or "5")),
+            "max_turns": int(str(form.get("max_turns") or "20")),
+            "max_retry_backoff_ms": int(str(form.get("max_retry_backoff_ms") or "300000")),
+        },
+        "codex": {
+            "command": str(form.get("command") or "claude").strip(),
+            "turn_timeout_ms": int(str(form.get("turn_timeout_ms") or "3600000")),
+            "stall_timeout_ms": int(str(form.get("stall_timeout_ms") or "300000")),
+            "dangerously_skip_permissions": bool(form.get("dangerously_skip_permissions")),
+        },
+        "hooks": hooks,
+        "server": {
+            "port": int(str(form.get("server_port") or "8080")),
+        },
+    }
+
+    return WorkflowDefinition(
+        config=config,
+        prompt_template=str(form.get("prompt_template") or "").strip(),
+    )
+
+
+def _validate_workflow_form(form: dict[str, object]) -> list[str]:
+    errors: list[str] = []
+    try:
+        workflow = _build_workflow_from_form(form)
+    except ValueError:
+        return ["Numeric fields must contain valid integers."]
+
+    tracker = workflow.config["tracker"]
+    if tracker.get("kind") != "linear":
+        errors.append("tracker.kind must be 'linear'.")
+    if not tracker.get("api_key"):
+        errors.append("tracker.api_key is required.")
+    if not tracker.get("project_slug"):
+        errors.append("tracker.project_slug is required.")
+    if not workflow.config["workspace"].get("root"):
+        errors.append("workspace.root is required.")
+    if not workflow.config["codex"].get("command"):
+        errors.append("codex.command is required.")
+
+    config = build_config(workflow)
+    if config.agent.max_concurrent_agents <= 0:
+        errors.append("agent.max_concurrent_agents must be greater than zero.")
+    if config.agent.max_turns <= 0:
+        errors.append("agent.max_turns must be greater than zero.")
+    if config.polling.interval_ms <= 0:
+        errors.append("polling.interval_ms must be greater than zero.")
+
+    return errors
+
+
+def _checkbox_checked(value: object) -> str:
+    return " checked" if bool(value) else ""
+
+
+def _render_setup_page(
+    *,
+    values: dict[str, object],
+    errors: list[str] | None = None,
+    saved: bool = False,
+    setup_mode: bool,
+) -> str:
+    title = "Set Up Cymphony" if setup_mode else "Workflow Settings"
+    subtitle = (
+        "Create a WORKFLOW.md so the service can start."
+        if setup_mode
+        else "Edit the current workflow. Running services will reload changes when the file updates."
+    )
+    action = "/setup" if setup_mode else "/settings"
+    success = ""
+    if saved:
+        success_message = (
+            "Workflow saved. Restart Cymphony to leave setup mode."
+            if setup_mode
+            else "Workflow saved."
+        )
+        success = f"<div class='notice success'>{escape(success_message)}</div>"
+
+    error_html = ""
+    if errors:
+        items = "".join(f"<li>{escape(err)}</li>" for err in errors)
+        error_html = f"<div class='notice error'><strong>Fix these issues:</strong><ul>{items}</ul></div>"
+
+    def field(name: str) -> str:
+        return escape(str(values.get(name) or ""))
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{escape(title)}</title>
+  <style>
+    body {{ font-family: ui-sans-serif, system-ui, sans-serif; background: #f6f7f9; color: #111827; margin: 0; }}
+    main {{ max-width: 1100px; margin: 0 auto; padding: 32px 20px 56px; }}
+    h1 {{ margin: 0 0 8px; }}
+    p {{ color: #4b5563; }}
+    form {{ display: grid; gap: 20px; }}
+    .grid {{ display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }}
+    .card {{ background: #fff; border: 1px solid #d1d5db; border-radius: 12px; padding: 18px; }}
+    label {{ display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px; }}
+    input, textarea {{ width: 100%; box-sizing: border-box; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px 12px; font: inherit; }}
+    textarea {{ min-height: 120px; resize: vertical; }}
+    .full {{ grid-column: 1 / -1; }}
+    .notice {{ border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }}
+    .error {{ background: #fef2f2; border: 1px solid #fecaca; }}
+    .success {{ background: #ecfdf5; border: 1px solid #a7f3d0; }}
+    .actions {{ display: flex; gap: 12px; align-items: center; }}
+    button {{ background: #111827; color: white; border: 0; border-radius: 8px; padding: 10px 16px; font: inherit; cursor: pointer; }}
+    .muted {{ font-size: 13px; color: #6b7280; }}
+    .check {{ display: flex; align-items: center; gap: 10px; }}
+    .check input {{ width: auto; }}
+    code {{ background: #e5e7eb; border-radius: 4px; padding: 1px 4px; }}
+  </style>
+</head>
+<body>
+<main>
+  <h1>{escape(title)}</h1>
+  <p>{escape(subtitle)}</p>
+  <p class="muted">Workflow file: <code>{escape(str(values.get("workflow_path") or ""))}</code></p>
+  {success}
+  {error_html}
+  <form method="post" action="{action}">
+    <div class="grid">
+      <section class="card">
+        <label for="project_slug">Linear project slug</label>
+        <input id="project_slug" name="project_slug" value="{field("project_slug")}" required />
+      </section>
+      <section class="card">
+        <label for="assignee">Assignee filter</label>
+        <input id="assignee" name="assignee" value="{field("assignee")}" placeholder="optional display name" />
+      </section>
+      <section class="card">
+        <label for="tracker_api_key">Tracker API key value</label>
+        <input id="tracker_api_key" name="tracker_api_key" value="{field("tracker_api_key")}" required />
+        <div class="muted">Use <code>$LINEAR_API_KEY</code> to load from the environment.</div>
+      </section>
+      <section class="card">
+        <label for="workspace_root">Workspace root</label>
+        <input id="workspace_root" name="workspace_root" value="{field("workspace_root")}" required />
+      </section>
+      <section class="card">
+        <label for="active_states">Active states</label>
+        <input id="active_states" name="active_states" value="{field("active_states")}" required />
+      </section>
+      <section class="card">
+        <label for="terminal_states">Terminal states</label>
+        <input id="terminal_states" name="terminal_states" value="{field("terminal_states")}" required />
+      </section>
+      <section class="card">
+        <label for="poll_interval_ms">Poll interval (ms)</label>
+        <input id="poll_interval_ms" name="poll_interval_ms" value="{field("poll_interval_ms")}" required />
+      </section>
+      <section class="card">
+        <label for="server_port">HTTP port</label>
+        <input id="server_port" name="server_port" value="{field("server_port")}" required />
+      </section>
+      <section class="card">
+        <label for="max_concurrent_agents">Max concurrent agents</label>
+        <input id="max_concurrent_agents" name="max_concurrent_agents" value="{field("max_concurrent_agents")}" required />
+      </section>
+      <section class="card">
+        <label for="max_turns">Max turns</label>
+        <input id="max_turns" name="max_turns" value="{field("max_turns")}" required />
+      </section>
+      <section class="card">
+        <label for="max_retry_backoff_ms">Max retry backoff (ms)</label>
+        <input id="max_retry_backoff_ms" name="max_retry_backoff_ms" value="{field("max_retry_backoff_ms")}" required />
+      </section>
+      <section class="card">
+        <label for="command">Agent command</label>
+        <input id="command" name="command" value="{field("command")}" required />
+      </section>
+      <section class="card">
+        <label for="turn_timeout_ms">Turn timeout (ms)</label>
+        <input id="turn_timeout_ms" name="turn_timeout_ms" value="{field("turn_timeout_ms")}" required />
+      </section>
+      <section class="card">
+        <label for="stall_timeout_ms">Stall timeout (ms)</label>
+        <input id="stall_timeout_ms" name="stall_timeout_ms" value="{field("stall_timeout_ms")}" required />
+      </section>
+      <section class="card">
+        <label for="hooks_timeout_ms">Hooks timeout (ms)</label>
+        <input id="hooks_timeout_ms" name="hooks_timeout_ms" value="{field("hooks_timeout_ms")}" required />
+      </section>
+      <section class="card">
+        <label>Permissions</label>
+        <label class="check"><input type="checkbox" name="dangerously_skip_permissions" value="1"{_checkbox_checked(values.get("dangerously_skip_permissions"))} />Dangerously skip permissions</label>
+      </section>
+      <section class="card full">
+        <label for="after_create">after_create hook</label>
+        <textarea id="after_create" name="after_create">{field("after_create")}</textarea>
+      </section>
+      <section class="card full">
+        <label for="before_run">before_run hook</label>
+        <textarea id="before_run" name="before_run">{field("before_run")}</textarea>
+      </section>
+      <section class="card full">
+        <label for="after_run">after_run hook</label>
+        <textarea id="after_run" name="after_run">{field("after_run")}</textarea>
+      </section>
+      <section class="card full">
+        <label for="before_remove">before_remove hook</label>
+        <textarea id="before_remove" name="before_remove">{field("before_remove")}</textarea>
+      </section>
+      <section class="card full">
+        <label for="prompt_template">Prompt template</label>
+        <textarea id="prompt_template" name="prompt_template" style="min-height: 280px">{field("prompt_template")}</textarea>
+      </section>
+    </div>
+    <div class="actions">
+      <button type="submit">Save Workflow</button>
+      {"<a href='/'>Back to dashboard</a>" if not setup_mode else ""}
+    </div>
+  </form>
+</main>
+</body>
+</html>"""
 
 
 def _format_timestamp(raw: str | None) -> str:
@@ -934,19 +1271,33 @@ def _render_dashboard(groups: dict[str, object]) -> str:
 </html>"""
 
 
-def build_app(orchestrator: "Orchestrator") -> web.Application:
+def build_app(
+    orchestrator: "Orchestrator" | None,
+    *,
+    workflow_path: Path,
+    setup_mode: bool = False,
+    setup_error: str | None = None,
+) -> web.Application:
     """Build and return the aiohttp Application."""
     app = web.Application()
     app["orchestrator"] = orchestrator
-    app.router.add_get("/", _handle_dashboard)
-    app.router.add_get("/api/v1/state", _handle_state)
-    app.router.add_post("/api/v1/refresh", _handle_refresh)
-    app.router.add_post("/api/v1/dispatch/pause", _handle_pause_dispatch)
-    app.router.add_post("/api/v1/dispatch/resume", _handle_resume_dispatch)
-    app.router.add_post("/api/v1/issues/{identifier}/cancel", _handle_cancel_worker)
-    app.router.add_post("/api/v1/issues/{identifier}/requeue", _handle_requeue_issue)
-    app.router.add_post("/api/v1/issues/{identifier}/skip", _handle_skip_issue)
-    app.router.add_get("/api/v1/{identifier}", _handle_issue)
+    app["workflow_path"] = workflow_path
+    app["setup_mode"] = setup_mode
+    app["setup_error"] = setup_error
+    app.router.add_get("/", _handle_root)
+    app.router.add_get("/setup", _handle_setup_get)
+    app.router.add_post("/setup", _handle_setup_post)
+    app.router.add_get("/settings", _handle_settings_get)
+    app.router.add_post("/settings", _handle_settings_post)
+    if orchestrator is not None:
+        app.router.add_get("/api/v1/state", _handle_state)
+        app.router.add_post("/api/v1/refresh", _handle_refresh)
+        app.router.add_post("/api/v1/dispatch/pause", _handle_pause_dispatch)
+        app.router.add_post("/api/v1/dispatch/resume", _handle_resume_dispatch)
+        app.router.add_post("/api/v1/issues/{identifier}/cancel", _handle_cancel_worker)
+        app.router.add_post("/api/v1/issues/{identifier}/requeue", _handle_requeue_issue)
+        app.router.add_post("/api/v1/issues/{identifier}/skip", _handle_skip_issue)
+        app.router.add_get("/api/v1/{identifier}", _handle_issue)
     return app
 
 
@@ -955,16 +1306,136 @@ def build_app(orchestrator: "Orchestrator") -> web.Application:
 # ---------------------------------------------------------------------------
 
 
+def _require_orchestrator(request: web.Request) -> "Orchestrator":
+    orch = request.app.get("orchestrator")
+    if orch is None:
+        raise web.HTTPServiceUnavailable(
+            text=json.dumps(
+                {
+                    "error": {
+                        "code": "setup_mode",
+                        "message": "Cymphony is running in setup mode.",
+                    }
+                }
+            ),
+            content_type="application/json",
+        )
+    return orch
+
+
+async def _handle_root(request: web.Request) -> web.Response:
+    if request.app.get("setup_mode"):
+        return await _handle_setup_get(request)
+    return await _handle_dashboard(request)
+
+
+def _load_current_workflow_or_none(workflow_path: Path) -> WorkflowDefinition | None:
+    try:
+        return load_workflow(workflow_path)
+    except Exception:
+        return None
+
+
+async def _handle_setup_get(request: web.Request) -> web.Response:
+    workflow_path = Path(request.app["workflow_path"])
+    workflow = _load_current_workflow_or_none(workflow_path)
+    values = _workflow_form_data(workflow_path, workflow)
+    errors: list[str] = []
+    setup_error = request.app.get("setup_error")
+    if setup_error:
+        errors.append(str(setup_error))
+    saved = request.query.get("saved") == "1"
+    return _html_response(
+        _render_setup_page(
+            values=values,
+            errors=errors or None,
+            saved=saved,
+            setup_mode=True,
+        )
+    )
+
+
+async def _handle_settings_get(request: web.Request) -> web.Response:
+    if request.app.get("setup_mode"):
+        return _redirect("/setup")
+    workflow_path = Path(request.app["workflow_path"])
+    workflow = load_workflow(workflow_path)
+    values = _workflow_form_data(workflow_path, workflow)
+    saved = request.query.get("saved") == "1"
+    return _html_response(
+        _render_setup_page(
+            values=values,
+            saved=saved,
+            setup_mode=False,
+        )
+    )
+
+
+async def _save_workflow_from_request(request: web.Request, *, setup_mode: bool) -> web.Response:
+    workflow_path = Path(request.app["workflow_path"])
+    submitted = await request.post()
+    form = {
+        "tracker_kind": "linear",
+        "tracker_api_key": submitted.get("tracker_api_key", "$LINEAR_API_KEY"),
+        "project_slug": submitted.get("project_slug", ""),
+        "assignee": submitted.get("assignee", ""),
+        "active_states": submitted.get("active_states", ""),
+        "terminal_states": submitted.get("terminal_states", ""),
+        "poll_interval_ms": submitted.get("poll_interval_ms", ""),
+        "workspace_root": submitted.get("workspace_root", ""),
+        "max_concurrent_agents": submitted.get("max_concurrent_agents", ""),
+        "max_turns": submitted.get("max_turns", ""),
+        "max_retry_backoff_ms": submitted.get("max_retry_backoff_ms", ""),
+        "command": submitted.get("command", ""),
+        "turn_timeout_ms": submitted.get("turn_timeout_ms", ""),
+        "stall_timeout_ms": submitted.get("stall_timeout_ms", ""),
+        "dangerously_skip_permissions": submitted.get("dangerously_skip_permissions") == "1",
+        "after_create": submitted.get("after_create", ""),
+        "before_run": submitted.get("before_run", ""),
+        "after_run": submitted.get("after_run", ""),
+        "before_remove": submitted.get("before_remove", ""),
+        "hooks_timeout_ms": submitted.get("hooks_timeout_ms", ""),
+        "server_port": submitted.get("server_port", ""),
+        "prompt_template": submitted.get("prompt_template", ""),
+    }
+
+    errors = _validate_workflow_form(form)
+    values = _workflow_form_data(workflow_path, form_overrides=form)
+    if errors:
+        return _html_response(
+            _render_setup_page(
+                values=values,
+                errors=errors,
+                setup_mode=setup_mode,
+            )
+        )
+
+    workflow = _build_workflow_from_form(form)
+    workflow_path.parent.mkdir(parents=True, exist_ok=True)
+    save_workflow(workflow_path, workflow.config, workflow.prompt_template)
+    return _redirect(("/setup" if setup_mode else "/settings") + "?saved=1")
+
+
+async def _handle_setup_post(request: web.Request) -> web.Response:
+    return await _save_workflow_from_request(request, setup_mode=True)
+
+
+async def _handle_settings_post(request: web.Request) -> web.Response:
+    if request.app.get("setup_mode"):
+        return _redirect("/setup")
+    return await _save_workflow_from_request(request, setup_mode=False)
+
+
 async def _handle_state(request: web.Request) -> web.Response:
     """GET /api/v1/state — full orchestrator snapshot."""
-    orch: Orchestrator = request.app["orchestrator"]
+    orch = _require_orchestrator(request)
     snap = orch.snapshot()
     return _json_response(snap)
 
 
 async def _handle_refresh(request: web.Request) -> web.Response:
     """POST /api/v1/refresh — trigger immediate poll."""
-    orch: Orchestrator = request.app["orchestrator"]
+    orch = _require_orchestrator(request)
     result = orch.trigger_refresh()
     return _json_response(
         {
@@ -979,33 +1450,33 @@ async def _handle_refresh(request: web.Request) -> web.Response:
 
 async def _handle_pause_dispatch(request: web.Request) -> web.Response:
     """POST /api/v1/dispatch/pause — pause new dispatches."""
-    orch: Orchestrator = request.app["orchestrator"]
+    orch = _require_orchestrator(request)
     return _json_response(orch.pause_dispatching(), status=202)
 
 
 async def _handle_resume_dispatch(request: web.Request) -> web.Response:
     """POST /api/v1/dispatch/resume — resume new dispatches."""
-    orch: Orchestrator = request.app["orchestrator"]
+    orch = _require_orchestrator(request)
     return _json_response(orch.resume_dispatching(), status=202)
 
 
 async def _handle_cancel_worker(request: web.Request) -> web.Response:
     """POST /api/v1/issues/<identifier>/cancel — cancel a running worker."""
-    orch: Orchestrator = request.app["orchestrator"]
+    orch = _require_orchestrator(request)
     result = await orch.cancel_worker(request.match_info["identifier"])
     return _json_response(result, status=202 if result.get("ok") else 404)
 
 
 async def _handle_requeue_issue(request: web.Request) -> web.Response:
     """POST /api/v1/issues/<identifier>/requeue — release issue for redispatch."""
-    orch: Orchestrator = request.app["orchestrator"]
+    orch = _require_orchestrator(request)
     result = await orch.requeue_issue(request.match_info["identifier"])
     return _json_response(result, status=202 if result.get("ok") else 404)
 
 
 async def _handle_skip_issue(request: web.Request) -> web.Response:
     """POST /api/v1/issues/<identifier>/skip — mark issue as skipped."""
-    orch: Orchestrator = request.app["orchestrator"]
+    orch = _require_orchestrator(request)
     result = await orch.skip_issue(request.match_info["identifier"])
     return _json_response(result, status=202 if result.get("ok") else 404)
 
@@ -1013,7 +1484,7 @@ async def _handle_skip_issue(request: web.Request) -> web.Response:
 async def _handle_issue(request: web.Request) -> web.Response:
     """GET /api/v1/<identifier> — per-issue debug details."""
     identifier = request.match_info["identifier"].upper()
-    orch: Orchestrator = request.app["orchestrator"]
+    orch = _require_orchestrator(request)
     snap = orch.snapshot()
     issue_data = _find_issue_snapshot(snap, identifier)
 
@@ -1043,7 +1514,7 @@ async def _handle_issue(request: web.Request) -> web.Response:
 
 async def _handle_dashboard(request: web.Request) -> web.Response:
     """GET / — human-readable HTML dashboard."""
-    orch: Orchestrator = request.app["orchestrator"]
+    orch = _require_orchestrator(request)
     snap = orch.snapshot()
     groups = await _load_operator_groups(orch, snap)
     groups["waiting_reasons"] = list(snap.get("waiting", []))
@@ -1058,14 +1529,38 @@ async def _handle_dashboard(request: web.Request) -> web.Response:
 # ---------------------------------------------------------------------------
 
 
-async def start_server(orchestrator: "Orchestrator", port: int) -> web.AppRunner:
+async def start_server(
+    orchestrator: "Orchestrator",
+    port: int,
+    workflow_path: Path,
+) -> web.AppRunner:
     """Start the HTTP server and return the runner (caller must keep reference)."""
-    app = build_app(orchestrator)
+    app = build_app(orchestrator, workflow_path=workflow_path)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
     logger.info(f"action=http_server_started host=127.0.0.1 port={port}")
+    return runner
+
+
+async def start_setup_server(
+    workflow_path: Path,
+    port: int,
+    setup_error: str | None,
+) -> web.AppRunner:
+    """Start the setup server when startup validation cannot produce an orchestrator."""
+    app = build_app(
+        None,
+        workflow_path=workflow_path,
+        setup_mode=True,
+        setup_error=setup_error,
+    )
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    logger.info(f"action=http_setup_server_started host=127.0.0.1 port={port}")
     return runner
 
 

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
+from aiohttp import web
 
 from cymphony import server
 from cymphony.models import BlockerRef, Issue
 from cymphony.server import _build_operator_groups, _render_dashboard
+from cymphony.workflow import load_workflow
 
 
 def _issue(
@@ -69,11 +72,24 @@ class _FakeOrchestrator:
 
 
 class _FakeRequest:
-    def __init__(self, orchestrator: _FakeOrchestrator, identifier: str | None = None) -> None:
-        self.app = {"orchestrator": orchestrator}
+    def __init__(
+        self,
+        orchestrator: _FakeOrchestrator | None = None,
+        identifier: str | None = None,
+        *,
+        app: dict | None = None,
+        post_data: dict | None = None,
+        query: dict | None = None,
+    ) -> None:
+        self.app = app or {"orchestrator": orchestrator}
         self.match_info = {}
+        self._post_data = post_data or {}
+        self.query = query or {}
         if identifier is not None:
             self.match_info["identifier"] = identifier
+
+    async def post(self) -> dict:
+        return self._post_data
 
 
 def test_build_operator_groups_classifies_ready_waiting_blocked_and_recently_completed() -> None:
@@ -429,3 +445,86 @@ def test_render_dashboard_shows_issue_drilldown_details() -> None:
     assert "Recent Events" in html
     assert "Plan comment" in html
     assert "Writing tests" in html
+
+
+@pytest.mark.asyncio
+async def test_setup_get_renders_setup_form_with_error(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": workflow_path,
+            "setup_mode": True,
+            "setup_error": "tracker.project_slug is required",
+        }
+    )
+
+    response = await server._handle_setup_get(request)
+
+    assert response.status == 200
+    assert "Set Up Cymphony" in response.text
+    assert "tracker.project_slug is required" in response.text
+    assert str(workflow_path) in response.text
+
+
+@pytest.mark.asyncio
+async def test_setup_post_writes_workflow_file(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": workflow_path,
+            "setup_mode": True,
+            "setup_error": None,
+        },
+        post_data={
+            "tracker_api_key": "$LINEAR_API_KEY",
+            "project_slug": "cymphony-b2a8d0064141",
+            "assignee": "gonzalobandeira",
+            "active_states": "Todo, In Progress",
+            "terminal_states": "Done, Cancelled",
+            "poll_interval_ms": "30000",
+            "workspace_root": "~/cymphony-workspaces",
+            "max_concurrent_agents": "3",
+            "max_turns": "20",
+            "max_retry_backoff_ms": "300000",
+            "command": "claude",
+            "turn_timeout_ms": "3600000",
+            "stall_timeout_ms": "300000",
+            "dangerously_skip_permissions": "1",
+            "after_create": "git clone git@github.com:org/repo.git .",
+            "before_run": "git fetch origin",
+            "after_run": "git status",
+            "before_remove": "",
+            "hooks_timeout_ms": "120000",
+            "server_port": "8080",
+            "prompt_template": "You are working on {{ issue.identifier }}.",
+        },
+    )
+
+    with pytest.raises(web.HTTPFound) as exc_info:
+        await server._handle_setup_post(request)
+
+    assert exc_info.value.location == "/setup?saved=1"
+    saved = load_workflow(workflow_path)
+    assert saved.config["tracker"]["project_slug"] == "cymphony-b2a8d0064141"
+    assert saved.config["tracker"]["assignee"] == "gonzalobandeira"
+    assert saved.config["codex"]["command"] == "claude"
+    assert saved.prompt_template == "You are working on {{ issue.identifier }}."
+
+
+@pytest.mark.asyncio
+async def test_settings_get_redirects_to_setup_when_in_setup_mode(tmp_path: Path) -> None:
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        }
+    )
+
+    with pytest.raises(web.HTTPFound) as exc_info:
+        await server._handle_settings_get(request)
+
+    assert exc_info.value.location == "/setup"

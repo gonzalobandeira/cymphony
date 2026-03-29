@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -67,13 +68,23 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 async def _run(workflow_path: Path, server_port: int | None) -> None:
     from .logging_ import log
     from .orchestrator import Orchestrator
+    from .server import start_setup_server
+
+    async def run_setup_mode(error_message: str, port: int) -> None:
+        log.error(f"action=startup_setup_mode error={error_message!r} port={port}")
+        runner = await start_setup_server(workflow_path, port, error_message)
+        stop_event = asyncio.Event()
+        try:
+            await stop_event.wait()
+        finally:
+            await runner.cleanup()
 
     # Load initial workflow
     try:
         workflow = load_workflow(workflow_path)
     except Exception as exc:
-        log.error(f"action=startup_failed error={exc}")
-        sys.exit(1)
+        await run_setup_mode(str(exc), server_port or 8080)
+        return
 
     # Build initial config
     config = build_config(workflow, server_port_override=server_port)
@@ -81,9 +92,9 @@ async def _run(workflow_path: Path, server_port: int | None) -> None:
     # Startup validation (spec §6.3)
     validation = validate_dispatch_config(config)
     if not validation.ok:
-        for err in validation.errors:
-            log.error(f"action=startup_validation_failed error={err!r}")
-        sys.exit(1)
+        error_message = "; ".join(validation.errors)
+        await run_setup_mode(error_message, config.server.port or server_port or 8080)
+        return
 
     log.info(
         f"action=startup "
