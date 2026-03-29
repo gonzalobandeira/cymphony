@@ -11,7 +11,12 @@ src/cymphony/
   config.py          ← parses WORKFLOW.md YAML into typed ServiceConfig
   workflow.py        ← loads/watches WORKFLOW.md, renders Jinja2 prompts
   orchestrator.py    ← poll loop, dispatch, reconciliation, retry scheduling
-  agent.py           ← runs `claude` CLI as subprocess, streams stream-json events
+  agent.py           ← backward-compat re-exports from runners/
+  runners/
+    __init__.py      ← provider registry, create_runner() factory
+    base.py          ← BaseAgentRunner ABC (subprocess lifecycle, timeouts, streaming)
+    claude.py        ← ClaudeAgentRunner + stream-json parser
+    codex.py         ← CodexAgentRunner (stub, reuses Claude parser for now)
   linear.py          ← async Linear GraphQL client
   workspace.py       ← per-issue directory lifecycle and hook execution
   server.py          ← optional aiohttp HTTP server (dashboard + API)
