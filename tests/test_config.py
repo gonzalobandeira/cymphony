@@ -180,6 +180,8 @@ def test_qa_review_defaults_disabled_when_omitted() -> None:
     assert qa.dispatch == "QA Review"
     assert qa.success == "In Review"
     assert qa.failure == "Todo"
+    assert qa.max_bounces == 2
+    assert qa.max_retries == 2
 
 
 def test_qa_review_defaults_disabled_when_empty_transitions() -> None:
@@ -208,6 +210,8 @@ def test_qa_review_enabled_with_defaults() -> None:
     assert qa.dispatch == "QA Review"
     assert qa.success == "In Review"
     assert qa.failure == "Todo"
+    assert qa.max_bounces == 2
+    assert qa.max_retries == 2
 
 
 def test_qa_review_custom_states() -> None:
@@ -217,6 +221,8 @@ def test_qa_review_custom_states() -> None:
             "dispatch": "QA",
             "success": "Ready to Merge",
             "failure": "Needs Work",
+            "max_bounces": 4,
+            "max_retries": 3,
         },
     }))
     qa = config.transitions.qa_review
@@ -224,6 +230,8 @@ def test_qa_review_custom_states() -> None:
     assert qa.dispatch == "QA"
     assert qa.success == "Ready to Merge"
     assert qa.failure == "Needs Work"
+    assert qa.max_bounces == 4
+    assert qa.max_retries == 3
     assert "QA" in config.tracker.active_states
 
 

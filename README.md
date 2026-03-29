@@ -206,6 +206,15 @@ Defaults are backward-compatible with the previous hardcoded behavior:
 
 Set a transition to `null`, `false`, or `""` to disable it explicitly. Omitting a key keeps the default for that event.
 
+### QA review safeguards
+
+When `transitions.qa_review.enabled: true`, the QA review lane also supports two loop-control settings:
+
+- `max_bounces`: how many times a clean QA `changes_requested` result may send the issue back to implementation before Cymphony holds it for manual intervention. Default: `2`.
+- `max_retries`: how many times reviewer execution failures (timeout, stall, crash, missing `REVIEW_RESULT.json`) may be retried in the QA state before Cymphony holds it for manual intervention. Default: `2`.
+
+Once either limit is exceeded, the issue is placed in the skipped set with an operator-visible reason instead of being redispatched indefinitely.
+
 ## HTTP API
 
 When `server.port` is configured:
@@ -314,6 +323,7 @@ Cymphony persists runtime state to a JSON file (`<workspace.root>/.cymphony_stat
 ### What is persisted
 
 - **Retry queue** — issues waiting for retry timers, including attempt count, error info, and session metadata (tokens, plan, recent events)
+- **QA review bounce counters** — how many times each issue has cycled back from QA review into implementation
 - **Skipped issues** — issues manually held out of dispatch by an operator
 - **Dispatch paused flag** — whether dispatching was paused before shutdown
 

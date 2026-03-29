@@ -289,6 +289,7 @@ class Orchestrator:
         try:
             self._state_manager.save(
                 retry_attempts=self._state.retry_attempts,
+                qa_review_bounces=self._state.qa_review_bounces,
                 skipped=self._state.skipped,
                 dispatch_paused=self._state.dispatch_paused,
             )
@@ -297,13 +298,15 @@ class Orchestrator:
 
     async def _restore_persisted_state(self) -> None:
         """Restore persisted state and reconcile against current Linear state."""
-        retry_attempts, skipped, dispatch_paused = self._state_manager.restore()
+        retry_attempts, qa_review_bounces, skipped, dispatch_paused = self._state_manager.restore()
 
-        if not retry_attempts and not skipped and not dispatch_paused:
+        if not retry_attempts and not qa_review_bounces and not skipped and not dispatch_paused:
             return
 
         # Reconcile: fetch current issue states from Linear to drop stale entries
-        all_issue_ids = list(set(list(retry_attempts.keys()) + list(skipped.keys())))
+        all_issue_ids = list(
+            set(list(retry_attempts.keys()) + list(qa_review_bounces.keys()) + list(skipped.keys()))
+        )
         current_states: dict[str, str] | None = None
         try:
             client = LinearClient(self._config.tracker)
@@ -351,6 +354,18 @@ class Orchestrator:
             self._state.retry_attempts[issue_id] = entry
             self._state.claimed.add(issue_id)
             restored_retries += 1
+
+        for issue_id, bounce_count in list(qa_review_bounces.items()):
+            if current_states is not None:
+                issue_state = current_states.get(issue_id)
+
+                if issue_state is not None and issue_state.lower() in terminal_lower:
+                    continue
+
+                if issue_id not in current_states:
+                    continue
+
+            self._state.qa_review_bounces[issue_id] = bounce_count
 
         # Reconcile skipped entries
         restored_skipped = 0
@@ -1203,6 +1218,7 @@ class Orchestrator:
             retry_attempt=attempt,
             started_at=_now_utc(),
             mode=mode,
+            qa_review_bounce_count=self._state.qa_review_bounces.get(issue.id, 0),
         )
         self._state.running[issue.id] = entry
 
@@ -1552,8 +1568,33 @@ class Orchestrator:
                 issue_id, identifier,
                 mode=entry.mode.value,
             )
+            review_result: ReviewResult | None = None
             if is_review:
-                target = self._resolve_review_completion_target(issue_id, identifier, entry)
+                review_result = self._resolve_review_result(issue_id, identifier, entry)
+                if review_result.decision is None:
+                    await self._handle_review_retry_or_hold(
+                        issue_id,
+                        identifier,
+                        entry,
+                        attempt=_next_attempt(entry.retry_attempt),
+                        error=review_result.error or "qa review result could not be parsed",
+                    )
+                    return
+
+                issue_log(
+                    logger, logging.INFO,
+                    "qa_review_decision",
+                    issue_id, identifier,
+                    decision=review_result.decision.value,
+                    summary=review_result.summary,
+                )
+                if review_result.decision == ReviewDecision.PASS:
+                    self._clear_qa_review_bounces(issue_id)
+                    target = qa.success if qa.enabled else None
+                else:
+                    bounce_count = self._increment_qa_review_bounces(issue_id)
+                    entry.qa_review_bounce_count = bounce_count
+                    target = qa.failure if qa.enabled else None
             else:
                 target = self._config.transitions.resolve("success")
             if target:
@@ -1566,6 +1607,31 @@ class Orchestrator:
                         issue_identifier=identifier,
                         from_state=entry.issue.state,
                     )
+            if is_review and review_result and review_result.decision == ReviewDecision.CHANGES_REQUESTED:
+                issue_log(
+                    logger, logging.WARNING,
+                    "qa_review_bounced",
+                    issue_id, identifier,
+                    bounce_count=entry.qa_review_bounce_count,
+                    max_bounces=qa.max_bounces,
+                )
+                if entry.qa_review_bounce_count > qa.max_bounces:
+                    self._record_problem(
+                        kind="qa_review_bounce_limit_reached",
+                        summary="QA review re-entry limit reached",
+                        detail=(
+                            f"Reached {entry.qa_review_bounce_count} QA review bounces; "
+                            "holding issue for manual intervention."
+                        ),
+                        issue_id=issue_id,
+                        issue_identifier=identifier,
+                    )
+                    self._hold_issue_for_manual_intervention(
+                        issue_id,
+                        identifier,
+                        reason="qa_review_bounce_limit",
+                    )
+                    return
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=1,
@@ -1593,9 +1659,15 @@ class Orchestrator:
                 mode=entry.mode.value,
             )
             if is_review:
-                target = qa.failure if qa.enabled else None
-            else:
-                target = self._config.transitions.resolve("failure")
+                await self._handle_review_retry_or_hold(
+                    issue_id,
+                    identifier,
+                    entry,
+                    attempt=next_attempt,
+                    error=error_str,
+                )
+                return
+            target = self._config.transitions.resolve("failure")
             if target:
                 self._transition_issue_state_background(
                     issue_id,
@@ -1611,14 +1683,13 @@ class Orchestrator:
                 entry=entry,
             )
 
-    def _resolve_review_completion_target(
+    def _resolve_review_result(
         self,
         issue_id: str,
         identifier: str,
         entry: RunningEntry,
-    ) -> str | None:
-        """Map a completed review run to the configured QA transition target."""
-        qa = self._config.transitions.qa_review
+    ) -> ReviewResult:
+        """Load the machine-readable QA review result for a completed review run."""
         if entry.review_result is not None:
             result = entry.review_result
         else:
@@ -1639,18 +1710,81 @@ class Orchestrator:
                 issue_id, identifier,
                 error=result.error,
             )
-            return qa.failure if qa.enabled else None
+        return result
 
+    async def _handle_review_retry_or_hold(
+        self,
+        issue_id: str,
+        identifier: str,
+        entry: RunningEntry,
+        *,
+        attempt: int,
+        error: str,
+    ) -> None:
+        """Retry reviewer failures in-place, or hold them for manual intervention."""
+        qa = self._config.transitions.qa_review
         issue_log(
-            logger, logging.INFO,
-            "qa_review_decision",
+            logger, logging.WARNING,
+            "qa_review_retry_considered",
             issue_id, identifier,
-            decision=result.decision.value,
-            summary=result.summary,
+            attempt=attempt,
+            max_retries=qa.max_retries,
+            error=error,
+            run_status=entry.status.value,
         )
-        if result.decision == ReviewDecision.PASS:
-            return qa.success if qa.enabled else None
-        return qa.failure if qa.enabled else None
+        if attempt > qa.max_retries:
+            self._record_problem(
+                kind="qa_review_retry_limit_reached",
+                summary="QA review retry limit reached",
+                detail=(
+                    f"Reviewer run failed {attempt} times; "
+                    "holding issue in QA review for manual intervention."
+                ),
+                issue_id=issue_id,
+                issue_identifier=identifier,
+            )
+            self._hold_issue_for_manual_intervention(
+                issue_id,
+                identifier,
+                reason="qa_review_retry_limit",
+            )
+            return
+
+        await self._schedule_retry(
+            issue_id,
+            identifier,
+            attempt=attempt,
+            error=error,
+            entry=entry,
+        )
+
+    def _clear_qa_review_bounces(self, issue_id: str) -> None:
+        self._state.qa_review_bounces.pop(issue_id, None)
+        self._persist_state()
+
+    def _increment_qa_review_bounces(self, issue_id: str) -> int:
+        next_count = self._state.qa_review_bounces.get(issue_id, 0) + 1
+        self._state.qa_review_bounces[issue_id] = next_count
+        self._persist_state()
+        return next_count
+
+    def _hold_issue_for_manual_intervention(
+        self,
+        issue_id: str,
+        identifier: str,
+        *,
+        reason: str,
+    ) -> None:
+        self._state.retry_attempts.pop(issue_id, None)
+        self._state.claimed.discard(issue_id)
+        self._state.completed.discard(issue_id)
+        self._state.skipped[issue_id] = SkippedEntry(
+            issue_id=issue_id,
+            identifier=identifier,
+            created_at=_now_utc(),
+            reason=reason,
+        )
+        self._persist_state()
 
     # ------------------------------------------------------------------
     # Retry scheduling (spec §8.4)
@@ -1723,6 +1857,7 @@ class Orchestrator:
                 }
                 for comment in entry.issue.comments
             ]
+            retry_entry.qa_review_bounce_count = entry.qa_review_bounce_count
         elif existing is not None:
             retry_entry.state = existing.state
             retry_entry.run_status = existing.run_status
@@ -1743,6 +1878,7 @@ class Orchestrator:
             retry_entry.issue_description = existing.issue_description
             retry_entry.issue_labels = list(existing.issue_labels)
             retry_entry.issue_comments = list(existing.issue_comments)
+            retry_entry.qa_review_bounce_count = existing.qa_review_bounce_count
         self._state.retry_attempts[issue_id] = retry_entry
 
         if is_continuation:
@@ -1909,6 +2045,7 @@ class Orchestrator:
                 "issue_description": retry.issue_description,
                 "issue_labels": retry.issue_labels,
                 "issue_comments": retry.issue_comments,
+                "qa_review_bounce_count": retry.qa_review_bounce_count,
             })
 
         waiting_rows = self._build_waiting_rows(now)
@@ -1982,6 +2119,14 @@ class Orchestrator:
                     "failure": self._config.transitions.failure,
                     "blocked": self._config.transitions.blocked,
                     "cancelled": self._config.transitions.cancelled,
+                    "qa_review": {
+                        "enabled": self._config.transitions.qa_review.enabled,
+                        "dispatch": self._config.transitions.qa_review.dispatch,
+                        "success": self._config.transitions.qa_review.success,
+                        "failure": self._config.transitions.qa_review.failure,
+                        "max_bounces": self._config.transitions.qa_review.max_bounces,
+                        "max_retries": self._config.transitions.qa_review.max_retries,
+                    },
                 },
             },
             "transition_history": [
@@ -2237,6 +2382,7 @@ class Orchestrator:
             "last_event_at": s.last_event_timestamp.isoformat()
             if s.last_event_timestamp else None,
             "retry_attempt": entry.retry_attempt,
+            "qa_review_bounce_count": entry.qa_review_bounce_count,
             "workspace_path": str(wm.get_path(entry.identifier)),
             "plan_comment_id": s.plan_comment_id,
             "latest_plan": s.latest_plan,

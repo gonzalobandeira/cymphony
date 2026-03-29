@@ -255,6 +255,12 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
             failure=_to_optional_str(
                 qa_raw.get("failure", _MISSING), _QA_DEFAULTS.failure
             ),
+            max_bounces=_to_int(
+                qa_raw.get("max_bounces"), _QA_DEFAULTS.max_bounces
+            ),
+            max_retries=_to_int(
+                qa_raw.get("max_retries"), _QA_DEFAULTS.max_retries
+            ),
         )
     elif qa_raw is True:
         # Shorthand: `qa_review: true` enables with all defaults

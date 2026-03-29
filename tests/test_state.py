@@ -63,6 +63,7 @@ def _make_retry_entry(
         issue_description="Description here",
         issue_labels=["bug"],
         issue_comments=[{"author": "alice", "body": "please fix", "created_at": None}],
+        qa_review_bounce_count=3,
     )
 
 
@@ -91,11 +92,12 @@ class TestStateManagerSaveLoad:
 
         sm.save(
             retry_attempts={"issue-1": retry},
+            qa_review_bounces={"issue-1": 2},
             skipped={"issue-2": skipped},
             dispatch_paused=True,
         )
 
-        retries, skips, paused = sm.restore()
+        retries, qa_bounces, skips, paused = sm.restore()
 
         assert len(retries) == 1
         assert "issue-1" in retries
@@ -110,6 +112,9 @@ class TestStateManagerSaveLoad:
         assert r.issue_title == "Fix the bug"
         assert r.issue_labels == ["bug"]
         assert r.due_at_ms == 0.0  # Recomputed on restore
+        assert r.qa_review_bounce_count == 3
+
+        assert qa_bounces == {"issue-1": 2}
 
         assert len(skips) == 1
         assert "issue-2" in skips
@@ -121,16 +126,18 @@ class TestStateManagerSaveLoad:
 
     def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
         sm = _make_state_manager(tmp_path)
-        retries, skips, paused = sm.restore()
+        retries, qa_bounces, skips, paused = sm.restore()
         assert retries == {}
+        assert qa_bounces == {}
         assert skips == {}
         assert paused is False
 
     def test_corrupt_json_returns_empty(self, tmp_path: Path) -> None:
         sm = _make_state_manager(tmp_path)
         sm.path.write_text("not valid json {{{", encoding="utf-8")
-        retries, skips, paused = sm.restore()
+        retries, qa_bounces, skips, paused = sm.restore()
         assert retries == {}
+        assert qa_bounces == {}
         assert skips == {}
         assert paused is False
 
@@ -140,20 +147,22 @@ class TestStateManagerSaveLoad:
             json.dumps({"version": 999, "retry_attempts": {}, "skipped": {}}),
             encoding="utf-8",
         )
-        retries, skips, paused = sm.restore()
+        retries, qa_bounces, skips, paused = sm.restore()
         assert retries == {}
+        assert qa_bounces == {}
         assert skips == {}
         assert paused is False
 
     def test_not_a_dict_returns_empty(self, tmp_path: Path) -> None:
         sm = _make_state_manager(tmp_path)
         sm.path.write_text('"just a string"', encoding="utf-8")
-        retries, skips, paused = sm.restore()
+        retries, qa_bounces, skips, paused = sm.restore()
         assert retries == {}
+        assert qa_bounces == {}
 
     def test_clear_removes_file(self, tmp_path: Path) -> None:
         sm = _make_state_manager(tmp_path)
-        sm.save(retry_attempts={}, skipped={}, dispatch_paused=False)
+        sm.save(retry_attempts={}, qa_review_bounces={}, skipped={}, dispatch_paused=False)
         assert sm.path.exists()
         sm.clear()
         assert not sm.path.exists()
@@ -164,7 +173,7 @@ class TestStateManagerSaveLoad:
 
     def test_save_creates_parent_directories(self, tmp_path: Path) -> None:
         sm = StateManager(tmp_path / "deep" / "nested" / "state.json")
-        sm.save(retry_attempts={}, skipped={}, dispatch_paused=False)
+        sm.save(retry_attempts={}, qa_review_bounces={}, skipped={}, dispatch_paused=False)
         assert sm.path.exists()
 
     def test_malformed_retry_entry_skipped(self, tmp_path: Path) -> None:
@@ -184,15 +193,17 @@ class TestStateManagerSaveLoad:
             "skipped": {},
         }
         sm.path.write_text(json.dumps(data), encoding="utf-8")
-        retries, skips, paused = sm.restore()
+        retries, qa_bounces, skips, paused = sm.restore()
         assert "good" in retries
         assert "bad" not in retries
+        assert qa_bounces == {}
 
     def test_empty_state_round_trip(self, tmp_path: Path) -> None:
         sm = _make_state_manager(tmp_path)
-        sm.save(retry_attempts={}, skipped={}, dispatch_paused=False)
-        retries, skips, paused = sm.restore()
+        sm.save(retry_attempts={}, qa_review_bounces={}, skipped={}, dispatch_paused=False)
+        retries, qa_bounces, skips, paused = sm.restore()
         assert retries == {}
+        assert qa_bounces == {}
         assert skips == {}
         assert paused is False
 
@@ -200,8 +211,13 @@ class TestStateManagerSaveLoad:
         """Continuation retries (error=None) should round-trip correctly."""
         sm = _make_state_manager(tmp_path)
         retry = _make_retry_entry(error=None)
-        sm.save(retry_attempts={"issue-1": retry}, skipped={}, dispatch_paused=False)
-        retries, _, _ = sm.restore()
+        sm.save(
+            retry_attempts={"issue-1": retry},
+            qa_review_bounces={},
+            skipped={},
+            dispatch_paused=False,
+        )
+        retries, _, _, _ = sm.restore()
         assert retries["issue-1"].error is None
 
 
@@ -286,7 +302,7 @@ class TestOrchestratorPersistence:
         orch._persist_state()
 
         assert orch._state_manager.path.exists()
-        _, skips, _ = orch._state_manager.restore()
+        _, _, skips, _ = orch._state_manager.restore()
         assert "issue-1" in skips
 
     def test_skip_issue_persists_state(
@@ -310,7 +326,7 @@ class TestOrchestratorPersistence:
         finally:
             loop.close()
 
-        _, skips, _ = orch._state_manager.restore()
+        _, _, skips, _ = orch._state_manager.restore()
         assert issue.id in skips
 
     def test_requeue_issue_persists_state(
@@ -330,7 +346,7 @@ class TestOrchestratorPersistence:
         finally:
             loop.close()
 
-        _, skips, _ = orch._state_manager.restore()
+        _, _, skips, _ = orch._state_manager.restore()
         assert issue.id not in skips
 
 
@@ -349,6 +365,7 @@ class TestOrchestratorRestore:
                 "issue-active": retry_active,
                 "issue-terminal": retry_terminal,
             },
+            qa_review_bounces={"issue-active": 1, "issue-terminal": 3},
             skipped={},
             dispatch_paused=False,
         )
@@ -376,6 +393,7 @@ class TestOrchestratorRestore:
         # Active issue should be restored
         assert "issue-active" in orch._state.retry_attempts
         assert "issue-active" in orch._state.claimed
+        assert orch._state.qa_review_bounces == {"issue-active": 1}
 
         # Terminal issue should be dropped
         assert "issue-terminal" not in orch._state.retry_attempts
@@ -391,6 +409,7 @@ class TestOrchestratorRestore:
         skip_terminal = _make_skipped_entry(issue_id="issue-terminal", identifier="BAP-2")
         orch._state_manager.save(
             retry_attempts={},
+            qa_review_bounces={},
             skipped={
                 "issue-active": skip_active,
                 "issue-terminal": skip_terminal,
@@ -423,6 +442,7 @@ class TestOrchestratorRestore:
 
         orch._state_manager.save(
             retry_attempts={},
+            qa_review_bounces={},
             skipped={},
             dispatch_paused=True,
         )
@@ -462,6 +482,7 @@ class TestOrchestratorRestore:
         skip = _make_skipped_entry(issue_id="issue-2", identifier="BAP-2")
         orch._state_manager.save(
             retry_attempts={"issue-1": retry},
+            qa_review_bounces={},
             skipped={"issue-2": skip},
             dispatch_paused=False,
         )
@@ -496,6 +517,7 @@ class TestOrchestratorRestore:
         orch1._state.retry_attempts["issue-1"] = _make_retry_entry(
             issue_id="issue-1", identifier="BAP-1", attempt=3
         )
+        orch1._state.qa_review_bounces["issue-1"] = 2
         orch1._state.skipped["issue-2"] = _make_skipped_entry(
             issue_id="issue-2", identifier="BAP-2"
         )
@@ -525,6 +547,7 @@ class TestOrchestratorRestore:
 
         assert "issue-1" in orch2._state.retry_attempts
         assert orch2._state.retry_attempts["issue-1"].attempt == 3
+        assert orch2._state.qa_review_bounces == {"issue-1": 2}
         assert "issue-2" in orch2._state.skipped
         assert orch2._state.dispatch_paused is True
 
@@ -537,6 +560,7 @@ class TestOrchestratorRestore:
         retry = _make_retry_entry(issue_id="issue-gone", identifier="BAP-GONE")
         orch._state_manager.save(
             retry_attempts={"issue-gone": retry},
+            qa_review_bounces={"issue-gone": 2},
             skipped={},
             dispatch_paused=False,
         )
@@ -557,3 +581,4 @@ class TestOrchestratorRestore:
         await orch._restore_persisted_state()
 
         assert "issue-gone" not in orch._state.retry_attempts
+        assert "issue-gone" not in orch._state.qa_review_bounces
