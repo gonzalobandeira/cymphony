@@ -143,6 +143,8 @@ class QAReviewConfig:
     dispatch: str | None = "QA Review"
     success: str | None = "In Review"
     failure: str | None = "Todo"
+    max_bounces: int = 2
+    max_retries: int = 2
 
 
 @dataclass
@@ -300,6 +302,7 @@ class RunningEntry:
     review_result: ReviewResult | None = None
     mode: ExecutionMode = field(default=ExecutionMode.BUILD)
     status: RunStatus = field(default=RunStatus.PREPARING_WORKSPACE)
+    qa_review_bounce_count: int = 0
 
 
 @dataclass
@@ -330,6 +333,7 @@ class RetryEntry:
     issue_description: str | None = None
     issue_labels: list[str] = field(default_factory=list)
     issue_comments: list[dict[str, Any]] = field(default_factory=list)
+    qa_review_bounce_count: int = 0
 
 
 @dataclass
@@ -392,6 +396,7 @@ class OrchestratorState:
     running: dict[str, RunningEntry] = field(default_factory=dict)
     claimed: set[str] = field(default_factory=set)
     retry_attempts: dict[str, RetryEntry] = field(default_factory=dict)
+    qa_review_bounces: dict[str, int] = field(default_factory=dict)
     skipped: dict[str, SkippedEntry] = field(default_factory=dict)
     completed: set[str] = field(default_factory=set)
     dispatch_paused: bool = False

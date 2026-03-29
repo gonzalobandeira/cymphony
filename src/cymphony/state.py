@@ -54,6 +54,7 @@ def _retry_entry_to_dict(entry: RetryEntry) -> dict[str, Any]:
         "issue_description": entry.issue_description,
         "issue_labels": list(entry.issue_labels),
         "issue_comments": list(entry.issue_comments),
+        "qa_review_bounce_count": entry.qa_review_bounce_count,
     }
 
 
@@ -83,6 +84,7 @@ def _dict_to_retry_entry(d: dict[str, Any]) -> RetryEntry:
         issue_description=d.get("issue_description"),
         issue_labels=d.get("issue_labels", []),
         issue_comments=d.get("issue_comments", []),
+        qa_review_bounce_count=d.get("qa_review_bounce_count", 0),
     )
 
 
@@ -122,6 +124,7 @@ class StateManager:
     def save(
         self,
         retry_attempts: dict[str, RetryEntry],
+        qa_review_bounces: dict[str, int],
         skipped: dict[str, SkippedEntry],
         dispatch_paused: bool,
     ) -> None:
@@ -133,6 +136,7 @@ class StateManager:
                 issue_id: _retry_entry_to_dict(entry)
                 for issue_id, entry in retry_attempts.items()
             },
+            "qa_review_bounces": dict(qa_review_bounces),
             "skipped": {
                 issue_id: _skipped_entry_to_dict(entry)
                 for issue_id, entry in skipped.items()
@@ -206,19 +210,21 @@ class StateManager:
 
     def restore(self) -> tuple[
         dict[str, RetryEntry],
+        dict[str, int],
         dict[str, SkippedEntry],
         bool,
     ]:
         """Load and deserialize persisted state.
 
-        Returns (retry_attempts, skipped, dispatch_paused).
+        Returns (retry_attempts, qa_review_bounces, skipped, dispatch_paused).
         On any failure, returns empty collections and False.
         """
         data = self.load()
         if data is None:
-            return {}, {}, False
+            return {}, {}, {}, False
 
         retry_attempts: dict[str, RetryEntry] = {}
+        qa_review_bounces: dict[str, int] = {}
         skipped: dict[str, SkippedEntry] = {}
         dispatch_paused = bool(data.get("dispatch_paused", False))
 
@@ -230,6 +236,17 @@ class StateManager:
                 except (KeyError, TypeError, ValueError) as exc:
                     logger.warning(
                         f"action=state_restore_retry_skip issue_id={issue_id} "
+                        f"error={exc}"
+                    )
+
+        raw_bounces = data.get("qa_review_bounces", {})
+        if isinstance(raw_bounces, dict):
+            for issue_id, count in raw_bounces.items():
+                try:
+                    qa_review_bounces[issue_id] = int(count)
+                except (TypeError, ValueError) as exc:
+                    logger.warning(
+                        f"action=state_restore_qa_bounce_skip issue_id={issue_id} "
                         f"error={exc}"
                     )
 
@@ -246,8 +263,9 @@ class StateManager:
 
         logger.info(
             f"action=state_restored path={self._path} "
-            f"retry_attempts={len(retry_attempts)} skipped={len(skipped)} "
+            f"retry_attempts={len(retry_attempts)} qa_review_bounces={len(qa_review_bounces)} "
+            f"skipped={len(skipped)} "
             f"dispatch_paused={dispatch_paused}"
         )
 
-        return retry_attempts, skipped, dispatch_paused
+        return retry_attempts, qa_review_bounces, skipped, dispatch_paused

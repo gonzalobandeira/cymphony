@@ -13,7 +13,7 @@ import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -51,6 +51,9 @@ from cymphony.workflow import render_review_prompt
 def _build_config(
     qa_enabled: bool = True,
     active_states: list[str] | None = None,
+    *,
+    max_bounces: int = 2,
+    max_retries: int = 2,
 ) -> ServiceConfig:
     if active_states is None:
         active_states = ["Todo", "In Progress", "QA Review"]
@@ -103,13 +106,24 @@ def _build_config(
                 dispatch="QA Review",
                 success="In Review",
                 failure="Todo",
+                max_bounces=max_bounces,
+                max_retries=max_retries,
             ),
         ),
     )
 
 
-def _build_orchestrator(qa_enabled: bool = True) -> Orchestrator:
-    config = _build_config(qa_enabled=qa_enabled)
+def _build_orchestrator(
+    qa_enabled: bool = True,
+    *,
+    max_bounces: int = 2,
+    max_retries: int = 2,
+) -> Orchestrator:
+    config = _build_config(
+        qa_enabled=qa_enabled,
+        max_bounces=max_bounces,
+        max_retries=max_retries,
+    )
     workflow = WorkflowDefinition(config={}, prompt_template="Build prompt for {{ issue.title }}")
     return Orchestrator(Path("WORKFLOW.md"), config, workflow)
 
@@ -332,7 +346,7 @@ class TestWorkerDoneTransitions:
         assert comments == [(issue.id, issue.identifier, "Looks good")]
 
     @pytest.mark.asyncio
-    async def test_review_process_failure_uses_qa_review_failure_target(
+    async def test_review_process_failure_retries_in_review_without_failure_transition(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         orch = _build_orchestrator()
@@ -352,19 +366,30 @@ class TestWorkerDoneTransitions:
         entry.task = task
 
         transitions: list[tuple[str, str]] = []
+        retries: list[tuple[str, int, str | None, ExecutionMode]] = []
+
         monkeypatch.setattr(
             orch, "_transition_issue_state_background",
             lambda iid, state, **kwargs: transitions.append((iid, state)),
         )
-        monkeypatch.setattr(
-            orch, "_schedule_retry",
-            AsyncMock(),
-        )
+
+        async def fake_schedule_retry(
+            issue_id: str,
+            identifier: str,
+            attempt: int,
+            delay_ms: float | None = None,
+            error: str | None = None,
+            entry: RunningEntry | None = None,
+        ) -> None:
+            assert entry is not None
+            retries.append((issue_id, attempt, error, entry.mode))
+
+        monkeypatch.setattr(orch, "_schedule_retry", fake_schedule_retry)
 
         await orch._on_worker_done(issue.id, issue.identifier, entry, task)
 
-        # Should use qa_review.failure = "Todo"
-        assert transitions == [(issue.id, "Todo")]
+        assert transitions == []
+        assert retries == [(issue.id, 1, "agent crashed", ExecutionMode.REVIEW)]
 
     @pytest.mark.asyncio
     async def test_review_changes_requested_uses_qa_review_failure_target(
@@ -421,24 +446,41 @@ class TestWorkerDoneTransitions:
         entry.task = task
 
         transitions: list[tuple[str, str]] = []
+        retries: list[tuple[str, int, str | None, ExecutionMode]] = []
         comments: list[str] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
             AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
         )
+
+        async def fake_schedule_retry(
+            issue_id: str,
+            identifier: str,
+            attempt: int,
+            delay_ms: float | None = None,
+            error: str | None = None,
+            entry: RunningEntry | None = None,
+        ) -> None:
+            assert entry is not None
+            retries.append((issue_id, attempt, error, entry.mode))
+
+        monkeypatch.setattr(orch, "_schedule_retry", fake_schedule_retry)
         monkeypatch.setattr(
             orch,
             "_post_review_result_comment",
             AsyncMock(side_effect=lambda iid, ident, result: comments.append(result.error or "")),
         )
-        monkeypatch.setattr(
-            orch, "_schedule_retry",
-            AsyncMock(),
-        )
 
         await orch._on_worker_done(issue.id, issue.identifier, entry, task)
 
         assert transitions == []
+        assert len(retries) == 1
+        assert retries[0][0] == issue.id
+        assert retries[0][1] == 1
+        assert retries[0][3] == ExecutionMode.REVIEW
+        assert retries[0][2] is not None
+        assert retries[0][2].startswith("Review result file not found: ")
+        assert f"{issue.identifier}/REVIEW_RESULT.json" in retries[0][2]
         assert comments and "not found" in comments[0]
         assert len(orch._state.recent_problems) == 1
         assert orch._state.recent_problems[0].kind == "qa_review_parse_error"
@@ -544,6 +586,68 @@ class TestWorkerDoneTransitions:
 
         assert transitions == [(issue.id, "In Review")]
 
+    @pytest.mark.asyncio
+    async def test_review_changes_requested_holds_issue_after_bounce_limit(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch = _build_orchestrator(max_bounces=1)
+        issue = _build_issue(state="QA Review", identifier="BAP-203")
+        entry = _build_running_entry(issue, mode=ExecutionMode.REVIEW)
+        orch._state.running[issue.id] = entry
+        orch._state.qa_review_bounces[issue.id] = 1
+
+        async def noop() -> None:
+            pass
+
+        task = asyncio.ensure_future(noop())
+        await task
+        entry.task = task
+        _write_review_result(orch, issue.identifier, "changes_requested", "Still broken")
+
+        transitions: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            orch, "_transition_issue_state",
+            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+        )
+        monkeypatch.setattr(orch, "_schedule_retry", AsyncMock())
+
+        await orch._on_worker_done(issue.id, issue.identifier, entry, task)
+
+        assert transitions == [(issue.id, "Todo")]
+        assert issue.id in orch._state.skipped
+        assert orch._state.skipped[issue.id].reason == "qa_review_bounce_limit"
+        assert orch._state.qa_review_bounces[issue.id] == 2
+        assert any(p.kind == "qa_review_bounce_limit_reached" for p in orch._state.recent_problems)
+
+    @pytest.mark.asyncio
+    async def test_review_retry_limit_holds_issue_in_qa_review(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch = _build_orchestrator(max_retries=1)
+        issue = _build_issue(state="QA Review", identifier="BAP-204")
+        entry = _build_running_entry(issue, mode=ExecutionMode.REVIEW)
+        entry.retry_attempt = 1
+        orch._state.running[issue.id] = entry
+        orch._state.claimed.add(issue.id)
+
+        async def failing() -> None:
+            raise RuntimeError("review agent crashed")
+
+        task = asyncio.ensure_future(failing())
+        try:
+            await task
+        except RuntimeError:
+            pass
+        entry.task = task
+
+        monkeypatch.setattr(orch, "_schedule_retry", AsyncMock())
+
+        await orch._on_worker_done(issue.id, issue.identifier, entry, task)
+
+        assert issue.id in orch._state.skipped
+        assert orch._state.skipped[issue.id].reason == "qa_review_retry_limit"
+        assert any(p.kind == "qa_review_retry_limit_reached" for p in orch._state.recent_problems)
+
 
 # ---------------------------------------------------------------------------
 # Review prompt rendering
@@ -606,12 +710,14 @@ class TestSnapshotMode:
         orch = _build_orchestrator()
         issue = _build_issue(state="QA Review")
         entry = _build_running_entry(issue, mode=ExecutionMode.REVIEW)
+        entry.qa_review_bounce_count = 2
         orch._state.running[issue.id] = entry
 
         snapshot = orch.snapshot()
         assert len(snapshot["running"]) == 1
         row = snapshot["running"][0]
         assert row["mode"] == "review"
+        assert row["qa_review_bounce_count"] == 2
 
     def test_running_entry_snapshot_build_mode(self) -> None:
         orch = _build_orchestrator()
@@ -632,6 +738,7 @@ class TestSnapshotMode:
             due_at_ms=0.0,
             error=None,
             mode="review",
+            qa_review_bounce_count=3,
         )
         orch._state.retry_attempts["issue-1"] = retry
         orch._state.claimed.add("issue-1")
@@ -640,6 +747,16 @@ class TestSnapshotMode:
         assert len(snapshot["retrying"]) == 1
         row = snapshot["retrying"][0]
         assert row["mode"] == "review"
+        assert row["qa_review_bounce_count"] == 3
+
+    def test_snapshot_includes_qa_review_safeguard_config(self) -> None:
+        orch = _build_orchestrator(max_bounces=4, max_retries=3)
+
+        snapshot = orch.snapshot()
+        qa = snapshot["workflow_config"]["transitions"]["qa_review"]
+
+        assert qa["max_bounces"] == 4
+        assert qa["max_retries"] == 3
 
 
 # ---------------------------------------------------------------------------
