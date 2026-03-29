@@ -964,3 +964,55 @@ async def test_retry_releases_blocked_issue_and_applies_blocked_transition(
     assert transitions == [(issue.id, "Blocked")]
     assert issue.id not in orchestrator._state.claimed
     assert issue.id not in orchestrator._state.completed
+
+
+@pytest.mark.asyncio
+async def test_dispatch_skips_transition_when_dispatch_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When dispatch transition is disabled, no state change should occur on dispatch."""
+    orchestrator = _build_orchestrator()
+    orchestrator._config.transitions = TransitionsConfig(dispatch=None)
+    issue = _build_issue()
+    transitions: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_transition_issue_state_background",
+        lambda issue_id, state_name: transitions.append((issue_id, state_name)),
+    )
+
+    async def fake_worker(issue, attempt, entry):
+        return None
+
+    monkeypatch.setattr(orchestrator, "_worker", fake_worker)
+
+    await orchestrator._dispatch_issue(issue, attempt=None)
+
+    assert transitions == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_uses_custom_dispatch_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the orchestrator honours a non-default dispatch transition."""
+    orchestrator = _build_orchestrator()
+    orchestrator._config.transitions = TransitionsConfig(dispatch="Working")
+    issue = _build_issue()
+    transitions: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_transition_issue_state_background",
+        lambda issue_id, state_name: transitions.append((issue_id, state_name)),
+    )
+
+    async def fake_worker(issue, attempt, entry):
+        return None
+
+    monkeypatch.setattr(orchestrator, "_worker", fake_worker)
+
+    await orchestrator._dispatch_issue(issue, attempt=None)
+
+    assert transitions == [(issue.id, "Working")]
