@@ -1547,6 +1547,14 @@ class Orchestrator:
                     "detail": blocker_desc,
                 }
 
+        if self._state.dispatch_paused:
+            return {
+                **row,
+                "kind": "dispatch_paused",
+                "summary": "Dispatching is paused",
+                "detail": "Resume dispatching to make this issue eligible again.",
+            }
+
         if not self._has_slots():
             capacity = self._state.max_concurrent_agents
             in_use = len(self._state.running)

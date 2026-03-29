@@ -436,6 +436,27 @@ def test_snapshot_includes_waiting_reasons_and_recent_problems(
     assert snapshot["counts"]["problems"] == 1
 
 
+def test_snapshot_reports_paused_dispatch_as_distinct_waiting_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    paused_issue = _build_issue(issue_id="issue-2", identifier="BAP-171", state="In Progress")
+    orchestrator._state.last_candidates = [paused_issue]
+    orchestrator._state.dispatch_paused = True
+
+    monkeypatch.setattr(
+        "cymphony.orchestrator._now_utc",
+        lambda: datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc),
+    )
+
+    snapshot = orchestrator.snapshot()
+
+    assert snapshot["counts"]["waiting"] == 1
+    assert snapshot["waiting"][0]["issue_identifier"] == "BAP-171"
+    assert snapshot["waiting"][0]["kind"] == "dispatch_paused"
+    assert snapshot["waiting"][0]["summary"] == "Dispatching is paused"
+
+
 def test_pause_dispatching_blocks_slot_availability_and_resume_requeues_tick(monkeypatch: pytest.MonkeyPatch) -> None:
     orchestrator = _build_orchestrator()
     refresh_calls: list[float] = []
