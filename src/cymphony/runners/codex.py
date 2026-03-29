@@ -1,9 +1,9 @@
 """Codex CLI runner implementation.
 
 Implements the BaseAgentRunner contract for OpenAI Codex CLI, handling:
-  - Command construction (approval-mode, quiet, model selection)
+  - Command construction for `codex exec` / `codex exec resume`
   - Environment setup (OPENAI_API_KEY preservation)
-  - Codex event parsing into the shared AgentEvent model
+  - Codex JSONL event parsing into the shared AgentEvent model
 """
 
 from __future__ import annotations
@@ -34,19 +34,18 @@ class CodexAgentRunner(BaseAgentRunner):
     ) -> list[str]:
         """Build the codex CLI command list.
 
-        Codex CLI uses --approval-mode full-auto for autonomous operation
-        (equivalent to Claude's --dangerously-skip-permissions) and --quiet
-        to suppress interactive prompts.
+        `codex exec --json` is the non-interactive JSONL interface.
+        Continuation turns use the `exec resume` subcommand.
         """
-        cmd = [self._config.command]
-
-        if self._config.dangerously_skip_permissions:
-            cmd.extend(["--approval-mode", "full-auto"])
-
-        cmd.extend(["--quiet", prompt])
+        cmd = [self._config.command, "exec"]
 
         if session_id:
-            cmd.extend(["--resume", session_id])
+            cmd.extend(["resume", session_id])
+
+        cmd.extend(["--json", prompt])
+
+        if self._config.dangerously_skip_permissions:
+            cmd.append("--dangerously-bypass-approvals-and-sandbox")
 
         return cmd
 
@@ -86,14 +85,14 @@ def parse_codex_stream_event(
     """Parse one JSON line from Codex CLI output.
 
     Codex CLI emits newline-delimited JSON events with a top-level "type" field.
-    Maps Codex event types to the shared AgentEvent model:
+    The non-interactive `codex exec --json` protocol currently includes:
 
       Codex type             → AgentEventType
       ──────────────────────   ─────────────────────
-      session.created        → SESSION_STARTED
-      message                → NOTIFICATION
-      completed / success    → TURN_COMPLETED
-      error                  → TURN_FAILED
+      thread.started         → SESSION_STARTED
+      item.completed         → NOTIFICATION
+      turn.completed         → TURN_COMPLETED
+      turn.failed / error    → TURN_FAILED
       input_required         → TURN_INPUT_REQUIRED
 
     Returns (event, new_session_id, turn_succeeded, turn_error).
@@ -124,14 +123,8 @@ def parse_codex_stream_event(
     turn_error: str | None = None
     event: AgentEvent | None = None
 
-    if msg_type == "session.created":
-        # Session start — extract session_id
-        session_data = msg.get("session", {})
-        new_session_id = (
-            session_data.get("id")
-            or msg.get("session_id")
-            or current_session_id
-        )
+    if msg_type == "thread.started":
+        new_session_id = msg.get("thread_id") or current_session_id
         event = AgentEvent(
             event=AgentEventType.SESSION_STARTED,
             timestamp=_now(),
@@ -139,19 +132,10 @@ def parse_codex_stream_event(
             pid=pid,
         )
 
-    elif msg_type == "message":
-        # Agent message — extract text summary for observability
-        content = msg.get("content", "")
-        role = msg.get("role", "")
-        if isinstance(content, list):
-            summary = _summarize_codex_content(content)
-        elif isinstance(content, str):
-            summary = content[:300]
-        else:
-            summary = str(content)[:300]
-
-        # Only emit notifications for assistant messages
-        if role != "system":
+    elif msg_type == "item.completed":
+        item = msg.get("item", {})
+        summary = _summarize_codex_item(item)
+        if summary:
             event = AgentEvent(
                 event=AgentEventType.NOTIFICATION,
                 timestamp=_now(),
@@ -161,20 +145,7 @@ def parse_codex_stream_event(
                 raw=msg,
             )
 
-    elif msg_type == "function_call":
-        # Tool/function call — emit as notification
-        name = msg.get("name", "?")
-        event = AgentEvent(
-            event=AgentEventType.NOTIFICATION,
-            timestamp=_now(),
-            session_id=current_session_id,
-            pid=pid,
-            message=f"[tool: {name}]",
-            raw=msg,
-        )
-
-    elif msg_type in ("completed", "success"):
-        # Turn completed successfully
+    elif msg_type == "turn.completed":
         turn_succeeded = True
         usage = _extract_codex_usage(msg)
         event = AgentEvent(
@@ -185,9 +156,12 @@ def parse_codex_stream_event(
             usage=usage,
         )
 
-    elif msg_type == "error":
-        # Turn failed
-        error_msg = msg.get("message", "") or msg.get("error", "")
+    elif msg_type in ("turn.failed", "error"):
+        error_msg = (
+            msg.get("message", "")
+            or msg.get("error", "")
+            or msg.get("detail", "")
+        )
         turn_error = f"codex error: {error_msg}" if error_msg else "codex error"
         event = AgentEvent(
             event=AgentEventType.TURN_FAILED,
@@ -198,7 +172,6 @@ def parse_codex_stream_event(
         )
 
     elif msg_type == "input_required":
-        # Agent requested user input — will trigger hard fail in base runner
         event = AgentEvent(
             event=AgentEventType.TURN_INPUT_REQUIRED,
             timestamp=_now(),
@@ -219,19 +192,18 @@ def parse_codex_stream_event(
     return event, new_session_id, turn_succeeded, turn_error
 
 
-def _summarize_codex_content(content: list) -> str:
-    """Extract a short text summary from Codex message content blocks."""
-    parts = []
-    for block in content[:3]:
-        if isinstance(block, dict):
-            if block.get("type") == "text":
-                text = str(block.get("text", ""))[:200]
-                parts.append(text)
-            elif block.get("type") == "function_call":
-                parts.append(f"[tool: {block.get('name', '?')}]")
-        elif isinstance(block, str):
-            parts.append(block[:200])
-    return " ".join(parts)[:300]
+def _summarize_codex_item(item: dict) -> str | None:
+    """Extract a short operator-facing summary from a completed Codex item."""
+    item_type = item.get("type")
+    if item_type == "agent_message":
+        return str(item.get("text") or "")[:300] or None
+    if item_type == "command_execution":
+        command = str(item.get("command") or "?")
+        status = str(item.get("status") or "")
+        exit_code = item.get("exit_code")
+        suffix = f" exit={exit_code}" if exit_code is not None else ""
+        return f"[command:{status}] {command}{suffix}"[:300]
+    return None
 
 
 def _extract_codex_usage(msg: dict) -> dict[str, int] | None:
@@ -241,6 +213,8 @@ def _extract_codex_usage(msg: dict) -> dict[str, int] | None:
         return {
             "input_tokens": int(usage.get("input_tokens", 0)),
             "output_tokens": int(usage.get("output_tokens", 0)),
-            "cache_read_input_tokens": int(usage.get("cache_read_input_tokens", 0)),
+            "cache_read_input_tokens": int(
+                usage.get("cache_read_input_tokens", usage.get("cached_input_tokens", 0))
+            ),
         }
     return None
