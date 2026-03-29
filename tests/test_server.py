@@ -151,10 +151,13 @@ def test_build_operator_groups_classifies_ready_waiting_blocked_and_recently_com
     )
 
     assert [item["identifier"] for item in groups["ready"]] == ["BAP-102"]
+    assert groups["ready"][0]["updated_at"] == "2026-03-28T21:00:00+00:00"
     assert [item["identifier"] for item in groups["waiting"]] == ["BAP-103"]
     assert groups["waiting"][0]["reason"] == "Waiting for global capacity"
+    assert groups["waiting"][0]["updated_at"] == "2026-03-28T21:00:00+00:00"
     assert [item["identifier"] for item in groups["blocked"]] == ["BAP-104"]
     assert groups["blocked"][0]["reason"] == "Waiting on BAP-099"
+    assert groups["blocked"][0]["updated_at"] == "2026-03-28T21:00:00+00:00"
     assert [item["identifier"] for item in groups["recently_completed"]] == ["BAP-105"]
     assert groups["recently_completed"][0]["project"] == "Bandeira"
     assert groups["recently_completed"][0]["title"] == "Title for BAP-105"
@@ -283,6 +286,119 @@ def test_build_operator_groups_respects_state_capacity_limits() -> None:
     assert [item["identifier"] for item in groups["ready"]] == ["BAP-102"]
     assert [item["identifier"] for item in groups["waiting"]] == ["BAP-103"]
     assert groups["waiting"][0]["reason"] == "Waiting for Todo capacity"
+
+
+def test_render_dashboard_shows_updated_timestamps_on_queue_tables() -> None:
+    html = _render_dashboard(
+        {
+            "generated_at": "2026-03-28T21:05:00+00:00",
+            "summary": {
+                "running": 0,
+                "retrying": 0,
+                "ready": 1,
+                "waiting": 1,
+                "needs_attention": 1,
+                "capacity_in_use": "0/2",
+            },
+            "totals": {},
+            "controls": {},
+            "running": [],
+            "retrying": [],
+            "ready": [
+                {
+                    "identifier": "BAP-102",
+                    "title": "Ready issue",
+                    "state": "Todo",
+                    "priority": 1,
+                    "url": None,
+                    "updated_at": "2026-03-28T20:30:00+00:00",
+                    "reason": "Dispatchable now",
+                }
+            ],
+            "waiting": [
+                {
+                    "identifier": "BAP-103",
+                    "title": "Waiting issue",
+                    "state": "Todo",
+                    "priority": 2,
+                    "url": None,
+                    "updated_at": "2026-03-28T19:00:00+00:00",
+                    "reason": "Waiting for global capacity",
+                }
+            ],
+            "blocked": [
+                {
+                    "identifier": "BAP-104",
+                    "title": "Blocked issue",
+                    "state": "Todo",
+                    "priority": 1,
+                    "url": None,
+                    "updated_at": "2026-03-28T18:00:00+00:00",
+                    "reason": "Waiting on BAP-099",
+                }
+            ],
+            "recently_completed": [],
+            "waiting_reasons": [],
+            "recent_problems": [],
+            "skipped": [],
+        }
+    )
+
+    # All queue tables should have the Updated header
+    assert html.count("<th>Updated</th>") == 3
+
+    # Timestamps rendered in consistent format
+    assert "2026-03-28 20:30 UTC" in html
+    assert "2026-03-28 19:00 UTC" in html
+    assert "2026-03-28 18:00 UTC" in html
+
+
+def test_render_dashboard_retrying_cards_show_started_and_last_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(server, "_now_utc", lambda: now)
+
+    html = _render_dashboard(
+        {
+            "generated_at": now.isoformat(),
+            "summary": {
+                "running": 0,
+                "retrying": 1,
+                "ready": 0,
+                "waiting": 0,
+                "needs_attention": 0,
+                "capacity_in_use": "0/2",
+            },
+            "totals": {},
+            "controls": {},
+            "running": [],
+            "retrying": [
+                {
+                    "issue_identifier": "BAP-160",
+                    "issue_title": "Retry test",
+                    "issue_url": None,
+                    "attempt": 2,
+                    "due_at": (now + timedelta(seconds=90)).isoformat(),
+                    "error": "network blip",
+                    "started_at": "2026-03-28T11:00:00+00:00",
+                    "last_event_at": "2026-03-28T11:55:00+00:00",
+                }
+            ],
+            "ready": [],
+            "waiting": [],
+            "blocked": [],
+            "recently_completed": [],
+            "waiting_reasons": [],
+            "recent_problems": [],
+            "skipped": [],
+        }
+    )
+
+    assert "2026-03-28 11:00 UTC" in html
+    assert "2026-03-28 11:55 UTC" in html
+    assert "Started" in html
+    assert "Last event" in html
 
 
 def test_format_relative_due_formats_countdown_and_due_now() -> None:
