@@ -160,7 +160,11 @@ query ProjectIssuesByStates($projectSlug: String!, $states: [String!]!, $after: 
     nodes {
       id
       identifier
+      title
+      project { name }
       state { name }
+      url
+      updatedAt
     }
   }
 }
@@ -587,7 +591,7 @@ def _normalize_issue(node: dict[str, Any]) -> Issue | None:
 
 
 def _normalize_issue_minimal(node: dict[str, Any]) -> Issue | None:
-    """Normalize a minimal issue node (id, identifier, state only)."""
+    """Normalize a minimal issue node (id, identifier, state, and optional enrichment fields)."""
     if not node:
         return None
     issue_id = node.get("id")
@@ -599,18 +603,18 @@ def _normalize_issue_minimal(node: dict[str, Any]) -> Issue | None:
     return Issue(
         id=issue_id,
         identifier=identifier,
-        title="",
-        project_name=None,
+        title=node.get("title") or "",
+        project_name=((node.get("project") or {}).get("name")),
         description=None,
         priority=None,
         state=state,
         branch_name=None,
-        url=None,
+        url=node.get("url"),
         labels=[],
         blocked_by=[],
         comments=[],
         created_at=None,
-        updated_at=None,
+        updated_at=_parse_dt(node.get("updatedAt")),
     )
 
 

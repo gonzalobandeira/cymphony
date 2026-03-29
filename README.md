@@ -129,6 +129,13 @@ hooks:
     ...
   timeout_ms: 120000           # hook timeout
 
+preflight:
+  enabled: true                # set false to skip all preflight checks
+  required_clis: [git]         # CLIs that must be on PATH before dispatch
+  required_env_vars: []        # env vars that must be set (e.g. ANTHROPIC_API_KEY)
+  expect_clean_worktree: false # if true, fail when workspace has uncommitted changes
+  base_branch: main            # expected base branch in each workspace
+
 server:
   port: 8080                   # omit to disable the HTTP server
 ---
@@ -185,6 +192,79 @@ When `server.port` is configured:
 | `POST` | `/api/v1/refresh` | Trigger an immediate poll |
 | `POST` | `/api/v1/app/kill` | Stop the orchestrator and cancel active workers |
 | `GET` | `/api/v1/<IDENTIFIER>` | Per-issue debug details |
+
+## Preflight checks
+
+Cymphony runs preflight checks before dispatching work to agents, catching common setup problems before expensive agent work begins. Checks run at two levels:
+
+**Global checks** (every poll tick):
+- Required CLIs are on PATH (default: `git`)
+- Required environment variables are set
+
+**Workspace checks** (per-issue, after workspace creation and `before_run` hook):
+- Workspace is a git repository (`.git` exists)
+- At least one git remote is configured
+- The configured `base_branch` exists locally or on origin
+- Worktree is clean (when `expect_clean_worktree: true`)
+
+Preflight failures are surfaced as:
+- Structured log messages (`action=preflight_check_failed`)
+- Problems in the dashboard and `/api/v1/state` JSON
+- `preflight_errors` array in the state snapshot
+
+To disable all checks: set `preflight.enabled: false` in your WORKFLOW.md.
+
+## Recommended safe hook patterns
+
+When running Cymphony against real project repos, use these hook patterns for reliable workspace lifecycle management.
+
+### Clone (after_create)
+
+```bash
+# Clone once when workspace is first created
+git clone git@github.com:org/repo.git .
+```
+
+### Sync and reset (before_run)
+
+```bash
+# Ensure clean state on the base branch before each agent run
+git fetch origin
+git checkout main
+git reset --hard origin/main
+git clean -fd
+# Delete stale agent branches to avoid conflicts
+git branch --list 'agent/*' | xargs -r git branch -D 2>/dev/null || true
+```
+
+### Branch, commit, and publish (after_run)
+
+```bash
+# Only push and create PR if the agent created a branch
+BRANCH=$(git branch --show-current)
+if [ "$BRANCH" != "main" ]; then
+  git add -A
+  git commit -m "agent: $(git branch --show-current)" || true
+  git push -u origin "$BRANCH" --force-with-lease || true
+  # Use first commit subject as PR title
+  TITLE=$(git log --format="%s" origin/main..HEAD | tail -1)
+  gh pr create --title "$TITLE" --body "Automated PR by Cymphony agent" --head "$BRANCH" 2>/dev/null || true
+fi
+```
+
+### Cleanup (before_remove)
+
+```bash
+# Delete the remote branch when workspace is removed
+BRANCH=$(git branch --show-current 2>/dev/null)
+if [ -n "$BRANCH" ] && [ "$BRANCH" != "main" ]; then
+  git push origin --delete "$BRANCH" 2>/dev/null || true
+fi
+```
+
+### How preflight interacts with hooks
+
+Preflight checks run **after** workspace creation and the `before_run` hook. This means the `before_run` hook is responsible for getting the workspace into the expected state (e.g., fetching, resetting to the base branch). Preflight then **verifies** the result before the agent starts. If preflight fails, no agent turns are consumed.
 
 ## Architecture
 

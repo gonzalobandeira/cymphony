@@ -151,12 +151,17 @@ def test_build_operator_groups_classifies_ready_waiting_blocked_and_recently_com
     )
 
     assert [item["identifier"] for item in groups["ready"]] == ["BAP-102"]
+    assert groups["ready"][0]["updated_at"] == "2026-03-28T21:00:00+00:00"
     assert [item["identifier"] for item in groups["waiting"]] == ["BAP-103"]
     assert groups["waiting"][0]["reason"] == "Waiting for global capacity"
+    assert groups["waiting"][0]["updated_at"] == "2026-03-28T21:00:00+00:00"
     assert [item["identifier"] for item in groups["blocked"]] == ["BAP-104"]
     assert groups["blocked"][0]["reason"] == "Waiting on BAP-099"
+    assert groups["blocked"][0]["updated_at"] == "2026-03-28T21:00:00+00:00"
     assert [item["identifier"] for item in groups["recently_completed"]] == ["BAP-105"]
     assert groups["recently_completed"][0]["project"] == "Bandeira"
+    assert groups["recently_completed"][0]["title"] == "Title for BAP-105"
+    assert groups["recently_completed"][0]["last_worked_on"] == "2026-03-28T21:04:00+00:00"
     assert groups["summary"]["needs_attention"] == 2
 
 
@@ -186,7 +191,7 @@ def test_render_dashboard_recently_completed_includes_project_and_linear_link() 
                     "state": "Done",
                     "project": "Bandeira",
                     "url": "https://linear.test/BAP-178",
-                    "updated_at": "2026-03-28T21:04:00+00:00",
+                    "last_worked_on": "2026-03-28T21:04:00+00:00",
                 }
             ],
             "skipped": [],
@@ -197,10 +202,56 @@ def test_render_dashboard_recently_completed_includes_project_and_linear_link() 
 
     assert "Recently Completed" in html
     assert "<th>Project</th>" in html
+    assert "<th>Last worked on</th>" in html
     assert "<th>Linear</th>" in html
     assert "BAP-178 - Recent terminal-state work for quick operator confirmation." in html
     assert "Bandeira" in html
+    assert "2026-03-28 21:04 UTC" in html
     assert ">Open</a>" in html
+
+
+def test_recently_completed_sorted_by_last_worked_on_descending() -> None:
+    snapshot = {
+        "generated_at": "2026-03-28T21:05:00+00:00",
+        "running": [],
+        "retrying": [],
+        "codex_totals": {},
+    }
+    completed_issues = [
+        _issue(
+            issue_id="old",
+            identifier="BAP-200",
+            state="Done",
+            updated_at=datetime(2026, 3, 26, 10, 0, tzinfo=timezone.utc),
+        ),
+        _issue(
+            issue_id="newest",
+            identifier="BAP-201",
+            state="Done",
+            updated_at=datetime(2026, 3, 28, 18, 0, tzinfo=timezone.utc),
+        ),
+        _issue(
+            issue_id="mid",
+            identifier="BAP-202",
+            state="Done",
+            updated_at=datetime(2026, 3, 27, 12, 0, tzinfo=timezone.utc),
+        ),
+    ]
+
+    groups = _build_operator_groups(
+        snapshot,
+        [],
+        completed_issues,
+        max_concurrent_agents=2,
+        max_concurrent_agents_by_state={},
+        active_states=["Todo", "In Progress"],
+        terminal_states=["Done"],
+    )
+
+    identifiers = [item["identifier"] for item in groups["recently_completed"]]
+    assert identifiers == ["BAP-201", "BAP-202", "BAP-200"]
+    assert groups["recently_completed"][0]["last_worked_on"] == "2026-03-28T18:00:00+00:00"
+    assert groups["recently_completed"][0]["title"] == "Title for BAP-201"
 
 
 def test_build_operator_groups_respects_state_capacity_limits() -> None:
@@ -235,6 +286,119 @@ def test_build_operator_groups_respects_state_capacity_limits() -> None:
     assert [item["identifier"] for item in groups["ready"]] == ["BAP-102"]
     assert [item["identifier"] for item in groups["waiting"]] == ["BAP-103"]
     assert groups["waiting"][0]["reason"] == "Waiting for Todo capacity"
+
+
+def test_render_dashboard_shows_updated_timestamps_on_queue_tables() -> None:
+    html = _render_dashboard(
+        {
+            "generated_at": "2026-03-28T21:05:00+00:00",
+            "summary": {
+                "running": 0,
+                "retrying": 0,
+                "ready": 1,
+                "waiting": 1,
+                "needs_attention": 1,
+                "capacity_in_use": "0/2",
+            },
+            "totals": {},
+            "controls": {},
+            "running": [],
+            "retrying": [],
+            "ready": [
+                {
+                    "identifier": "BAP-102",
+                    "title": "Ready issue",
+                    "state": "Todo",
+                    "priority": 1,
+                    "url": None,
+                    "updated_at": "2026-03-28T20:30:00+00:00",
+                    "reason": "Dispatchable now",
+                }
+            ],
+            "waiting": [
+                {
+                    "identifier": "BAP-103",
+                    "title": "Waiting issue",
+                    "state": "Todo",
+                    "priority": 2,
+                    "url": None,
+                    "updated_at": "2026-03-28T19:00:00+00:00",
+                    "reason": "Waiting for global capacity",
+                }
+            ],
+            "blocked": [
+                {
+                    "identifier": "BAP-104",
+                    "title": "Blocked issue",
+                    "state": "Todo",
+                    "priority": 1,
+                    "url": None,
+                    "updated_at": "2026-03-28T18:00:00+00:00",
+                    "reason": "Waiting on BAP-099",
+                }
+            ],
+            "recently_completed": [],
+            "waiting_reasons": [],
+            "recent_problems": [],
+            "skipped": [],
+        }
+    )
+
+    # All queue tables should have the Updated header
+    assert html.count("<th>Updated</th>") == 3
+
+    # Timestamps rendered in consistent format
+    assert "2026-03-28 20:30 UTC" in html
+    assert "2026-03-28 19:00 UTC" in html
+    assert "2026-03-28 18:00 UTC" in html
+
+
+def test_render_dashboard_retrying_cards_show_started_and_last_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(server, "_now_utc", lambda: now)
+
+    html = _render_dashboard(
+        {
+            "generated_at": now.isoformat(),
+            "summary": {
+                "running": 0,
+                "retrying": 1,
+                "ready": 0,
+                "waiting": 0,
+                "needs_attention": 0,
+                "capacity_in_use": "0/2",
+            },
+            "totals": {},
+            "controls": {},
+            "running": [],
+            "retrying": [
+                {
+                    "issue_identifier": "BAP-160",
+                    "issue_title": "Retry test",
+                    "issue_url": None,
+                    "attempt": 2,
+                    "due_at": (now + timedelta(seconds=90)).isoformat(),
+                    "error": "network blip",
+                    "started_at": "2026-03-28T11:00:00+00:00",
+                    "last_event_at": "2026-03-28T11:55:00+00:00",
+                }
+            ],
+            "ready": [],
+            "waiting": [],
+            "blocked": [],
+            "recently_completed": [],
+            "waiting_reasons": [],
+            "recent_problems": [],
+            "skipped": [],
+        }
+    )
+
+    assert "2026-03-28 11:00 UTC" in html
+    assert "2026-03-28 11:55 UTC" in html
+    assert "Started" in html
+    assert "Last event" in html
 
 
 def test_format_relative_due_formats_countdown_and_due_now() -> None:
@@ -323,17 +487,21 @@ def test_render_dashboard_shows_waiting_reasons_and_recent_problems(
 
     assert "BAP-154" in html
     assert "1m 30s" in html
-    assert "Pause Dispatching" in html
-    assert "Resume Dispatching" in html
-    assert "Arm kill" in html
+    assert ">Pause<" in html
+    assert ">Resume<" in html
+    assert ">Arm<" in html
     assert "Kill App" in html
     assert "Fetch the latest orchestration state immediately." in html
-    assert "Stop launching new work while letting active agents continue." in html
+    assert "title='Fetch the latest orchestration state immediately.'" in html
+    assert "Stop launching new work; active agents continue." in html
     assert "Allow the orchestrator to start queued work again." in html
-    assert "Enable the kill switch so the app can be shut down." in html
-    assert "Terminate the dashboard process after the kill switch is armed." in html
+    assert "Enable the kill switch to allow shutdown" in html
+    assert "title='Enable the kill switch to allow shutdown'" in html
+    assert "Terminate the Cymphony process (requires arming first)" in html
+    assert "title='Terminate the Cymphony process (requires arming first)'" in html
     assert "id='kill-app-button'" in html
-    assert "id='kill-app-button' class='danger-button' title='Terminate the dashboard process after the kill switch is armed.' disabled" in html
+    assert "danger-button" in html
+    assert "disabled" in html
     assert "Paused" in html
     assert "BAP-155" in html
     assert "Waiting Reasons (2)" in html
@@ -574,7 +742,8 @@ def test_render_dashboard_includes_js_refresh_and_toast() -> None:
     # Pause/resume auto-refresh button
     assert "Pause Auto-Refresh" in html
     assert "toggleAutoRefresh" in html
-    assert "Pause or resume the automatic 15-second dashboard refresh." in html
+    assert "Pause the automatic 15-second dashboard refresh" in html
+    assert "title=\"Pause the automatic 15-second dashboard refresh\"" in html
     assert "syncKillButton" in html
 
     # Scroll position preservation

@@ -14,6 +14,7 @@ from cymphony.models import (
     HooksConfig,
     Issue,
     PollingConfig,
+    PreflightConfig,
     RetryEntry,
     ServerConfig,
     ServiceConfig,
@@ -243,6 +244,13 @@ def _build_orchestrator(tmp_path: Path) -> Orchestrator:
             dangerously_skip_permissions=True,
         ),
         server=ServerConfig(port=None),
+        preflight=PreflightConfig(
+            enabled=True,
+            required_clis=["git"],
+            required_env_vars=[],
+            expect_clean_worktree=False,
+            base_branch="main",
+        ),
     )
     workflow = WorkflowDefinition(config={}, prompt_template="")
     return Orchestrator(Path("WORKFLOW.md"), config, workflow)

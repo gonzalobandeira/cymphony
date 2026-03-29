@@ -30,6 +30,7 @@ from .models import (
     WorkflowDefinition,
     WorkflowError,
 )
+from .preflight import PreflightResult, run_preflight_checks
 from .state import StateManager
 from .workflow import WorkflowWatcher, load_workflow, render_plan_prompt, render_prompt
 from .workspace import WorkspaceManager
@@ -322,6 +323,30 @@ class Orchestrator:
                     )
                 return
             self._state.last_validation_errors = []
+
+            # 2b. Repo preflight checks (CLIs, env vars)
+            if self._config.preflight.enabled:
+                preflight = await run_preflight_checks(
+                    self._config.preflight, workspace_path=None,
+                )
+                if not preflight.ok:
+                    error_dicts = [
+                        {"name": c.name, "message": c.message}
+                        for c in preflight.errors
+                    ]
+                    self._state.last_preflight_errors = error_dicts
+                    for c in preflight.errors:
+                        self._record_problem(
+                            kind="preflight_failed",
+                            summary=f"Preflight check '{c.name}' failed",
+                            detail=c.message,
+                        )
+                        logger.error(
+                            f"action=preflight_check_failed "
+                            f"name={c.name} message={c.message!r}"
+                        )
+                    return
+                self._state.last_preflight_errors = []
 
             # 3. Fetch candidate issues
             try:
@@ -662,18 +687,12 @@ class Orchestrator:
         # Part A: stall detection
         stall_timeout_ms = self._config.coding_agent.stall_timeout_ms
         if stall_timeout_ms > 0:
-            now_ms = _monotonic_ms()
+            now_utc = _now_utc()
             stalled: list[str] = []
             for issue_id, entry in list(self._state.running.items()):
                 last_event_ts = entry.session.last_event_timestamp
-                if last_event_ts:
-                    elapsed_ms = (
-                        _now_utc() - last_event_ts
-                    ).total_seconds() * 1000.0
-                else:
-                    elapsed_ms = (
-                        _now_utc() - entry.started_at
-                    ).total_seconds() * 1000.0
+                ref = last_event_ts if last_event_ts else entry.started_at
+                elapsed_ms = (now_utc - ref).total_seconds() * 1000.0
 
                 if elapsed_ms > stall_timeout_ms:
                     stalled.append(issue_id)
@@ -1019,6 +1038,30 @@ class Orchestrator:
             await wm.run_after_run_hook(workspace)
             raise AgentError("before_run_hook_error", str(exc)) from exc
 
+        # Workspace-level preflight checks (git repo state)
+        if self._config.preflight.enabled:
+            ws_preflight = await run_preflight_checks(
+                self._config.preflight, workspace_path=workspace.path,
+            )
+            if not ws_preflight.ok:
+                entry.status = RunStatus.FAILED
+                errors = "; ".join(c.message for c in ws_preflight.errors)
+                for c in ws_preflight.errors:
+                    self._record_problem(
+                        kind="preflight_failed",
+                        summary=f"Workspace preflight '{c.name}' failed",
+                        detail=c.message,
+                        issue_id=issue.id,
+                        issue_identifier=issue.identifier,
+                    )
+                    issue_log(
+                        logger, logging.ERROR,
+                        "workspace_preflight_failed",
+                        issue.id, issue.identifier,
+                        check=c.name, message=c.message,
+                    )
+                raise AgentError("preflight_failed", f"Workspace preflight failed: {errors}")
+
         max_turns = self._config.agent.max_turns
         session_id: str | None = None
         turn_number = 1
@@ -1265,8 +1308,13 @@ class Orchestrator:
                 entry=entry,
             )
         else:
-            # Abnormal exit → exponential backoff retry
-            entry.status = RunStatus.FAILED
+            # Abnormal exit → set status based on error type, then retry
+            if isinstance(exc, AgentError) and exc.code == "stall_timeout":
+                entry.status = RunStatus.STALLED
+            elif isinstance(exc, AgentError) and exc.code == "turn_timeout":
+                entry.status = RunStatus.TIMED_OUT
+            else:
+                entry.status = RunStatus.FAILED
             next_attempt = _next_attempt(entry.retry_attempt)
             error_str = str(exc)[:200]
             issue_log(
@@ -1275,6 +1323,7 @@ class Orchestrator:
                 issue_id, identifier,
                 attempt=next_attempt,
                 error=error_str,
+                run_status=entry.status.value,
             )
             await self._schedule_retry(
                 issue_id, identifier,
@@ -1599,6 +1648,8 @@ class Orchestrator:
                 "seconds_running": round(totals.seconds_running + live_seconds, 2),
             },
             "rate_limits": self._state.codex_rate_limits,
+            "preflight_errors": list(self._state.last_preflight_errors),
+            "validation_errors": list(self._state.last_validation_errors),
         }
 
     def _record_problem(
