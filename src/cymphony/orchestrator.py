@@ -542,18 +542,12 @@ class Orchestrator:
         # Part A: stall detection
         stall_timeout_ms = self._config.coding_agent.stall_timeout_ms
         if stall_timeout_ms > 0:
-            now_ms = _monotonic_ms()
+            now_utc = _now_utc()
             stalled: list[str] = []
             for issue_id, entry in list(self._state.running.items()):
                 last_event_ts = entry.session.last_event_timestamp
-                if last_event_ts:
-                    elapsed_ms = (
-                        _now_utc() - last_event_ts
-                    ).total_seconds() * 1000.0
-                else:
-                    elapsed_ms = (
-                        _now_utc() - entry.started_at
-                    ).total_seconds() * 1000.0
+                ref = last_event_ts if last_event_ts else entry.started_at
+                elapsed_ms = (now_utc - ref).total_seconds() * 1000.0
 
                 if elapsed_ms > stall_timeout_ms:
                     stalled.append(issue_id)
@@ -1145,8 +1139,13 @@ class Orchestrator:
                 entry=entry,
             )
         else:
-            # Abnormal exit → exponential backoff retry
-            entry.status = RunStatus.FAILED
+            # Abnormal exit → set status based on error type, then retry
+            if isinstance(exc, AgentError) and exc.code == "stall_timeout":
+                entry.status = RunStatus.STALLED
+            elif isinstance(exc, AgentError) and exc.code == "turn_timeout":
+                entry.status = RunStatus.TIMED_OUT
+            else:
+                entry.status = RunStatus.FAILED
             next_attempt = _next_attempt(entry.retry_attempt)
             error_str = str(exc)[:200]
             issue_log(
@@ -1155,6 +1154,7 @@ class Orchestrator:
                 issue_id, identifier,
                 attempt=next_attempt,
                 error=error_str,
+                run_status=entry.status.value,
             )
             await self._schedule_retry(
                 issue_id, identifier,

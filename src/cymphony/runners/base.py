@@ -164,10 +164,12 @@ class BaseAgentRunner(abc.ABC):
                 message="turn_timeout",
             ))
             raise AgentError("turn_timeout", f"Turn timed out after {self._config.turn_timeout_ms}ms")
-        except AgentError:
+        except AgentError as exc:
             if proc.returncode is None:
                 proc.kill()
                 await proc.communicate()
+            # Stall errors are already logged and evented inside _stream_turn;
+            # other AgentErrors (e.g. turn_input_required) just propagate.
             raise
 
         # Wait for process to exit if not already done
@@ -204,11 +206,17 @@ class BaseAgentRunner(abc.ABC):
 
         stdout carries protocol messages (stream-json).
         stderr is diagnostics only — logged but not parsed.
+
+        Enforces ``stall_timeout_ms``: if the subprocess produces no stdout
+        data for longer than the configured threshold the process is killed
+        and an ``AgentError("stall_timeout", ...)`` is raised so the caller
+        can distinguish a stalled subprocess from a full turn timeout.
         """
         session_id = initial_session_id
         turn_succeeded = False
         turn_error: str | None = None
         stderr_lines: list[str] = []
+        stall_timeout_secs = self._config.stall_timeout_ms / 1000.0
 
         # Read stderr as background task (log only, spec §10.3)
         async def _drain_stderr() -> None:
@@ -226,38 +234,70 @@ class BaseAgentRunner(abc.ABC):
 
         assert proc.stdout is not None
         buffer = b""
-        async for raw_chunk in proc.stdout:
-            buffer += raw_chunk
-            # Process complete newline-delimited lines
-            while b"\n" in buffer:
-                line_bytes, buffer = buffer.split(b"\n", 1)
-                if not line_bytes.strip():
-                    continue
+        try:
+            while True:
+                try:
+                    raw_chunk = await asyncio.wait_for(
+                        proc.stdout.readline(),
+                        timeout=stall_timeout_secs if stall_timeout_secs > 0 else None,
+                    )
+                except asyncio.TimeoutError:
+                    # Subprocess stalled — no output within stall_timeout_ms
+                    logger.warning(
+                        f"action=agent_stall_detected "
+                        f"issue_id={issue_id} issue_identifier={issue_identifier} "
+                        f"pid={pid} stall_timeout_ms={self._config.stall_timeout_ms}"
+                    )
+                    if proc.returncode is None:
+                        proc.kill()
+                        await proc.wait()
+                    await on_event(AgentEvent(
+                        event=AgentEventType.TURN_FAILED,
+                        timestamp=_now(),
+                        session_id=session_id,
+                        pid=pid,
+                        message="stall_timeout",
+                    ))
+                    raise AgentError(
+                        "stall_timeout",
+                        f"Agent subprocess stalled (no output for {self._config.stall_timeout_ms}ms)",
+                    )
 
-                line_str = line_bytes.decode(errors="replace")
-                event, sid, succeeded, err = self._parse_event(
-                    line_str, session_id, issue_id, issue_identifier, pid
-                )
-                if sid:
-                    session_id = sid
-                if succeeded is True:
-                    turn_succeeded = True
-                if err is not None:
-                    turn_error = err
-                if event:
-                    # Check for user input required — hard fail (spec §10.5)
-                    if event.event == AgentEventType.TURN_INPUT_REQUIRED:
+                if not raw_chunk:
+                    # EOF — process closed stdout
+                    break
+
+                buffer += raw_chunk
+                # Process complete newline-delimited lines
+                while b"\n" in buffer:
+                    line_bytes, buffer = buffer.split(b"\n", 1)
+                    if not line_bytes.strip():
+                        continue
+
+                    line_str = line_bytes.decode(errors="replace")
+                    event, sid, succeeded, err = self._parse_event(
+                        line_str, session_id, issue_id, issue_identifier, pid
+                    )
+                    if sid:
+                        session_id = sid
+                    if succeeded is True:
+                        turn_succeeded = True
+                    if err is not None:
+                        turn_error = err
+                    if event:
+                        # Check for user input required — hard fail (spec §10.5)
+                        if event.event == AgentEventType.TURN_INPUT_REQUIRED:
+                            await on_event(event)
+                            # Kill process
+                            if proc.returncode is None:
+                                proc.kill()
+                            raise AgentError(
+                                "turn_input_required",
+                                "Agent requested user input — hard fail (high-trust policy)",
+                            )
                         await on_event(event)
-                        # Kill process
-                        if proc.returncode is None:
-                            proc.kill()
-                        raise AgentError(
-                            "turn_input_required",
-                            "Agent requested user input — hard fail (high-trust policy)",
-                        )
-                    await on_event(event)
-
-        await stderr_task
+        finally:
+            await stderr_task
 
         if not turn_succeeded:
             stderr_summary = "; ".join(stderr_lines[-5:]) if stderr_lines else ""
