@@ -21,6 +21,7 @@ from .models import (
     Issue,
     LiveSession,
     OrchestratorState,
+    ProblemRecord,
     RetryEntry,
     RunningEntry,
     RunStatus,
@@ -43,6 +44,7 @@ def _monotonic_ms() -> float:
 
 # Continuation retry delay after clean exit (spec §8.4)
 _CONTINUATION_RETRY_DELAY_MS = 1000.0
+_MAX_RECENT_PROBLEMS = 25
 
 
 class Orchestrator:
@@ -180,19 +182,34 @@ class Orchestrator:
             # 2. Dispatch preflight validation
             validation = validate_dispatch_config(self._config)
             if not validation.ok:
+                self._state.last_validation_errors = list(validation.errors)
+                for err in validation.errors:
+                    self._record_problem(
+                        kind="invalid_config",
+                        summary="Dispatch configuration is invalid",
+                        detail=err,
+                    )
                 for err in validation.errors:
                     logger.error(
                         f"action=dispatch_validation_failed error={err!r}"
                     )
                 return
+            self._state.last_validation_errors = []
 
             # 3. Fetch candidate issues
             try:
                 client = LinearClient(self._config.tracker)
                 issues = await client.fetch_candidate_issues()
             except Exception as exc:
+                self._state.last_candidates = []
+                self._record_problem(
+                    kind="fetch_candidates_failed",
+                    summary="Failed to refresh candidate issues",
+                    detail=str(exc),
+                )
                 logger.error(f"action=fetch_candidates_failed error={exc}")
                 return
+            self._state.last_candidates = list(issues)
 
             # 4. Sort for dispatch (spec §8.2)
             sorted_issues = _sort_for_dispatch(issues)
@@ -338,6 +355,13 @@ class Orchestrator:
             else:
                 entry = self._state.running.get(issue_id)
                 if entry:
+                    self._record_problem(
+                        kind="inactive_state",
+                        summary=f"Issue moved to inactive state {refreshed_issue.state!r}",
+                        detail="Work was stopped by reconciliation because the issue is no longer in an active workflow state.",
+                        issue_id=issue_id,
+                        issue_identifier=entry.identifier,
+                    )
                     issue_log(
                         logger, logging.INFO,
                         "reconcile_inactive_stop",
@@ -444,6 +468,12 @@ class Orchestrator:
                     f"team_id={team_id}"
                 )
             except Exception as exc:
+                self._record_problem(
+                    kind="transition_failed",
+                    summary=f"State transition to {state_name!r} failed",
+                    detail=str(exc),
+                    issue_id=issue_id,
+                )
                 logger.warning(
                     f"action=state_transition_failed issue_id={issue_id} "
                     f"state={state_name!r} error={exc}"
@@ -1038,14 +1068,31 @@ class Orchestrator:
                 "error": retry.error,
             })
 
+        waiting_rows = self._build_waiting_rows(now)
+        problem_rows = [
+            {
+                "kind": problem.kind,
+                "summary": problem.summary,
+                "detail": problem.detail,
+                "issue_id": problem.issue_id,
+                "issue_identifier": problem.issue_identifier,
+                "observed_at": problem.observed_at.isoformat(),
+            }
+            for problem in self._state.recent_problems
+        ]
+
         return {
             "generated_at": now.isoformat(),
             "counts": {
                 "running": len(running_rows),
                 "retrying": len(retrying_rows),
+                "waiting": len(waiting_rows),
+                "problems": len(problem_rows),
             },
             "running": running_rows,
             "retrying": retrying_rows,
+            "waiting": waiting_rows,
+            "problems": problem_rows,
             "codex_totals": {
                 "input_tokens": totals.input_tokens,
                 "output_tokens": totals.output_tokens,
@@ -1054,6 +1101,164 @@ class Orchestrator:
             },
             "rate_limits": self._state.codex_rate_limits,
         }
+
+    def _record_problem(
+        self,
+        *,
+        kind: str,
+        summary: str,
+        detail: str,
+        issue_id: str | None = None,
+        issue_identifier: str | None = None,
+    ) -> None:
+        if issue_identifier is None and issue_id:
+            entry = self._state.running.get(issue_id)
+            if entry:
+                issue_identifier = entry.identifier
+            else:
+                retry = self._state.retry_attempts.get(issue_id)
+                if retry:
+                    issue_identifier = retry.identifier
+
+        self._state.recent_problems.insert(
+            0,
+            ProblemRecord(
+                kind=kind,
+                summary=summary,
+                detail=detail,
+                observed_at=_now_utc(),
+                issue_id=issue_id,
+                issue_identifier=issue_identifier,
+            ),
+        )
+        del self._state.recent_problems[_MAX_RECENT_PROBLEMS:]
+
+    def _build_waiting_rows(self, now: datetime) -> list[dict[str, Any]]:
+        waiting_rows: list[dict[str, Any]] = []
+
+        for issue in _sort_for_dispatch(self._state.last_candidates):
+            if issue.id in self._state.running:
+                continue
+
+            waiting_row = self._build_waiting_row(issue)
+            if waiting_row is not None:
+                waiting_rows.append(waiting_row)
+
+        for issue_id, retry in self._state.retry_attempts.items():
+            remaining_ms = max(retry.due_at_ms - _monotonic_ms(), 0)
+            due_at = now + timedelta(milliseconds=remaining_ms)
+            waiting_rows.append(
+                {
+                    "issue_id": issue_id,
+                    "issue_identifier": retry.identifier,
+                    "state": None,
+                    "kind": "waiting_for_retry",
+                    "summary": "Waiting for retry timer",
+                    "detail": retry.error or "Waiting for continuation retry",
+                    "attempt": retry.attempt,
+                    "due_at": due_at.isoformat(),
+                }
+            )
+
+        waiting_rows.sort(
+            key=lambda row: (row.get("issue_identifier") or "", row.get("kind") or "")
+        )
+        return waiting_rows
+
+    def _build_waiting_row(self, issue: Issue) -> dict[str, Any] | None:
+        terminal_lower = {s.lower() for s in self._config.tracker.terminal_states}
+        active_lower = {s.lower() for s in self._config.tracker.active_states}
+        state_lower = issue.state.lower()
+
+        row = {
+            "issue_id": issue.id,
+            "issue_identifier": issue.identifier,
+            "state": issue.state,
+            "attempt": None,
+            "due_at": None,
+        }
+
+        if not (issue.id and issue.identifier and issue.title and issue.state):
+            return {
+                **row,
+                "kind": "invalid_issue",
+                "summary": "Issue data is incomplete",
+                "detail": "Required issue fields are missing, so dispatch is skipped.",
+            }
+
+        if issue.id in self._state.retry_attempts:
+            return None
+
+        if state_lower not in active_lower:
+            return {
+                **row,
+                "kind": "inactive_state",
+                "summary": f"Issue is in inactive state {issue.state!r}",
+                "detail": "Dispatch only runs for configured active states.",
+            }
+
+        if state_lower in terminal_lower:
+            return {
+                **row,
+                "kind": "terminal_state",
+                "summary": f"Issue is in terminal state {issue.state!r}",
+                "detail": "Terminal issues are not eligible for dispatch.",
+            }
+
+        if issue.id in self._state.claimed:
+            return {
+                **row,
+                "kind": "claimed",
+                "summary": "Issue is already claimed",
+                "detail": "The orchestrator has already reserved this issue for work.",
+            }
+
+        if state_lower == "todo":
+            blockers = [
+                blocker for blocker in issue.blocked_by
+                if (blocker.state or "").lower() not in terminal_lower
+            ]
+            if blockers:
+                blocker_desc = ", ".join(
+                    f"{blocker.identifier or blocker.id or 'unknown'} ({blocker.state or 'unknown'})"
+                    for blocker in blockers
+                )
+                return {
+                    **row,
+                    "kind": "blocked_by_dependency",
+                    "summary": "Blocked by dependency",
+                    "detail": blocker_desc,
+                }
+
+        if not self._has_slots():
+            capacity = self._state.max_concurrent_agents
+            in_use = len(self._state.running)
+            return {
+                **row,
+                "kind": "no_slots_available",
+                "summary": "No global orchestrator slots available",
+                "detail": f"{in_use}/{capacity} slots are currently in use.",
+            }
+
+        if not self._has_state_slot(issue):
+            state_key = issue.state.lower()
+            capacity = self._config.agent.max_concurrent_agents_by_state.get(state_key)
+            in_use = sum(
+                1 for entry in self._state.running.values()
+                if entry.issue.state.lower() == state_key
+            )
+            return {
+                **row,
+                "kind": "no_state_slots_available",
+                "summary": f"No slots available for state {issue.state!r}",
+                "detail": (
+                    f"{in_use}/{capacity} slots are currently in use for this state."
+                    if capacity is not None
+                    else "The per-state concurrency limit is currently saturated."
+                ),
+            }
+
+        return None
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -9,10 +10,15 @@ import pytest
 from cymphony.linear import LinearClient
 from cymphony.models import (
     AgentConfig,
+    BlockerRef,
     CodingAgentConfig,
     Issue,
+    LiveSession,
     PollingConfig,
+    ProblemRecord,
     RetryEntry,
+    RunningEntry,
+    RunStatus,
     ServerConfig,
     ServiceConfig,
     TrackerConfig,
@@ -360,6 +366,74 @@ async def test_schedule_retry_uses_continuation_log_action_for_clean_exit(
 
     assert "action=continuation_retry_scheduled" in caplog.text
     assert "action=retry_scheduled" not in caplog.text
+
+
+def test_snapshot_includes_waiting_reasons_and_recent_problems(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    blocker = BlockerRef(id="blocker-1", identifier="BAP-170", state="In Progress")
+    blocked_issue = _build_issue(issue_id="issue-2", identifier="BAP-171", state="Todo")
+    blocked_issue.blocked_by = [blocker]
+    slotted_issue = _build_issue(issue_id="issue-3", identifier="BAP-172", state="In Progress")
+    retry_issue = _build_issue(issue_id="issue-4", identifier="BAP-173", state="Todo")
+
+    orchestrator._state.last_candidates = [blocked_issue, slotted_issue, retry_issue]
+    orchestrator._state.running["issue-1"] = RunningEntry(
+        issue_id="issue-1",
+        identifier="BAP-169",
+        issue=_build_issue(issue_id="issue-1", identifier="BAP-169", state="In Progress"),
+        task=None,
+        session=LiveSession(
+            session_id=None,
+            pid=None,
+            last_event=None,
+            last_event_timestamp=None,
+            last_message="",
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            last_reported_input_tokens=0,
+            last_reported_output_tokens=0,
+            last_reported_total_tokens=0,
+            turn_count=0,
+        ),
+        retry_attempt=None,
+        started_at=datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc),
+        status=RunStatus.STREAMING_TURN,
+    )
+    orchestrator._state.retry_attempts[retry_issue.id] = RetryEntry(
+        issue_id=retry_issue.id,
+        identifier=retry_issue.identifier,
+        attempt=2,
+        due_at_ms=5_000.0,
+        error="network blip",
+    )
+    orchestrator._state.recent_problems.append(
+        ProblemRecord(
+            kind="invalid_config",
+            summary="Dispatch configuration is invalid",
+            detail="tracker.project_slug is required",
+            observed_at=datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc),
+        )
+    )
+
+    monkeypatch.setattr("cymphony.orchestrator._monotonic_ms", lambda: 4_000.0)
+    monkeypatch.setattr("cymphony.orchestrator._now_utc", lambda: datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc))
+
+    snapshot = orchestrator.snapshot()
+
+    waiting_by_issue = {
+        row["issue_identifier"]: row
+        for row in snapshot["waiting"]
+    }
+    assert waiting_by_issue["BAP-171"]["kind"] == "blocked_by_dependency"
+    assert waiting_by_issue["BAP-171"]["detail"] == "BAP-170 (In Progress)"
+    assert waiting_by_issue["BAP-172"]["kind"] == "no_slots_available"
+    assert waiting_by_issue["BAP-173"]["kind"] == "waiting_for_retry"
+    assert snapshot["problems"][0]["kind"] == "invalid_config"
+    assert snapshot["counts"]["waiting"] == 3
+    assert snapshot["counts"]["problems"] == 1
 
 
 @pytest.mark.asyncio
