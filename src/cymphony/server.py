@@ -719,7 +719,7 @@ def _build_operator_groups(
                 "state": issue.state,
                 "project": issue.project_name,
                 "url": issue.url,
-                "updated_at": issue.updated_at.isoformat() if issue.updated_at else None,
+                "last_worked_on": issue.updated_at.isoformat() if issue.updated_at else None,
             }
             for issue in recently_completed
         ],
@@ -921,7 +921,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         ("recently_completed", "Recently Completed", "Recent terminal-state work for quick operator confirmation.", "No recent completions found."),
     ]:
         headers = (
-            ["Issue", "State", "Project", "Updated", "Linear"]
+            ["Issue", "State", "Project", "Last worked on", "Linear"]
             if key == "recently_completed"
             else ["Issue", "State", "Priority", "Reason"]
         )
@@ -932,7 +932,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
                     _render_issue_link(item["identifier"], item["title"], item.get("url")),
                     escape(str(item.get("state") or "")),
                     escape(str(item.get("project") or "-")),
-                    escape(_format_timestamp(item.get("updated_at"))),
+                    escape(_format_timestamp(item.get("last_worked_on"))),
                     _render_linear_link(item.get("url")),
                 ])
             else:
