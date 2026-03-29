@@ -138,6 +138,13 @@ preflight:
 
 server:
   port: 8080                   # omit to disable the HTTP server
+
+transitions:
+  dispatch: In Progress        # default: move issue when work starts
+  success: In Review           # default: move issue after a clean worker exit
+  failure: null                # optional: move issue after an abnormal worker exit
+  blocked: Blocked             # optional: move issue when dependencies block dispatch
+  cancelled: null              # optional: move issue when reconciliation cancels a worker
 ---
 You are a senior software engineer working on the **MyProject** project.
 
@@ -180,6 +187,24 @@ You are a senior software engineer working on the **MyProject** project.
 | `issue.comments` | `list` | Comments with `.author`, `.body`, `.created_at` |
 | `issue.blocked_by` | `list` | Blocking issues with `.identifier`, `.state` |
 | `attempt` | `int \| None` | Retry attempt number (>1 means re-attempt) |
+
+### Workflow transitions
+
+`WORKFLOW.md` can define a `transitions` block that maps orchestrator lifecycle events to Linear workflow state names:
+
+- `dispatch`: state to apply when an issue is claimed and a worker starts
+- `success`: state to apply after a clean worker exit, before the continuation retry is scheduled
+- `failure`: state to apply after an abnormal worker exit
+- `blocked`: state to apply when dispatch is skipped because dependencies are unresolved
+- `cancelled`: state to apply when reconciliation cancels a running worker
+
+Defaults are backward-compatible with the previous hardcoded behavior:
+
+- `dispatch: In Progress`
+- `success: In Review`
+- `failure`, `blocked`, `cancelled`: no transition
+
+Set a transition to `null`, `false`, or `""` to disable it explicitly. Omitting a key keeps the default for that event.
 
 ## HTTP API
 

@@ -898,6 +898,24 @@ class Orchestrator:
         )
         return global_available > 0
 
+    def _unresolved_blockers(self, issue: Issue) -> list[BlockerRef]:
+        """Return blockers that are not yet in a terminal state."""
+        terminal_lower = {s.lower() for s in self._config.tracker.terminal_states}
+        return [
+            blocker for blocker in issue.blocked_by
+            if (blocker.state or "").lower() not in terminal_lower
+        ]
+
+    def _maybe_transition_blocked_issue(self, issue: Issue) -> None:
+        """Apply the configured blocked transition when an issue is gated by dependencies."""
+        blocked_state = self._config.transitions.blocked
+        if not blocked_state:
+            return
+        if issue.state.lower() == blocked_state.lower():
+            return
+        if self._unresolved_blockers(issue):
+            self._transition_issue_state_background(issue.id, blocked_state)
+
     def _is_dispatch_eligible(self, issue: Issue) -> bool:
         """Check non-slot dispatch eligibility (spec §8.2)."""
         # Must have required fields
@@ -920,12 +938,8 @@ class Orchestrator:
             return False
 
         # Blocker check for active work that should not run with unresolved dependencies.
-        if state_lower in {"todo", "in progress"}:
-            terminal_lower_set = set(terminal_lower)
-            for blocker in issue.blocked_by:
-                blocker_state = (blocker.state or "").lower()
-                if blocker_state not in terminal_lower_set:
-                    return False
+        if state_lower in {"todo", "in progress"} and self._unresolved_blockers(issue):
+            return False
 
         return True
 
@@ -1004,7 +1018,8 @@ class Orchestrator:
             issue.id, issue.identifier,
             attempt=attempt,
         )
-        self._transition_issue_state_background(issue.id, "In Progress")
+        if self._config.transitions.dispatch:
+            self._transition_issue_state_background(issue.id, self._config.transitions.dispatch)
 
     # ------------------------------------------------------------------
     # Worker (spec §16.5)
@@ -1285,6 +1300,8 @@ class Orchestrator:
                 "worker_cancelled",
                 issue_id, identifier,
             )
+            if self._config.transitions.cancelled:
+                self._transition_issue_state_background(issue_id, self._config.transitions.cancelled)
             return
 
         if exc is None:
@@ -1297,9 +1314,10 @@ class Orchestrator:
                 "worker_exited_normal",
                 issue_id, identifier,
             )
-            active_lower = [s.lower() for s in self._config.tracker.active_states]
-            if entry.issue.state.lower() in active_lower:
-                await self._transition_issue_state(issue_id, "In Review")
+            if self._config.transitions.success:
+                active_lower = [s.lower() for s in self._config.tracker.active_states]
+                if entry.issue.state.lower() in active_lower:
+                    await self._transition_issue_state(issue_id, self._config.transitions.success)
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=1,
@@ -1325,6 +1343,8 @@ class Orchestrator:
                 error=error_str,
                 run_status=entry.status.value,
             )
+            if self._config.transitions.failure:
+                self._transition_issue_state_background(issue_id, self._config.transitions.failure)
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=next_attempt,
@@ -1495,6 +1515,7 @@ class Orchestrator:
         self._state.completed.discard(issue_id)
 
         if not self._is_dispatch_eligible(issue):
+            self._maybe_transition_blocked_issue(issue)
             # No longer active — release
             self._state.claimed.discard(issue_id)
             self._state.completed.discard(issue_id)

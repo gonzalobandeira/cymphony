@@ -128,6 +128,21 @@ class ServerConfig:
 
 
 @dataclass
+class TransitionsConfig:
+    """Declarative workflow state transitions (spec §4.1.9).
+
+    Each field maps a lifecycle event to the Linear workflow state name
+    the issue should be moved to.  A ``None`` value means "do not
+    transition" for that event.
+    """
+    dispatch: str | None = "In Progress"
+    success: str | None = "In Review"
+    failure: str | None = None
+    blocked: str | None = None
+    cancelled: str | None = None
+
+
+@dataclass
 class ServiceConfig:
     """Fully typed runtime configuration (spec §4.1.3)."""
     tracker: TrackerConfig
@@ -138,6 +153,7 @@ class ServiceConfig:
     coding_agent: CodingAgentConfig
     server: ServerConfig
     preflight: PreflightConfig
+    transitions: TransitionsConfig = field(default_factory=TransitionsConfig)
 
 
 # ---------------------------------------------------------------------------

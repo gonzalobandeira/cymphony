@@ -38,6 +38,15 @@ hooks:
     \ \"\" --head \"$BRANCH\" || true\r\nfi"
 server:
   port: 8080
+# Workflow transitions — map lifecycle events to Linear state names.
+# Set a value to false or omit it to skip the transition for that event.
+# Defaults: dispatch → "In Progress", success → "In Review", others → no transition.
+transitions:
+  dispatch: In Progress
+  success: In Review
+  # failure: null
+  # blocked: null
+  # cancelled: null
 ---
 You are a senior software engineer working on the **Cymphony** project.
 

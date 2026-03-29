@@ -59,3 +59,89 @@ def test_validate_dispatch_config_rejects_invalid_provider() -> None:
     result = validate_dispatch_config(config)
     assert not result.ok
     assert any("agent.provider" in e for e in result.errors)
+
+
+# ---------------------------------------------------------------------------
+# Transition config tests
+# ---------------------------------------------------------------------------
+
+def _workflow_with_transitions(transitions: dict | None = None) -> WorkflowDefinition:
+    """Minimal workflow with optional transitions block."""
+    cfg: dict = {
+        "tracker": {
+            "kind": "linear",
+            "api_key": "lin_test_key",
+            "project_slug": "test-project",
+        },
+        "agent": {"max_concurrent_agents": 2, "max_turns": 5},
+        "codex": {"command": "claude"},
+    }
+    if transitions is not None:
+        cfg["transitions"] = transitions
+    return WorkflowDefinition(config=cfg, prompt_template="Hello {{ issue.title }}")
+
+
+def test_transitions_defaults_when_omitted() -> None:
+    config = build_config(_workflow_with_transitions())
+    assert config.transitions.dispatch == "In Progress"
+    assert config.transitions.success == "In Review"
+    assert config.transitions.failure is None
+    assert config.transitions.blocked is None
+    assert config.transitions.cancelled is None
+
+
+def test_transitions_defaults_when_empty_dict() -> None:
+    config = build_config(_workflow_with_transitions({}))
+    assert config.transitions.dispatch == "In Progress"
+    assert config.transitions.success == "In Review"
+
+
+def test_transitions_custom_values() -> None:
+    config = build_config(_workflow_with_transitions({
+        "dispatch": "Working",
+        "success": "Done",
+        "failure": "Failed",
+        "blocked": "On Hold",
+        "cancelled": "Cancelled",
+    }))
+    assert config.transitions.dispatch == "Working"
+    assert config.transitions.success == "Done"
+    assert config.transitions.failure == "Failed"
+    assert config.transitions.blocked == "On Hold"
+    assert config.transitions.cancelled == "Cancelled"
+
+
+def test_transitions_disable_with_false() -> None:
+    config = build_config(_workflow_with_transitions({
+        "dispatch": False,
+        "success": False,
+    }))
+    assert config.transitions.dispatch is None
+    assert config.transitions.success is None
+
+
+def test_transitions_disable_with_empty_string() -> None:
+    config = build_config(_workflow_with_transitions({
+        "dispatch": "",
+        "success": "",
+    }))
+    assert config.transitions.dispatch is None
+    assert config.transitions.success is None
+
+
+def test_transitions_disable_with_null() -> None:
+    config = build_config(_workflow_with_transitions({
+        "dispatch": None,
+        "success": None,
+    }))
+    assert config.transitions.dispatch is None
+    assert config.transitions.success is None
+
+
+def test_transitions_partial_override() -> None:
+    config = build_config(_workflow_with_transitions({
+        "success": "Completed",
+    }))
+    assert config.transitions.dispatch == "In Progress"
+    assert config.transitions.success == "Completed"
+    assert config.transitions.failure is None

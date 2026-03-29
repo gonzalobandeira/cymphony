@@ -17,6 +17,7 @@ from .models import (
     ServerConfig,
     ServiceConfig,
     TrackerConfig,
+    TransitionsConfig,
     WorkflowDefinition,
     WorkflowError,
     WorkspaceConfig,
@@ -38,6 +39,7 @@ _DEFAULT_CLAUDE_COMMAND = "claude"
 _DEFAULT_TURN_TIMEOUT_MS = 3_600_000
 _DEFAULT_READ_TIMEOUT_MS = 5_000
 _DEFAULT_STALL_TIMEOUT_MS = 300_000
+_MISSING = object()
 
 
 def _default_workspace_root() -> str:
@@ -79,6 +81,15 @@ def _to_int(value: Any, default: int) -> int:
 def _to_str(value: Any, default: str) -> str:
     if value is None:
         return default
+    return str(value)
+
+
+def _to_optional_str(value: Any, default: str | None) -> str | None:
+    """Coerce to optional str. Explicit null/false/empty string → None."""
+    if value is _MISSING:
+        return default
+    if value is None or value is False or value == "":
+        return None
     return str(value)
 
 
@@ -223,6 +234,27 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
         base_branch=_to_str(preflight_raw.get("base_branch"), "main"),
     )
 
+    # --- transitions ---
+    transitions_raw: dict[str, Any] = raw.get("transitions") or {}
+    _TRANSITION_DEFAULTS = TransitionsConfig()
+    transitions = TransitionsConfig(
+        dispatch=_to_optional_str(
+            transitions_raw.get("dispatch", _MISSING), _TRANSITION_DEFAULTS.dispatch
+        ),
+        success=_to_optional_str(
+            transitions_raw.get("success", _MISSING), _TRANSITION_DEFAULTS.success
+        ),
+        failure=_to_optional_str(
+            transitions_raw.get("failure", _MISSING), _TRANSITION_DEFAULTS.failure
+        ),
+        blocked=_to_optional_str(
+            transitions_raw.get("blocked", _MISSING), _TRANSITION_DEFAULTS.blocked
+        ),
+        cancelled=_to_optional_str(
+            transitions_raw.get("cancelled", _MISSING), _TRANSITION_DEFAULTS.cancelled
+        ),
+    )
+
     return ServiceConfig(
         tracker=tracker,
         polling=polling,
@@ -232,6 +264,7 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
         coding_agent=coding_agent,
         server=server,
         preflight=preflight,
+        transitions=transitions,
     )
 
 
