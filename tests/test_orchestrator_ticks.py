@@ -258,6 +258,48 @@ def test_normalize_issue_reads_project_name() -> None:
 
     assert issue is not None
     assert issue.project_name == "Bandeira"
+
+
+def test_normalize_issue_uses_only_blocked_by_relations_for_blockers() -> None:
+    issue = _normalize_issue(
+        {
+            "id": "issue-148",
+            "identifier": "BAP-148",
+            "title": "Provider abstraction",
+            "description": None,
+            "priority": 2,
+            "state": {"name": "Todo"},
+            "branchName": None,
+            "url": "https://linear.app/bandeira/issue/BAP-148",
+            "labels": {"nodes": []},
+            "relations": {
+                "nodes": [
+                    {
+                        "type": "blocks",
+                        "relatedIssue": {
+                            "id": "issue-149",
+                            "identifier": "BAP-149",
+                            "state": {"name": "Todo"},
+                        },
+                    },
+                    {
+                        "type": "blockedBy",
+                        "relatedIssue": {
+                            "id": "issue-150",
+                            "identifier": "BAP-150",
+                            "state": {"name": "In Progress"},
+                        },
+                    },
+                ]
+            },
+            "comments": {"nodes": []},
+            "createdAt": "2026-03-28T19:11:32.256Z",
+            "updatedAt": "2026-03-29T09:01:32.404Z",
+        }
+    )
+
+    assert issue is not None
+    assert [blocker.identifier for blocker in issue.blocked_by] == ["BAP-150"]
 @pytest.mark.asyncio
 async def test_startup_terminal_cleanup_removes_only_matching_workspaces_and_logs_project_context(
     monkeypatch: pytest.MonkeyPatch,

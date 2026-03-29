@@ -505,11 +505,11 @@ def _normalize_issue(node: dict[str, Any]) -> Issue | None:
     label_nodes = (node.get("labels") or {}).get("nodes") or []
     labels = [str(ln.get("name", "")).lower() for ln in label_nodes if ln.get("name")]
 
-    # blocked_by from relations of type "blocks" (filter client-side; API has no filter arg)
+    # blocked_by from relations where the current issue is blocked by the related issue.
     relation_nodes = (node.get("relations") or {}).get("nodes") or []
     blocked_by = []
     for rel in relation_nodes:
-        if rel.get("type") != "blocks":
+        if rel.get("type") != "blockedBy":
             continue
         related = rel.get("relatedIssue") or {}
         blocker_state_obj = related.get("state") or {}
