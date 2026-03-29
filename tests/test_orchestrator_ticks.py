@@ -282,14 +282,18 @@ def test_normalize_issue_uses_only_blocked_by_relations_for_blockers() -> None:
                             "state": {"name": "Todo"},
                         },
                     },
+                ]
+            },
+            "inverseRelations": {
+                "nodes": [
                     {
-                        "type": "blockedBy",
-                        "relatedIssue": {
+                        "type": "blocks",
+                        "issue": {
                             "id": "issue-150",
                             "identifier": "BAP-150",
                             "state": {"name": "In Progress"},
                         },
-                    },
+                    }
                 ]
             },
             "comments": {"nodes": []},
