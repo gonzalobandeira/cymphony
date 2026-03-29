@@ -11,7 +11,7 @@ from __future__ import annotations
 from ..models import AgentError, CodingAgentConfig
 from .base import BaseAgentRunner, OnAgentEvent
 from .claude import ClaudeAgentRunner, parse_claude_stream_event
-from .codex import CodexAgentRunner
+from .codex import CodexAgentRunner, parse_codex_stream_event
 
 __all__ = [
     "BaseAgentRunner",
@@ -21,6 +21,7 @@ __all__ = [
     "create_agent_runner",
     "create_runner",
     "parse_claude_stream_event",
+    "parse_codex_stream_event",
 ]
 
 
