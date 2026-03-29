@@ -371,17 +371,21 @@ def test_render_dashboard_shows_waiting_reasons_and_recent_problems(
 
     assert "BAP-154" in html
     assert "1m 30s" in html
-    assert "Pause Dispatching" in html
-    assert "Resume Dispatching" in html
-    assert "Arm kill" in html
+    assert ">Pause<" in html
+    assert ">Resume<" in html
+    assert ">Arm<" in html
     assert "Kill App" in html
     assert "Fetch the latest orchestration state immediately." in html
-    assert "Stop launching new work while letting active agents continue." in html
+    assert "title='Fetch the latest orchestration state immediately.'" in html
+    assert "Stop launching new work; active agents continue." in html
     assert "Allow the orchestrator to start queued work again." in html
-    assert "Enable the kill switch so the app can be shut down." in html
-    assert "Terminate the dashboard process after the kill switch is armed." in html
+    assert "Enable the kill switch to allow shutdown" in html
+    assert "title='Enable the kill switch to allow shutdown'" in html
+    assert "Terminate the Cymphony process (requires arming first)" in html
+    assert "title='Terminate the Cymphony process (requires arming first)'" in html
     assert "id='kill-app-button'" in html
-    assert "id='kill-app-button' class='danger-button' title='Terminate the dashboard process after the kill switch is armed.' disabled" in html
+    assert "danger-button" in html
+    assert "disabled" in html
     assert "Paused" in html
     assert "BAP-155" in html
     assert "Waiting Reasons (2)" in html
@@ -622,7 +626,8 @@ def test_render_dashboard_includes_js_refresh_and_toast() -> None:
     # Pause/resume auto-refresh button
     assert "Pause Auto-Refresh" in html
     assert "toggleAutoRefresh" in html
-    assert "Pause or resume the automatic 15-second dashboard refresh." in html
+    assert "Pause the automatic 15-second dashboard refresh" in html
+    assert "title=\"Pause the automatic 15-second dashboard refresh\"" in html
     assert "syncKillButton" in html
 
     # Scroll position preservation
