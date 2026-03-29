@@ -157,6 +157,8 @@ def test_build_operator_groups_classifies_ready_waiting_blocked_and_recently_com
     assert groups["blocked"][0]["reason"] == "Waiting on BAP-099"
     assert [item["identifier"] for item in groups["recently_completed"]] == ["BAP-105"]
     assert groups["recently_completed"][0]["project"] == "Bandeira"
+    assert groups["recently_completed"][0]["title"] == "Title for BAP-105"
+    assert groups["recently_completed"][0]["last_worked_on"] == "2026-03-28T21:04:00+00:00"
     assert groups["summary"]["needs_attention"] == 2
 
 
@@ -186,7 +188,7 @@ def test_render_dashboard_recently_completed_includes_project_and_linear_link() 
                     "state": "Done",
                     "project": "Bandeira",
                     "url": "https://linear.test/BAP-178",
-                    "updated_at": "2026-03-28T21:04:00+00:00",
+                    "last_worked_on": "2026-03-28T21:04:00+00:00",
                 }
             ],
             "skipped": [],
@@ -197,10 +199,56 @@ def test_render_dashboard_recently_completed_includes_project_and_linear_link() 
 
     assert "Recently Completed" in html
     assert "<th>Project</th>" in html
+    assert "<th>Last worked on</th>" in html
     assert "<th>Linear</th>" in html
     assert "BAP-178 - Recent terminal-state work for quick operator confirmation." in html
     assert "Bandeira" in html
+    assert "2026-03-28 21:04 UTC" in html
     assert ">Open</a>" in html
+
+
+def test_recently_completed_sorted_by_last_worked_on_descending() -> None:
+    snapshot = {
+        "generated_at": "2026-03-28T21:05:00+00:00",
+        "running": [],
+        "retrying": [],
+        "codex_totals": {},
+    }
+    completed_issues = [
+        _issue(
+            issue_id="old",
+            identifier="BAP-200",
+            state="Done",
+            updated_at=datetime(2026, 3, 26, 10, 0, tzinfo=timezone.utc),
+        ),
+        _issue(
+            issue_id="newest",
+            identifier="BAP-201",
+            state="Done",
+            updated_at=datetime(2026, 3, 28, 18, 0, tzinfo=timezone.utc),
+        ),
+        _issue(
+            issue_id="mid",
+            identifier="BAP-202",
+            state="Done",
+            updated_at=datetime(2026, 3, 27, 12, 0, tzinfo=timezone.utc),
+        ),
+    ]
+
+    groups = _build_operator_groups(
+        snapshot,
+        [],
+        completed_issues,
+        max_concurrent_agents=2,
+        max_concurrent_agents_by_state={},
+        active_states=["Todo", "In Progress"],
+        terminal_states=["Done"],
+    )
+
+    identifiers = [item["identifier"] for item in groups["recently_completed"]]
+    assert identifiers == ["BAP-201", "BAP-202", "BAP-200"]
+    assert groups["recently_completed"][0]["last_worked_on"] == "2026-03-28T18:00:00+00:00"
+    assert groups["recently_completed"][0]["title"] == "Title for BAP-201"
 
 
 def test_build_operator_groups_respects_state_capacity_limits() -> None:
