@@ -36,6 +36,7 @@ _DEFAULT_SETUP_FORM = {
     "max_concurrent_agents": "5",
     "max_turns": "20",
     "max_retry_backoff_ms": "300000",
+    "provider": "claude",
     "command": "claude",
     "turn_timeout_ms": "3600000",
     "stall_timeout_ms": "300000",
@@ -208,7 +209,7 @@ def _render_issue_drilldown(entry: dict, retry_due: str | None = None) -> str:
     ]
 
     return f"""
-<details class="issue-drilldown">
+<details class="issue-drilldown" data-id="{escape(str(entry.get('issue_identifier') or ''), quote=True)}">
   <summary>{escape(str(entry.get("issue_identifier") or ""))} <span class="muted">{escape(" · ".join(summary_bits))}</span></summary>
   <div class="drill-grid">
     <section class="detail-card detail-wide">
@@ -270,6 +271,7 @@ def _workflow_form_data(
                 "max_concurrent_agents": str(agent.get("max_concurrent_agents") or data["max_concurrent_agents"]),
                 "max_turns": str(agent.get("max_turns") or data["max_turns"]),
                 "max_retry_backoff_ms": str(agent.get("max_retry_backoff_ms") or data["max_retry_backoff_ms"]),
+                "provider": str(agent.get("provider") or data["provider"]),
                 "command": str(codex.get("command") or data["command"]),
                 "turn_timeout_ms": str(codex.get("turn_timeout_ms") or data["turn_timeout_ms"]),
                 "stall_timeout_ms": str(codex.get("stall_timeout_ms") or data["stall_timeout_ms"]),
@@ -326,6 +328,7 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
             "max_concurrent_agents": int(str(form.get("max_concurrent_agents") or "5")),
             "max_turns": int(str(form.get("max_turns") or "20")),
             "max_retry_backoff_ms": int(str(form.get("max_retry_backoff_ms") or "300000")),
+            "provider": str(form.get("provider") or "claude").strip().lower(),
         },
         "codex": {
             "command": str(form.get("command") or "claude").strip(),
@@ -363,6 +366,11 @@ def _validate_workflow_form(form: dict[str, object]) -> list[str]:
         errors.append("workspace.root is required.")
     if not workflow.config["codex"].get("command"):
         errors.append("codex.command is required.")
+
+    from .models import SUPPORTED_PROVIDERS
+    agent_provider = workflow.config.get("agent", {}).get("provider", "claude")
+    if agent_provider not in SUPPORTED_PROVIDERS:
+        errors.append(f"agent.provider must be one of: {', '.join(SUPPORTED_PROVIDERS)}.")
 
     config = build_config(workflow)
     if config.agent.max_concurrent_agents <= 0:
@@ -492,6 +500,13 @@ def _render_setup_page(
       <section class="card">
         <label for="max_retry_backoff_ms">Max retry backoff (ms)</label>
         <input id="max_retry_backoff_ms" name="max_retry_backoff_ms" value="{field("max_retry_backoff_ms")}" required />
+      </section>
+      <section class="card">
+        <label for="provider">Agent provider</label>
+        <select id="provider" name="provider">
+          <option value="claude"{"" if field("provider") == "codex" else " selected"}>claude</option>
+          <option value="codex"{" selected" if field("provider") == "codex" else ""}>codex</option>
+        </select>
       </section>
       <section class="card">
         <label for="command">Agent command</label>
@@ -958,7 +973,6 @@ def _render_dashboard(groups: dict[str, object]) -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="15">
 <title>Cymphony Operator Dashboard</title>
 <style>
   :root {{
@@ -967,8 +981,8 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     --panel: rgba(255, 252, 246, 0.92);
     --panel-strong: #fffaf0;
     --ink: #1f2933;
-    --muted: #5f6c72;
-    --line: rgba(31, 41, 51, 0.12);
+    --muted: #4a5568;
+    --line: rgba(31, 41, 51, 0.22);
     --good: #166534;
     --warn: #b45309;
     --danger: #b91c1c;
@@ -1021,7 +1035,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     justify-content: center;
   }}
   .meta-label {{
-    font-size: 0.78rem;
+    font-size: 0.84rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--muted);
@@ -1122,7 +1136,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   .operator-meta-label {{
     color: var(--muted);
-    font-size: 0.76rem;
+    font-size: 0.84rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     font-family: "Avenir Next", "Segoe UI", sans-serif;
@@ -1197,7 +1211,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     background: rgba(15, 118, 110, 0.1);
     color: var(--accent);
     font-family: "Avenir Next", "Segoe UI", sans-serif;
-    font-size: 0.78rem;
+    font-size: 0.84rem;
   }}
   .event-list {{
     margin: 0;
@@ -1323,7 +1337,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   th {{
     color: var(--muted);
-    font-size: 0.76rem;
+    font-size: 0.82rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
   }}
@@ -1362,7 +1376,121 @@ def _render_dashboard(groups: dict[str, object]) -> str:
       text-align: left;
     }}
   }}
+  .cym-toast {{
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: var(--ink);
+    color: #fff;
+    padding: 10px 18px;
+    border-radius: 10px;
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.88rem;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.25s, transform 0.25s;
+    z-index: 9999;
+    pointer-events: none;
+  }}
+  .cym-toast.visible {{
+    opacity: 1;
+    transform: translateY(0);
+  }}
 </style>
+<script>
+window.cym = {{
+  _refreshTimer: null,
+  _INTERVAL: 15000,
+  _paused: false,
+
+  /** Show a brief toast message. */
+  toast: function(msg) {{
+    var el = document.createElement("div");
+    el.className = "cym-toast";
+    el.textContent = msg;
+    document.body.appendChild(el);
+    requestAnimationFrame(function() {{ el.classList.add("visible"); }});
+    setTimeout(function() {{
+      el.classList.remove("visible");
+      setTimeout(function() {{ el.remove(); }}, 300);
+    }}, 2000);
+  }},
+
+  /** POST an action, show feedback, then refresh the dashboard content in place. */
+  post: function(url, body) {{
+    var label = url.split("/").pop().replace(/[-_]/g, " ");
+    fetch(url, {{
+      method: "POST",
+      headers: {{"Content-Type": "application/x-www-form-urlencoded"}},
+      body: body || ""
+    }}).then(function(r) {{
+      cym.toast(r.ok ? "Done: " + label : "Failed: " + label);
+      cym.refresh();
+    }}).catch(function() {{
+      cym.toast("Error: " + label);
+    }});
+  }},
+
+  killApp: function() {{
+    var armed = document.getElementById("kill-arm");
+    if (!armed || !armed.checked) return;
+    cym.post("/api/v1/app/kill", "confirm_kill=true");
+  }},
+
+  /** Fetch the dashboard HTML and swap <main> content in place. */
+  refresh: function() {{
+    fetch("/", {{headers: {{"Accept": "text/html"}}}}).then(function(r) {{
+      return r.text();
+    }}).then(function(html) {{
+      var parser = new DOMParser();
+      var doc = parser.parseFromString(html, "text/html");
+      var fresh = doc.querySelector("main");
+      var current = document.querySelector("main");
+      if (!fresh || !current) return;
+
+      // Remember which <details> elements are open (by data-id, fall back to index).
+      var openSet = new Set();
+      current.querySelectorAll("details[data-id]").forEach(function(d) {{
+        if (d.open) openSet.add(d.getAttribute("data-id"));
+      }});
+
+      // Remember scroll position.
+      var scrollY = window.scrollY;
+
+      // Swap content.
+      current.innerHTML = fresh.innerHTML;
+
+      // Restore open state.
+      current.querySelectorAll("details[data-id]").forEach(function(d) {{
+        if (openSet.has(d.getAttribute("data-id"))) d.open = true;
+      }});
+
+      // Restore scroll position.
+      window.scrollTo(0, scrollY);
+    }}).catch(function() {{}});
+  }},
+
+  toggleAutoRefresh: function() {{
+    cym._paused = !cym._paused;
+    var btn = document.getElementById("pause-refresh");
+    if (btn) btn.textContent = cym._paused ? "Resume Auto-Refresh" : "Pause Auto-Refresh";
+    if (cym._paused) {{
+      clearInterval(cym._refreshTimer);
+      cym._refreshTimer = null;
+      cym.toast("Auto-refresh paused");
+    }} else {{
+      cym.startAutoRefresh();
+      cym.toast("Auto-refresh resumed");
+    }}
+  }},
+
+  startAutoRefresh: function() {{
+    if (cym._refreshTimer) clearInterval(cym._refreshTimer);
+    cym._refreshTimer = setInterval(cym.refresh, cym._INTERVAL);
+  }}
+}};
+document.addEventListener("DOMContentLoaded", cym.startAutoRefresh);
+</script>
 </head>
 <body>
 <main>
@@ -1413,6 +1541,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
             {_post_button("/api/v1/refresh", "Refresh Now")}
             {_post_button("/api/v1/dispatch/pause", "Pause Dispatching")}
             {_post_button("/api/v1/dispatch/resume", "Resume Dispatching")}
+            <button type="button" id="pause-refresh" onclick="cym.toggleAutoRefresh()">Pause Auto-Refresh</button>
           </div>
           <div class="control-group">
             {_kill_app_switch(shutdown_requested)}
@@ -1429,7 +1558,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
 
   <p class="footer">
     <a href="/api/v1/state">JSON state</a>
-    · Auto-refresh every 15 seconds
+    · Live refresh every 15 s (pausable)
     · Input tokens {totals.get("input_tokens", 0):,}
     · Output tokens {totals.get("output_tokens", 0):,}
   </p>
@@ -1754,9 +1883,8 @@ def _post_button(action: str, label: str) -> str:
     safe_action = html.escape(action, quote=True)
     safe_label = html.escape(label)
     return (
-        f"<form method='post' action='{safe_action}'>"
-        f"<button type='submit'>{safe_label}</button>"
-        "</form>"
+        f"<button type='button' onclick=\"cym.post('{safe_action}')\">"
+        f"{safe_label}</button>"
     )
 
 
@@ -1765,13 +1893,15 @@ def _kill_app_switch(shutdown_requested: bool) -> str:
     disabled = " disabled" if shutdown_requested else ""
     button_label = "Kill Requested" if shutdown_requested else "Kill App"
     return (
-        "<form method='post' action='/api/v1/app/kill' class='switch-form'>"
+        "<div class='switch-form'>"
         "<label class='switch-label'>"
-        f"<input type='checkbox' name='confirm_kill' value='true'{checked}{disabled}>"
+        f"<input type='checkbox' id='kill-arm' value='true'{checked}{disabled}>"
         "<span>Arm kill</span>"
         "</label>"
-        f"<button type='submit' class='danger-button'{disabled}>{escape(button_label)}</button>"
-        "</form>"
+        f"<button type='button' class='danger-button'{disabled} "
+        "onclick=\"cym.killApp()\">"
+        f"{escape(button_label)}</button>"
+        "</div>"
     )
 
 

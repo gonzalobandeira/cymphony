@@ -416,6 +416,11 @@ mutation IssueUpdate($id: String!, $stateId: String!) {
             f"action=set_issue_state_result issue_id={issue_id} "
             f"state_id={state_id} success={success}"
         )
+        if not success:
+            raise TrackerError(
+                "linear_issue_state_update_failed",
+                f"issueUpdate returned success={success!r} for issue {issue_id}",
+            )
 
     async def create_comment(self, issue_id: str, body: str) -> str:
         """Create a comment on an issue and return the comment ID."""

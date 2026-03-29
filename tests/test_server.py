@@ -477,9 +477,56 @@ def test_render_dashboard_shows_issue_drilldown_details() -> None:
     )
 
     assert "<details" in html
+    assert 'data-id="BAP-170"' in html
     assert "Recent Events" in html
     assert "Plan comment" in html
     assert "Writing tests" in html
+
+
+def test_render_dashboard_includes_js_refresh_and_toast() -> None:
+    html = _render_dashboard(
+        {
+            "generated_at": "2026-03-29T12:00:00+00:00",
+            "summary": {
+                "running": 0,
+                "retrying": 0,
+                "ready": 0,
+                "waiting": 0,
+                "needs_attention": 0,
+                "capacity_in_use": "0/2",
+            },
+            "totals": {},
+            "controls": {"dispatch_paused": False, "shutdown_requested": False, "recent_actions": []},
+            "running": [],
+            "retrying": [],
+            "ready": [],
+            "waiting": [],
+            "blocked": [],
+            "recently_completed": [],
+            "waiting_reasons": [],
+            "recent_problems": [],
+            "skipped": [],
+        }
+    )
+
+    # JS-based refresh instead of meta refresh
+    assert "http-equiv" not in html
+    assert "<script>" in html
+    assert "cym.refresh" in html
+
+    # Toast notification system
+    assert "cym-toast" in html
+    assert "cym.toast" in html
+
+    # Pause/resume auto-refresh button
+    assert "Pause Auto-Refresh" in html
+    assert "toggleAutoRefresh" in html
+
+    # Scroll position preservation
+    assert "scrollY" in html
+
+    # Details persistence by data-id
+    assert "data-id" in html or "details[data-id]" in html
 
 
 @pytest.mark.asyncio

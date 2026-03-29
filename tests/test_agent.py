@@ -6,13 +6,17 @@ from cymphony.agent import (
     BaseAgentRunner,
     ClaudeAgentRunner,
     CodexAgentRunner,
-    create_runner,
     _parse_claude_stream_event,
+    create_agent_runner,
+    create_runner,
 )
 from cymphony.models import AgentError, AgentEventType, CodingAgentConfig
 
 
-def _make_config(provider: str = "claude", command: str = "claude") -> CodingAgentConfig:
+def _make_config(
+    provider: str = "claude",
+    command: str = "claude",
+) -> CodingAgentConfig:
     return CodingAgentConfig(
         command=command,
         turn_timeout_ms=1000,
@@ -23,23 +27,22 @@ def _make_config(provider: str = "claude", command: str = "claude") -> CodingAge
     )
 
 
-# ---------------------------------------------------------------------------
-# BaseAgentRunner is abstract
-# ---------------------------------------------------------------------------
-
 def test_base_runner_cannot_be_instantiated() -> None:
     with pytest.raises(TypeError):
         BaseAgentRunner(_make_config())  # type: ignore[abstract]
 
 
-# ---------------------------------------------------------------------------
-# ClaudeAgentRunner
-# ---------------------------------------------------------------------------
-
 def test_claude_runner_build_command_initial() -> None:
     runner = ClaudeAgentRunner(_make_config())
     cmd = runner._build_command("do stuff", "/ws", None, "title")
-    assert cmd[:6] == ["claude", "--output-format", "stream-json", "--verbose", "--print", "do stuff"]
+    assert cmd[:6] == [
+        "claude",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--print",
+        "do stuff",
+    ]
     assert "--resume" not in cmd
     assert "--dangerously-skip-permissions" in cmd
 
@@ -82,36 +85,58 @@ def test_claude_parse_event_delegates_correctly() -> None:
     runner = ClaudeAgentRunner(_make_config())
     event, sid, ok, err = runner._parse_event(
         '{"type": "system", "subtype": "init", "session_id": "s1"}',
-        None, "iss-1", "ID-1", 42,
+        None,
+        "iss-1",
+        "ID-1",
+        42,
     )
     assert event is not None
     assert event.event == AgentEventType.SESSION_STARTED
     assert sid == "s1"
 
 
-# ---------------------------------------------------------------------------
-# CodexAgentRunner
-# ---------------------------------------------------------------------------
-
 def test_codex_runner_build_command() -> None:
     runner = CodexAgentRunner(_make_config(provider="codex", command="codex"))
     cmd = runner._build_command("do stuff", "/ws", None, "title")
     assert cmd[0] == "codex"
-    assert "--quiet" in cmd
-    assert "--full-auto" in cmd
+    assert "--output-format" in cmd
+    assert "--dangerously-skip-permissions" in cmd
 
 
-def test_codex_runner_build_command_no_full_auto() -> None:
+def test_codex_runner_does_not_strip_claudecode_sentinel(monkeypatch) -> None:
+    monkeypatch.setenv("CLAUDECODE", "1")
+    runner = CodexAgentRunner(_make_config(provider="codex", command="codex"))
+
+    env = runner._build_env()
+
+    assert env.get("CLAUDECODE") == "1"
+
+
+def test_codex_runner_build_command_includes_resume_when_session_id_set() -> None:
+    runner = CodexAgentRunner(_make_config(provider="codex", command="codex"))
+
+    cmd = runner._build_command("fix the bug", "/tmp/ws", "sess-123", "BAP-1")
+
+    assert "--resume" in cmd
+    idx = cmd.index("--resume")
+    assert cmd[idx + 1] == "sess-123"
+
+
+def test_codex_runner_build_command_omits_resume_for_fresh_session() -> None:
+    runner = CodexAgentRunner(_make_config(provider="codex", command="codex"))
+
+    cmd = runner._build_command("fix the bug", "/tmp/ws", None, "BAP-1")
+
+    assert "--resume" not in cmd
+
+
+def test_codex_runner_build_command_no_skip_permissions() -> None:
     cfg = _make_config(provider="codex", command="codex")
     cfg.dangerously_skip_permissions = False
     runner = CodexAgentRunner(cfg)
     cmd = runner._build_command("prompt", "/ws", None, "title")
-    assert "--full-auto" not in cmd
+    assert "--dangerously-skip-permissions" not in cmd
 
-
-# ---------------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------------
 
 def test_create_runner_claude() -> None:
     runner = create_runner(_make_config(provider="claude"))
@@ -119,7 +144,7 @@ def test_create_runner_claude() -> None:
 
 
 def test_create_runner_codex() -> None:
-    runner = create_runner(_make_config(provider="codex"))
+    runner = create_runner(_make_config(provider="codex", command="codex"))
     assert isinstance(runner, CodexAgentRunner)
 
 
@@ -128,14 +153,31 @@ def test_create_runner_unknown_raises() -> None:
         create_runner(_make_config(provider="gemini"))
 
 
-# ---------------------------------------------------------------------------
-# Claude stream-json parser
-# ---------------------------------------------------------------------------
+def test_create_agent_runner_returns_claude() -> None:
+    runner = create_agent_runner("claude", _make_config())
+    assert isinstance(runner, ClaudeAgentRunner)
+
+
+def test_create_agent_runner_returns_codex() -> None:
+    runner = create_agent_runner(
+        "codex",
+        _make_config(provider="codex", command="codex"),
+    )
+    assert isinstance(runner, CodexAgentRunner)
+
+
+def test_create_agent_runner_unknown_raises() -> None:
+    with pytest.raises(AgentError, match="Unknown agent provider"):
+        create_agent_runner("unknown", _make_config())
+
 
 def test_parse_init_event() -> None:
     event, sid, ok, err = _parse_claude_stream_event(
         '{"type": "system", "subtype": "init", "session_id": "abc"}',
-        None, "iss", "ID-1", 1,
+        None,
+        "iss",
+        "ID-1",
+        1,
     )
     assert event is not None
     assert event.event == AgentEventType.SESSION_STARTED
@@ -146,18 +188,28 @@ def test_parse_init_event() -> None:
 def test_parse_result_success() -> None:
     event, sid, ok, err = _parse_claude_stream_event(
         '{"type": "result", "subtype": "success", "usage": {"input_tokens": 10, "output_tokens": 5}}',
-        "s1", "iss", "ID-1", 1,
+        "s1",
+        "iss",
+        "ID-1",
+        1,
     )
     assert event is not None
     assert event.event == AgentEventType.TURN_COMPLETED
     assert ok is True
-    assert event.usage == {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 0}
+    assert event.usage == {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "cache_read_input_tokens": 0,
+    }
 
 
 def test_parse_result_error() -> None:
     event, sid, ok, err = _parse_claude_stream_event(
         '{"type": "result", "subtype": "error_max_turns"}',
-        "s1", "iss", "ID-1", 1,
+        "s1",
+        "iss",
+        "ID-1",
+        1,
     )
     assert event is not None
     assert event.event == AgentEventType.TURN_FAILED
@@ -168,7 +220,10 @@ def test_parse_result_error() -> None:
 def test_parse_input_required() -> None:
     event, sid, ok, err = _parse_claude_stream_event(
         '{"type": "result", "subtype": "input_required"}',
-        "s1", "iss", "ID-1", 1,
+        "s1",
+        "iss",
+        "ID-1",
+        1,
     )
     assert event is not None
     assert event.event == AgentEventType.TURN_INPUT_REQUIRED
@@ -177,7 +232,10 @@ def test_parse_input_required() -> None:
 def test_parse_malformed() -> None:
     event, sid, ok, err = _parse_claude_stream_event(
         "not json at all",
-        "s1", "iss", "ID-1", 1,
+        "s1",
+        "iss",
+        "ID-1",
+        1,
     )
     assert event is not None
     assert event.event == AgentEventType.MALFORMED
@@ -194,7 +252,10 @@ def test_parse_assistant_message() -> None:
 def test_parse_unknown_type() -> None:
     event, sid, ok, err = _parse_claude_stream_event(
         '{"type": "something_else"}',
-        "s1", "iss", "ID-1", 1,
+        "s1",
+        "iss",
+        "ID-1",
+        1,
     )
     assert event is not None
     assert event.event == AgentEventType.OTHER_MESSAGE

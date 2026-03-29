@@ -332,17 +332,8 @@ class ClaudeAgentRunner(BaseAgentRunner):
             line, current_session_id, issue_id, issue_identifier, pid
         )
 
-
-# ---------------------------------------------------------------------------
-# Codex runner (stub)
-# ---------------------------------------------------------------------------
-
 class CodexAgentRunner(BaseAgentRunner):
-    """Runs OpenAI Codex CLI as a subprocess and streams AgentEvents.
-
-    This is a stub implementation. The command building and event parsing
-    will be filled in once the Codex CLI protocol is finalized.
-    """
+    """Runs OpenAI Codex CLI as a subprocess and streams AgentEvents."""
 
     def _build_command(
         self,
@@ -351,11 +342,17 @@ class CodexAgentRunner(BaseAgentRunner):
         session_id: str | None,
         title: str,
     ) -> list[str]:
-        cmd = [self._config.command, "--quiet", prompt]
-        if self._config.dangerously_skip_permissions:
-            cmd.append("--full-auto")
-        return cmd
+        """Build the codex CLI command list."""
+        cmd = [self._config.command, "--output-format", "stream-json", "--verbose", "--print", prompt]
 
+        if session_id:
+            cmd.extend(["--resume", session_id])
+
+        if self._config.dangerously_skip_permissions:
+            cmd.append("--dangerously-skip-permissions")
+
+        return cmd
+    
     def _parse_event(
         self,
         line: str,
@@ -364,20 +361,11 @@ class CodexAgentRunner(BaseAgentRunner):
         issue_identifier: str,
         pid: int,
     ) -> tuple[AgentEvent | None, str | None, bool | None, str | None]:
-        """Parse one stdout line from Codex CLI.
-
-        Codex uses the same newline-delimited JSON protocol as Claude, so
-        we reuse the Claude parser for now. This will diverge once the Codex
-        output format is finalized.
-        """
+        """Parse one stdout line from Codex CLI."""
         return _parse_claude_stream_event(
             line, current_session_id, issue_id, issue_identifier, pid
         )
 
-
-# ---------------------------------------------------------------------------
-# Runner factory
-# ---------------------------------------------------------------------------
 
 _PROVIDERS: dict[str, type[BaseAgentRunner]] = {
     "claude": ClaudeAgentRunner,
@@ -385,9 +373,8 @@ _PROVIDERS: dict[str, type[BaseAgentRunner]] = {
 }
 
 
-def create_runner(config: CodingAgentConfig) -> BaseAgentRunner:
-    """Create the appropriate runner for the configured provider."""
-    provider = config.provider
+def create_agent_runner(provider: str, config: CodingAgentConfig) -> BaseAgentRunner:
+    """Factory that returns the correct runner for the configured provider."""
     runner_cls = _PROVIDERS.get(provider)
     if runner_cls is None:
         raise AgentError(
@@ -397,7 +384,11 @@ def create_runner(config: CodingAgentConfig) -> BaseAgentRunner:
     return runner_cls(config)
 
 
-# Keep backward-compatible alias
+def create_runner(config: CodingAgentConfig) -> BaseAgentRunner:
+    """Backward-compatible factory keyed off the coding-agent config."""
+    return create_agent_runner(config.provider, config)
+
+
 AgentRunner = ClaudeAgentRunner
 
 

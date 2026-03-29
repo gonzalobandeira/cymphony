@@ -88,12 +88,16 @@ class HooksConfig:
     timeout_ms: int
 
 
+SUPPORTED_PROVIDERS = ("claude", "codex")
+
+
 @dataclass
 class AgentConfig:
     max_concurrent_agents: int
     max_turns: int
     max_retry_backoff_ms: int
     max_concurrent_agents_by_state: dict[str, int]
+    provider: str = "claude"
 
 
 @dataclass

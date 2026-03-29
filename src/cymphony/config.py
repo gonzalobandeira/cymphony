@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import (
+    SUPPORTED_PROVIDERS,
     AgentConfig,
     CodingAgentConfig,
     HooksConfig,
@@ -164,6 +165,8 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
             except (TypeError, ValueError):
                 pass  # ignore invalid entries per spec
 
+    provider = _to_str(agent_raw.get("provider"), "claude").lower()
+
     agent = AgentConfig(
         max_concurrent_agents=_to_int(
             agent_raw.get("max_concurrent_agents"), _DEFAULT_MAX_CONCURRENT_AGENTS
@@ -173,6 +176,7 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
             agent_raw.get("max_retry_backoff_ms"), _DEFAULT_MAX_RETRY_BACKOFF_MS
         ),
         max_concurrent_agents_by_state=per_state,
+        provider=provider,
     )
 
     # --- coding agent (codex in spec) ---
@@ -249,5 +253,11 @@ def validate_dispatch_config(config: ServiceConfig) -> ValidationResult:
 
     if not config.coding_agent.command:
         result.fail("codex.command is missing or empty")
+
+    if config.agent.provider not in SUPPORTED_PROVIDERS:
+        result.fail(
+            f"agent.provider={config.agent.provider!r} is not supported "
+            f"(expected one of {', '.join(SUPPORTED_PROVIDERS)})"
+        )
 
     return result
