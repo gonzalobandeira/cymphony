@@ -227,7 +227,7 @@ class TestDispatchMode:
         monkeypatch.setattr(orch, "_worker", fake_worker)
         monkeypatch.setattr(
             orch, "_transition_issue_state_background",
-            lambda issue_id, state_name: None,
+            lambda issue_id, state_name, **kwargs: None,
         )
 
         await orch._dispatch_issue(issue, attempt=None)
@@ -250,7 +250,7 @@ class TestDispatchMode:
         transitions: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state_background",
-            lambda issue_id, state_name: transitions.append((issue_id, state_name)),
+            lambda issue_id, state_name, **kwargs: transitions.append((issue_id, state_name)),
         )
 
         await orch._dispatch_issue(issue, attempt=None)
@@ -275,7 +275,7 @@ class TestDispatchMode:
         transitions: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state_background",
-            lambda issue_id, state_name: transitions.append((issue_id, state_name)),
+            lambda issue_id, state_name, **kwargs: transitions.append((issue_id, state_name)),
         )
 
         await orch._dispatch_issue(issue, attempt=None)
@@ -310,7 +310,7 @@ class TestWorkerDoneTransitions:
         transitions: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
-            AsyncMock(side_effect=lambda iid, state: transitions.append((iid, state))),
+            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
         )
         monkeypatch.setattr(
             orch, "_schedule_retry",
@@ -345,7 +345,7 @@ class TestWorkerDoneTransitions:
         transitions: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state_background",
-            lambda iid, state: transitions.append((iid, state)),
+            lambda iid, state, **kwargs: transitions.append((iid, state)),
         )
         monkeypatch.setattr(
             orch, "_schedule_retry",
@@ -377,7 +377,7 @@ class TestWorkerDoneTransitions:
         transitions: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
-            AsyncMock(side_effect=lambda iid, state: transitions.append((iid, state))),
+            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
         )
         monkeypatch.setattr(
             orch, "_schedule_retry",
@@ -407,7 +407,7 @@ class TestWorkerDoneTransitions:
         transitions: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
-            AsyncMock(side_effect=lambda iid, state: transitions.append((iid, state))),
+            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
         )
         monkeypatch.setattr(
             orch, "_schedule_retry",
@@ -439,7 +439,7 @@ class TestWorkerDoneTransitions:
         transitions: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
-            AsyncMock(side_effect=lambda iid, state: transitions.append((iid, state))),
+            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
         )
         monkeypatch.setattr(
             orch, "_schedule_retry",
