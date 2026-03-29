@@ -166,6 +166,7 @@ class Orchestrator:
 
     async def _tick(self) -> None:
         """Run serialized ticks, coalescing any overlap into one follow-up pass."""
+        normal_completion = False
         try:
             while True:
                 self._tick_rerun_requested = False
@@ -174,13 +175,15 @@ class Orchestrator:
                 if self._tick_rerun_requested:
                     continue
 
-                self._schedule_tick()
+                normal_completion = True
                 break
         finally:
             rerun_requested = self._tick_rerun_requested
             self._tick_task = None
             if rerun_requested:
                 self._enqueue_tick(delay_ms=0.0)
+            elif normal_completion:
+                self._schedule_tick()
 
     async def _tick_once(self) -> None:
         """One poll-and-dispatch tick (spec §8.1, §16.2)."""

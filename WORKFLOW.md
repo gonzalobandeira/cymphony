@@ -2,56 +2,44 @@
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
-  project_slug: windguruspots-cd68ac867d6f
-  assignee: gonzalobandeira
+  project_slug: cymphony-b2a8d0064141
   active_states:
-    - Todo
-    - In Progress
+  - Todo
+  - In Progress
   terminal_states:
-    - Done
-    - Cancelled
-    - Canceled
-    - Duplicate
-    - Closed
-
+  - Done
+  - Cancelled
+  - Canceled
+  - Duplicate
+  - Closed
+  assignee: gonzalobandeira
 polling:
-  interval_ms: 15000 # seconds
-
+  interval_ms: 15000
 workspace:
-  root: ~/windguruspots-workspaces
-
+  root: ~/cymphony-workspaces
 agent:
-  provider: claude                  # claude | codex
   max_concurrent_agents: 2
   max_turns: 15
-  max_retry_backoff_ms: 300000    # 5 minutes
-
+  max_retry_backoff_ms: 300000
 codex:
   command: claude
-  turn_timeout_ms: 3600000        # 1 hour per turn
-  stall_timeout_ms: 300000        # 5 minutes stall detection
+  turn_timeout_ms: 3600000
+  stall_timeout_ms: 300000
   dangerously_skip_permissions: true
-
 hooks:
-  after_create: |
-    git clone git@github.com:gonzalobandeira/windguru-spots.git .
-  before_run: |
-    git fetch origin && git checkout main && git reset --hard origin/main
-    git branch | grep -v '^\* ' | xargs -r git branch -D 2>/dev/null || true
-  after_run: |
-    BRANCH=$(git branch --show-current)
-    if [ "$BRANCH" != "main" ]; then
-      git add -A && git commit -m "chore: agent work [skip ci]" || true
-      git push -u origin "$BRANCH" || true
-      TITLE=$(git log --format="%s" origin/main..HEAD | tail -1)
-      gh pr create --title "$TITLE" --body "" --head "$BRANCH" || true
-    fi
   timeout_ms: 120000
-
+  after_create: git clone git@github.com:gonzalobandeira/cymphony.git .
+  before_run: "git fetch origin && git checkout main && git reset --hard origin/main\r\
+    \ngit branch | grep -v '^\\* ' | xargs -r git branch -D 2>/dev/null || true"
+  after_run: "BRANCH=$(git branch --show-current)\r\nif [ \"$BRANCH\" != \"main\"\
+    \ ]; then\r\n  git add -A && git commit -m \"chore: agent work [skip ci]\" ||\
+    \ true\r\n  git push -u origin \"$BRANCH\" || true\r\n  TITLE=$(git log --format=\"\
+    %s\" origin/main..HEAD | tail -1)\r\n  gh pr create --title \"$TITLE\" --body\
+    \ \"\" --head \"$BRANCH\" || true\r\nfi"
 server:
   port: 8080
 ---
-You are a senior software engineer working on the **WindguruSpots** project.
+You are a senior software engineer working on the **Cymphony** project.
 
 ## Issue
 
@@ -95,6 +83,6 @@ You are a senior software engineer working on the **WindguruSpots** project.
 4. Implement the changes described in the issue.
 5. Write or update tests as appropriate.
 6. Ensure all existing tests continue to pass.
-7. Commit your changes with a descriptive commit message referencing the issue identifier.
+7. Commit your changes with a descriptive commit message referencing the issue identifier. Push to remote and create PR. Update linear task.
 
 Focus on correctness, simplicity, and consistency with the existing codebase style.
