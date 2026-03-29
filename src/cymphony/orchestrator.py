@@ -113,6 +113,9 @@ class Orchestrator:
         # Startup terminal workspace cleanup (spec §8.6)
         await self._startup_terminal_cleanup()
 
+        # Validate configured transition targets against Linear workflow states
+        await self._validate_transitions(fail_hard=True)
+
         # Schedule immediate first tick
         self._enqueue_tick(delay_ms=0.0)
 
@@ -129,13 +132,110 @@ class Orchestrator:
         """Apply updated workflow config dynamically (spec §6.2)."""
         try:
             new_config = build_config(new_workflow, self._config.server.port)
+            previous_config = self._config
+            previous_cache = dict(self._state_id_cache)
+
+            # Validate transitions against Linear states before making the new
+            # workflow active so a bad reload cannot leak into runtime behavior.
             self._config = new_config
+            is_valid = await self._validate_transitions(fail_hard=False)
+            if not is_valid:
+                self._config = previous_config
+                self._state_id_cache = previous_cache
+                logger.warning(
+                    "action=workflow_config_reapply_rejected "
+                    "reason=invalid_transition_targets"
+                )
+                return
+
             self._workflow = new_workflow
             self._state.poll_interval_ms = new_config.polling.interval_ms
             self._state.max_concurrent_agents = new_config.agent.max_concurrent_agents
             logger.info("action=workflow_config_reapplied")
         except Exception as exc:
             logger.error(f"action=workflow_reapply_failed error={exc}")
+
+    async def _validate_transitions(self, *, fail_hard: bool = False) -> bool:
+        """Validate configured transition targets against Linear workflow states.
+
+        Fetches teams for the project and checks that each configured
+        transition target exists as a workflow state on every team.
+
+        When *fail_hard* is True (startup), raises ``WorkflowError`` on
+        invalid targets.  When False (reload), logs warnings only.
+
+        Returns True if all targets are valid.
+        """
+        transitions = self._config.transitions
+        targets: dict[str, str] = {}
+        for field in ("dispatch", "success", "failure", "blocked", "cancelled"):
+            value = getattr(transitions, field)
+            if value is not None:
+                targets[field] = value
+
+        if not targets:
+            logger.info("action=validate_transitions result=skip reason=no_targets_configured")
+            return True
+
+        client = LinearClient(self._config.tracker)
+        try:
+            team_ids = await client.fetch_project_team_ids()
+        except Exception as exc:
+            msg = f"Failed to fetch project teams for transition validation: {exc}"
+            if fail_hard:
+                raise WorkflowError("transition_validation_failed", msg) from exc
+            logger.warning(f"action=validate_transitions_skipped reason=team_fetch_failed error={exc}")
+            return False
+
+        if not team_ids:
+            msg = "No teams found for project — cannot validate transition targets"
+            if fail_hard:
+                raise WorkflowError("transition_validation_failed", msg)
+            logger.warning(f"action=validate_transitions_skipped reason=no_teams_found")
+            return False
+
+        all_valid = True
+        for team_id in team_ids:
+            try:
+                state_names = await client.fetch_team_workflow_state_names(team_id)
+            except Exception as exc:
+                msg = f"Failed to fetch workflow states for team {team_id}: {exc}"
+                if fail_hard:
+                    raise WorkflowError("transition_validation_failed", msg) from exc
+                logger.warning(f"action=validate_transitions_skipped team_id={team_id} error={exc}")
+                all_valid = False
+                continue
+
+            available_lower = {s.lower() for s in state_names}
+
+            for field, target in targets.items():
+                if target.lower() not in available_lower:
+                    all_valid = False
+                    msg = (
+                        f"Transition '{field}' targets state '{target}' "
+                        f"which does not exist on team {team_id}. "
+                        f"Available states: {sorted(state_names)}"
+                    )
+                    if fail_hard:
+                        raise WorkflowError("invalid_transition_target", msg)
+                    logger.warning(f"action=invalid_transition_target {msg}")
+
+            # Pre-populate state ID cache for valid targets
+            for field, target in targets.items():
+                if target.lower() in available_lower:
+                    # Resolve the actual state ID and cache it
+                    state_id = await client.fetch_team_workflow_state_id(team_id, target)
+                    if state_id:
+                        cache_key = (team_id, target.lower())
+                        self._state_id_cache[cache_key] = state_id
+
+        if all_valid:
+            logger.info(
+                f"action=validate_transitions result=ok "
+                f"teams={len(team_ids)} targets={list(targets.keys())}"
+            )
+
+        return all_valid
 
     # ------------------------------------------------------------------
     # Startup cleanup

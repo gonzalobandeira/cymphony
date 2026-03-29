@@ -170,6 +170,25 @@ query ProjectIssuesByStates($projectSlug: String!, $states: [String!]!, $after: 
 }
 """ % {"page_size": _PAGE_SIZE}
 
+# Project-scoped teams (for transition validation)
+_PROJECT_TEAMS_QUERY = """
+query ProjectTeams($projectSlug: String!, $after: String) {
+  issues(
+    first: %(page_size)d,
+    after: $after,
+    filter: { project: { slugId: { eq: $projectSlug } } }
+  ) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      team { id }
+    }
+  }
+}
+""" % {"page_size": _PAGE_SIZE}
+
 # Issue state refresh by IDs (for reconciliation)
 _ISSUE_STATES_BY_IDS_QUERY = """
 query IssueStatesByIds($ids: [ID!]!) {
@@ -374,6 +393,62 @@ class LinearClient:
             f"project_slug={self._config.project_slug} count={len(issues)}"
         )
         return issues
+
+    async def fetch_project_team_ids(self) -> list[str]:
+        """Return all team IDs that have issues in the configured project."""
+        team_ids: set[str] = set()
+        after: str | None = None
+
+        async with aiohttp.ClientSession(
+            headers=self._headers(), timeout=_NETWORK_TIMEOUT
+        ) as session:
+            while True:
+                variables: dict[str, Any] = {
+                    "projectSlug": self._config.project_slug,
+                }
+                if after:
+                    variables["after"] = after
+
+                data = await self._request(session, _PROJECT_TEAMS_QUERY, variables)
+                page = data.get("issues") or {}
+                nodes = page.get("nodes") or []
+                page_info = page.get("pageInfo") or {}
+
+                for node in nodes:
+                    tid = (node.get("team") or {}).get("id")
+                    if tid:
+                        team_ids.add(tid)
+
+                has_next = page_info.get("hasNextPage", False)
+                if not has_next:
+                    break
+
+                end_cursor = page_info.get("endCursor")
+                if not end_cursor:
+                    raise TrackerError(
+                        "linear_missing_end_cursor",
+                        "Linear pagination: hasNextPage=true but endCursor is missing",
+                    )
+                after = end_cursor
+
+        return sorted(team_ids)
+
+    async def fetch_team_workflow_state_names(self, team_id: str) -> list[str]:
+        """Return all workflow state names for a Linear team."""
+        query = """
+query TeamWorkflowStates($teamId: ID!) {
+  workflowStates(filter: { team: { id: { eq: $teamId } } }) {
+    nodes { id name }
+  }
+}
+"""
+        async with aiohttp.ClientSession(
+            headers=self._headers(), timeout=_NETWORK_TIMEOUT
+        ) as session:
+            data = await self._request(session, query, {"teamId": team_id})
+
+        nodes = (data.get("workflowStates") or {}).get("nodes") or []
+        return [n.get("name") for n in nodes if n.get("name")]
 
     async def fetch_issue_team_id(self, issue_id: str) -> str | None:
         """Return the owning Linear team ID for an issue."""
