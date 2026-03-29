@@ -113,6 +113,16 @@ class CodingAgentConfig:
 
 
 @dataclass
+class PreflightConfig:
+    """Configuration for repo preflight checks before dispatch."""
+    enabled: bool
+    required_clis: list[str]
+    required_env_vars: list[str]
+    expect_clean_worktree: bool
+    base_branch: str
+
+
+@dataclass
 class ServerConfig:
     port: int | None
 
@@ -127,6 +137,7 @@ class ServiceConfig:
     agent: AgentConfig
     coding_agent: CodingAgentConfig
     server: ServerConfig
+    preflight: PreflightConfig
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +318,7 @@ class OrchestratorState:
     codex_rate_limits: dict[str, Any] | None = None
     last_candidates: list[Issue] = field(default_factory=list)
     last_validation_errors: list[str] = field(default_factory=list)
+    last_preflight_errors: list[dict[str, str]] = field(default_factory=list)
     recent_problems: list[ProblemRecord] = field(default_factory=list)
 
 
@@ -342,6 +354,13 @@ class WorkspaceError(CymphonyError):
 
 class AgentError(CymphonyError):
     """Agent runner errors (spec §10.6)."""
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class PreflightError(CymphonyError):
+    """Repo preflight check failure."""
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code

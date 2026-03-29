@@ -30,6 +30,7 @@ from .models import (
     WorkflowDefinition,
     WorkflowError,
 )
+from .preflight import PreflightResult, run_preflight_checks
 from .workflow import WorkflowWatcher, load_workflow, render_plan_prompt, render_prompt
 from .workspace import WorkspaceManager
 
@@ -207,6 +208,30 @@ class Orchestrator:
                     )
                 return
             self._state.last_validation_errors = []
+
+            # 2b. Repo preflight checks (CLIs, env vars)
+            if self._config.preflight.enabled:
+                preflight = await run_preflight_checks(
+                    self._config.preflight, workspace_path=None,
+                )
+                if not preflight.ok:
+                    error_dicts = [
+                        {"name": c.name, "message": c.message}
+                        for c in preflight.errors
+                    ]
+                    self._state.last_preflight_errors = error_dicts
+                    for c in preflight.errors:
+                        self._record_problem(
+                            kind="preflight_failed",
+                            summary=f"Preflight check '{c.name}' failed",
+                            detail=c.message,
+                        )
+                        logger.error(
+                            f"action=preflight_check_failed "
+                            f"name={c.name} message={c.message!r}"
+                        )
+                    return
+                self._state.last_preflight_errors = []
 
             # 3. Fetch candidate issues
             try:
@@ -899,6 +924,30 @@ class Orchestrator:
             await wm.run_after_run_hook(workspace)
             raise AgentError("before_run_hook_error", str(exc)) from exc
 
+        # Workspace-level preflight checks (git repo state)
+        if self._config.preflight.enabled:
+            ws_preflight = await run_preflight_checks(
+                self._config.preflight, workspace_path=workspace.path,
+            )
+            if not ws_preflight.ok:
+                entry.status = RunStatus.FAILED
+                errors = "; ".join(c.message for c in ws_preflight.errors)
+                for c in ws_preflight.errors:
+                    self._record_problem(
+                        kind="preflight_failed",
+                        summary=f"Workspace preflight '{c.name}' failed",
+                        detail=c.message,
+                        issue_id=issue.id,
+                        issue_identifier=issue.identifier,
+                    )
+                    issue_log(
+                        logger, logging.ERROR,
+                        "workspace_preflight_failed",
+                        issue.id, issue.identifier,
+                        check=c.name, message=c.message,
+                    )
+                raise AgentError("preflight_failed", f"Workspace preflight failed: {errors}")
+
         max_turns = self._config.agent.max_turns
         session_id: str | None = None
         turn_number = 1
@@ -1477,6 +1526,8 @@ class Orchestrator:
                 "seconds_running": round(totals.seconds_running + live_seconds, 2),
             },
             "rate_limits": self._state.codex_rate_limits,
+            "preflight_errors": list(self._state.last_preflight_errors),
+            "validation_errors": list(self._state.last_validation_errors),
         }
 
     def _record_problem(

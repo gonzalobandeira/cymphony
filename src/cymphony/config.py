@@ -13,6 +13,7 @@ from .models import (
     CodingAgentConfig,
     HooksConfig,
     PollingConfig,
+    PreflightConfig,
     ServerConfig,
     ServiceConfig,
     TrackerConfig,
@@ -206,6 +207,22 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
 
     server = ServerConfig(port=server_port)
 
+    # --- preflight ---
+    preflight_raw: dict[str, Any] = raw.get("preflight") or {}
+    preflight_enabled = preflight_raw.get("enabled")
+    if preflight_enabled is None:
+        preflight_enabled = True  # on by default
+    else:
+        preflight_enabled = bool(preflight_enabled)
+
+    preflight = PreflightConfig(
+        enabled=preflight_enabled,
+        required_clis=_to_str_list(preflight_raw.get("required_clis"), ["git"]),
+        required_env_vars=_to_str_list(preflight_raw.get("required_env_vars"), []),
+        expect_clean_worktree=bool(preflight_raw.get("expect_clean_worktree", False)),
+        base_branch=_to_str(preflight_raw.get("base_branch"), "main"),
+    )
+
     return ServiceConfig(
         tracker=tracker,
         polling=polling,
@@ -214,6 +231,7 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
         agent=agent,
         coding_agent=coding_agent,
         server=server,
+        preflight=preflight,
     )
 
 
