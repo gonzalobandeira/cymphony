@@ -297,6 +297,7 @@ class RunningEntry:
     session: LiveSession
     retry_attempt: int | None  # None = first run
     started_at: datetime
+    review_result: ReviewResult | None = None
     mode: ExecutionMode = field(default=ExecutionMode.BUILD)
     status: RunStatus = field(default=RunStatus.PREPARING_WORKSPACE)
 
