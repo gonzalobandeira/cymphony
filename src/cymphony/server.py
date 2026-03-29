@@ -208,7 +208,7 @@ def _render_issue_drilldown(entry: dict, retry_due: str | None = None) -> str:
     ]
 
     return f"""
-<details class="issue-drilldown">
+<details class="issue-drilldown" data-id="{escape(str(entry.get('issue_identifier') or ''), quote=True)}">
   <summary>{escape(str(entry.get("issue_identifier") or ""))} <span class="muted">{escape(" · ".join(summary_bits))}</span></summary>
   <div class="drill-grid">
     <section class="detail-card detail-wide">
@@ -1361,19 +1361,59 @@ def _render_dashboard(groups: dict[str, object]) -> str:
       text-align: left;
     }}
   }}
+  .cym-toast {{
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: var(--ink);
+    color: #fff;
+    padding: 10px 18px;
+    border-radius: 10px;
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.88rem;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.25s, transform 0.25s;
+    z-index: 9999;
+    pointer-events: none;
+  }}
+  .cym-toast.visible {{
+    opacity: 1;
+    transform: translateY(0);
+  }}
 </style>
 <script>
 window.cym = {{
   _refreshTimer: null,
   _INTERVAL: 15000,
+  _paused: false,
 
-  /** POST an action, then refresh the dashboard content in place. */
+  /** Show a brief toast message. */
+  toast: function(msg) {{
+    var el = document.createElement("div");
+    el.className = "cym-toast";
+    el.textContent = msg;
+    document.body.appendChild(el);
+    requestAnimationFrame(function() {{ el.classList.add("visible"); }});
+    setTimeout(function() {{
+      el.classList.remove("visible");
+      setTimeout(function() {{ el.remove(); }}, 300);
+    }}, 2000);
+  }},
+
+  /** POST an action, show feedback, then refresh the dashboard content in place. */
   post: function(url, body) {{
+    var label = url.split("/").pop().replace(/[-_]/g, " ");
     fetch(url, {{
       method: "POST",
       headers: {{"Content-Type": "application/x-www-form-urlencoded"}},
       body: body || ""
-    }}).then(function() {{ cym.refresh(); }});
+    }}).then(function(r) {{
+      cym.toast(r.ok ? "Done: " + label : "Failed: " + label);
+      cym.refresh();
+    }}).catch(function() {{
+      cym.toast("Error: " + label);
+    }});
   }},
 
   killApp: function() {{
@@ -1393,20 +1433,40 @@ window.cym = {{
       var current = document.querySelector("main");
       if (!fresh || !current) return;
 
-      // Remember which <details> elements are open (by index).
+      // Remember which <details> elements are open (by data-id, fall back to index).
       var openSet = new Set();
-      current.querySelectorAll("details").forEach(function(d, i) {{
-        if (d.open) openSet.add(i);
+      current.querySelectorAll("details[data-id]").forEach(function(d) {{
+        if (d.open) openSet.add(d.getAttribute("data-id"));
       }});
+
+      // Remember scroll position.
+      var scrollY = window.scrollY;
 
       // Swap content.
       current.innerHTML = fresh.innerHTML;
 
       // Restore open state.
-      current.querySelectorAll("details").forEach(function(d, i) {{
-        if (openSet.has(i)) d.open = true;
+      current.querySelectorAll("details[data-id]").forEach(function(d) {{
+        if (openSet.has(d.getAttribute("data-id"))) d.open = true;
       }});
+
+      // Restore scroll position.
+      window.scrollTo(0, scrollY);
     }}).catch(function() {{}});
+  }},
+
+  toggleAutoRefresh: function() {{
+    cym._paused = !cym._paused;
+    var btn = document.getElementById("pause-refresh");
+    if (btn) btn.textContent = cym._paused ? "Resume Auto-Refresh" : "Pause Auto-Refresh";
+    if (cym._paused) {{
+      clearInterval(cym._refreshTimer);
+      cym._refreshTimer = null;
+      cym.toast("Auto-refresh paused");
+    }} else {{
+      cym.startAutoRefresh();
+      cym.toast("Auto-refresh resumed");
+    }}
   }},
 
   startAutoRefresh: function() {{
@@ -1466,6 +1526,7 @@ document.addEventListener("DOMContentLoaded", cym.startAutoRefresh);
             {_post_button("/api/v1/refresh", "Refresh Now")}
             {_post_button("/api/v1/dispatch/pause", "Pause Dispatching")}
             {_post_button("/api/v1/dispatch/resume", "Resume Dispatching")}
+            <button type="button" id="pause-refresh" onclick="cym.toggleAutoRefresh()">Pause Auto-Refresh</button>
           </div>
           <div class="control-group">
             {_kill_app_switch(shutdown_requested)}
@@ -1482,7 +1543,7 @@ document.addEventListener("DOMContentLoaded", cym.startAutoRefresh);
 
   <p class="footer">
     <a href="/api/v1/state">JSON state</a>
-    · Live refresh every 15 seconds
+    · Live refresh every 15 s (pausable)
     · Input tokens {totals.get("input_tokens", 0):,}
     · Output tokens {totals.get("output_tokens", 0):,}
   </p>
