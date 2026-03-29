@@ -173,6 +173,13 @@ class Orchestrator:
             if value is not None:
                 targets[field] = value
 
+        # Include QA review targets when enabled
+        if transitions.qa_review.enabled:
+            for qa_field in ("dispatch", "success", "failure"):
+                value = getattr(transitions.qa_review, qa_field)
+                if value is not None:
+                    targets[f"qa_review.{qa_field}"] = value
+
         if not targets:
             logger.info("action=validate_transitions result=skip reason=no_targets_configured")
             return True

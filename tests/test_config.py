@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from cymphony.config import build_config, validate_dispatch_config
-from cymphony.models import WorkflowDefinition
+from cymphony.models import QAReviewConfig, WorkflowDefinition
 
 
 def _workflow(agent_overrides: dict | None = None) -> WorkflowDefinition:
@@ -167,3 +167,117 @@ def test_transitions_resolve_returns_none_for_unknown_event() -> None:
     from cymphony.models import TransitionsConfig
     t = TransitionsConfig()
     assert t.resolve("nonexistent") is None
+
+
+# ---------------------------------------------------------------------------
+# QA review config tests (BAP-193)
+# ---------------------------------------------------------------------------
+
+def test_qa_review_defaults_disabled_when_omitted() -> None:
+    config = build_config(_workflow_with_transitions())
+    qa = config.transitions.qa_review
+    assert qa.enabled is False
+    assert qa.dispatch == "QA Review"
+    assert qa.success == "In Review"
+    assert qa.failure == "Todo"
+
+
+def test_qa_review_defaults_disabled_when_empty_transitions() -> None:
+    config = build_config(_workflow_with_transitions({}))
+    assert config.transitions.qa_review.enabled is False
+
+
+def test_qa_review_shorthand_true() -> None:
+    config = build_config(_workflow_with_transitions({
+        "qa_review": True,
+    }))
+    qa = config.transitions.qa_review
+    assert qa.enabled is True
+    assert qa.dispatch == "QA Review"
+    assert qa.success == "In Review"
+    assert qa.failure == "Todo"
+
+
+def test_qa_review_enabled_with_defaults() -> None:
+    config = build_config(_workflow_with_transitions({
+        "qa_review": {"enabled": True},
+    }))
+    qa = config.transitions.qa_review
+    assert qa.enabled is True
+    assert qa.dispatch == "QA Review"
+    assert qa.success == "In Review"
+    assert qa.failure == "Todo"
+
+
+def test_qa_review_custom_states() -> None:
+    config = build_config(_workflow_with_transitions({
+        "qa_review": {
+            "enabled": True,
+            "dispatch": "QA",
+            "success": "Ready to Merge",
+            "failure": "Needs Work",
+        },
+    }))
+    qa = config.transitions.qa_review
+    assert qa.enabled is True
+    assert qa.dispatch == "QA"
+    assert qa.success == "Ready to Merge"
+    assert qa.failure == "Needs Work"
+
+
+def test_qa_review_disable_individual_transitions() -> None:
+    config = build_config(_workflow_with_transitions({
+        "qa_review": {
+            "enabled": True,
+            "failure": None,
+        },
+    }))
+    qa = config.transitions.qa_review
+    assert qa.enabled is True
+    assert qa.dispatch == "QA Review"
+    assert qa.failure is None
+
+
+def test_qa_review_does_not_affect_main_transitions() -> None:
+    config = build_config(_workflow_with_transitions({
+        "dispatch": "Working",
+        "success": "Done",
+        "qa_review": {"enabled": True},
+    }))
+    assert config.transitions.dispatch == "Working"
+    assert config.transitions.success == "Done"
+    assert config.transitions.qa_review.enabled is True
+
+
+def test_qa_review_validation_rejects_enabled_without_dispatch() -> None:
+    config = build_config(_workflow_with_transitions({
+        "qa_review": {
+            "enabled": True,
+            "dispatch": None,
+        },
+    }))
+    result = validate_dispatch_config(config)
+    assert not result.ok
+    assert any("qa_review.dispatch" in e for e in result.errors)
+
+
+def test_qa_review_validation_passes_when_disabled() -> None:
+    config = build_config(_workflow_with_transitions({
+        "qa_review": {
+            "enabled": False,
+            "dispatch": None,
+        },
+    }))
+    result = validate_dispatch_config(config)
+    assert result.ok
+
+
+def test_qa_review_backward_compat_legacy_workflow() -> None:
+    """A workflow with no qa_review config behaves exactly as before."""
+    config = build_config(_workflow_with_transitions({
+        "dispatch": "In Progress",
+        "success": "In Review",
+    }))
+    assert config.transitions.dispatch == "In Progress"
+    assert config.transitions.success == "In Review"
+    assert config.transitions.qa_review.enabled is False
