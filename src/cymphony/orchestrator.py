@@ -1632,7 +1632,7 @@ class Orchestrator:
                 await self._post_review_result_comment(issue_id, identifier, result)
                 target = self._resolve_review_completion_target(issue_id, identifier, entry)
             else:
-                target = self._config.transitions.resolve("success")
+                target = qa.dispatch if qa.enabled else self._config.transitions.resolve("success")
             if target:
                 active_lower = [s.lower() for s in self._config.tracker.active_states]
                 if entry.issue.state.lower() in active_lower:
@@ -2059,6 +2059,12 @@ class Orchestrator:
                     "failure": self._config.transitions.failure,
                     "blocked": self._config.transitions.blocked,
                     "cancelled": self._config.transitions.cancelled,
+                    "qa_review": {
+                        "enabled": self._config.transitions.qa_review.enabled,
+                        "dispatch": self._config.transitions.qa_review.dispatch,
+                        "success": self._config.transitions.qa_review.success,
+                        "failure": self._config.transitions.qa_review.failure,
+                    },
                 },
             },
             "transition_history": [

@@ -511,7 +511,37 @@ class TestWorkerDoneTransitions:
 
         await orch._on_worker_done(issue.id, issue.identifier, entry, task)
 
-        # Should use top-level success = "In Review"
+        # Build-mode success should hand off to the QA review lane when enabled.
+        assert transitions == [(issue.id, "QA Review")]
+
+    @pytest.mark.asyncio
+    async def test_build_success_uses_top_level_success_target_when_qa_review_disabled(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch = _build_orchestrator(qa_enabled=False)
+        issue = _build_issue(state="In Progress")
+        entry = _build_running_entry(issue, mode=ExecutionMode.BUILD)
+        orch._state.running[issue.id] = entry
+
+        async def noop():
+            pass
+
+        task = asyncio.ensure_future(noop())
+        await task
+        entry.task = task
+
+        transitions: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            orch, "_transition_issue_state",
+            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+        )
+        monkeypatch.setattr(
+            orch, "_schedule_retry",
+            AsyncMock(),
+        )
+
+        await orch._on_worker_done(issue.id, issue.identifier, entry, task)
+
         assert transitions == [(issue.id, "In Review")]
 
 

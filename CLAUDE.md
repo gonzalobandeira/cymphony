@@ -33,7 +33,7 @@ src/cymphony/
 5. **Reconcile**: each tick checks running workers for stalls and refreshes issue states from Linear; terminal-state issues get their workers cancelled and workspaces removed
 6. **Retry**: workers that exit abnormally are retried with exponential backoff; clean exits get a 1-second continuation retry to re-evaluate the issue
 
-State transitions are configured declaratively through `WORKFLOW.md` frontmatter (`transitions.dispatch`, `success`, `failure`, `blocked`, `cancelled`).
+State transitions are configured declaratively through `WORKFLOW.md` frontmatter (`transitions.dispatch`, `success`, `failure`, `blocked`, `cancelled`, and `qa_review.*`).
 
 ## Running
 
@@ -63,6 +63,8 @@ Dependencies: `pyyaml`, `jinja2`, `aiohttp`, `watchdog`. Python ≥ 3.11. Built 
 - **`after_run` hook cancellation race**: the reconciler may call `task.cancel()` while the worker is in its `finally` block. The hook is launched as `asyncio.create_task` + awaited via `asyncio.shield` so it survives worker cancellation.
 - **PR title**: use `git log --format="%s" origin/main..HEAD | tail -1` in the `after_run` hook to get the agent's original commit as the PR title (not the hook's own commit).
 - **Configurable issue transitions**: dispatch and worker completion transitions are no longer hardcoded. Defaults remain `dispatch -> "In Progress"` and `success -> "In Review"`, with optional `failure`, `blocked`, and `cancelled` transitions.
+- **QA review lane is opt-in**: when `transitions.qa_review.enabled` is true, implementation success transitions to `qa_review.dispatch` (typically `QA Review`) instead of directly to `transitions.success`.
+- **Required Linear states for QA review**: create `QA Review` in Linear before enabling the feature. The end-to-end workflow is `Todo -> In Progress -> QA Review -> (Todo | In Review)`.
 
 ## HTTP API
 
