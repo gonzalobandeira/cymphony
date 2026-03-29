@@ -25,6 +25,7 @@ from .models import (
     OrchestratorState,
     ProblemRecord,
     ReviewDecision,
+    ReviewResult,
     RetryEntry,
     RunningEntry,
     RunStatus,
@@ -950,6 +951,76 @@ class Orchestrator:
 
         asyncio.create_task(_do())
 
+    def _render_review_result_comment(self, result: ReviewResult) -> str:
+        """Render a QA review verdict into a Linear comment body."""
+        if result.decision == ReviewDecision.PASS:
+            heading = "QA review passed"
+        elif result.decision == ReviewDecision.CHANGES_REQUESTED:
+            heading = "QA review requested changes"
+        else:
+            heading = "QA review result could not be applied"
+
+        lines = [f"**{heading}**"]
+        if result.decision is not None:
+            lines.append(f"Decision: `{result.decision.value}`")
+
+        summary = (result.summary or "").strip()
+        error = (result.error or "").strip()
+        raw_output = (result.raw_output or "").strip()
+
+        if summary:
+            lines.extend(["", summary])
+
+        if error:
+            lines.extend(
+                [
+                    "",
+                    "Cymphony did not apply a QA transition because the review decision was invalid.",
+                    f"Parse error: {error}",
+                ]
+            )
+
+        if raw_output and result.decision is None:
+            lines.extend(["", "Raw review output:", "```json", raw_output, "```"])
+
+        return "\n".join(lines)
+
+    async def _post_review_result_comment(
+        self,
+        issue_id: str,
+        identifier: str,
+        result: ReviewResult,
+    ) -> None:
+        """Persist the QA review outcome to a Linear comment."""
+        body = self._render_review_result_comment(result)
+        try:
+            client = LinearClient(self._config.tracker)
+            comment_id = await client.create_comment(issue_id, body)
+            issue_log(
+                logger,
+                logging.INFO,
+                "qa_review_comment_created",
+                issue_id,
+                identifier,
+                comment_id=comment_id,
+            )
+        except Exception as exc:
+            self._record_problem(
+                kind="qa_review_comment_failed",
+                summary="Failed to publish QA review findings",
+                detail=str(exc),
+                issue_id=issue_id,
+                issue_identifier=identifier,
+            )
+            issue_log(
+                logger,
+                logging.WARNING,
+                "qa_review_comment_failed",
+                issue_id,
+                identifier,
+                error=str(exc),
+            )
+
     async def _transition_issue_state(
         self,
         issue_id: str,
@@ -1553,6 +1624,12 @@ class Orchestrator:
                 mode=entry.mode.value,
             )
             if is_review:
+                result = entry.review_result
+                if result is None:
+                    workspace_path = str(WorkspaceManager(self._config).get_path(identifier))
+                    result = parse_review_result(workspace_path)
+                    entry.review_result = result
+                await self._post_review_result_comment(issue_id, identifier, result)
                 target = self._resolve_review_completion_target(issue_id, identifier, entry)
             else:
                 target = self._config.transitions.resolve("success")
@@ -1639,7 +1716,7 @@ class Orchestrator:
                 issue_id, identifier,
                 error=result.error,
             )
-            return qa.failure if qa.enabled else None
+            return None
 
         issue_log(
             logger, logging.INFO,
