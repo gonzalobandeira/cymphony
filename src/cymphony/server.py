@@ -717,6 +717,7 @@ def _build_operator_groups(
                 "identifier": issue.identifier,
                 "title": issue.title,
                 "state": issue.state,
+                "project": issue.project_name,
                 "url": issue.url,
                 "updated_at": issue.updated_at.isoformat() if issue.updated_at else None,
             }
@@ -774,6 +775,12 @@ def _render_issue_link(identifier: str, title: str, url: str | None) -> str:
     if not url:
         return label
     return f"<a href='{escape(url)}'>{label}</a>"
+
+
+def _render_linear_link(url: str | None) -> str:
+    if not url:
+        return "-"
+    return f"<a href='{escape(url)}' target='_blank' rel='noreferrer'>Open</a>"
 
 
 def _render_table(title: str, subtitle: str, headers: list[str], rows: list[list[str]], empty: str) -> str:
@@ -913,20 +920,33 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         ("blocked", "Blocked", "Issues still gated by unresolved dependencies or tracker state.", "No active blockers."),
         ("recently_completed", "Recently Completed", "Recent terminal-state work for quick operator confirmation.", "No recent completions found."),
     ]:
+        headers = (
+            ["Issue", "State", "Project", "Updated", "Linear"]
+            if key == "recently_completed"
+            else ["Issue", "State", "Priority", "Reason"]
+        )
         rows = []
         for item in groups[key]:
-            rows.append([
-                _render_issue_link(item["identifier"], item["title"], item.get("url")),
-                escape(str(item.get("state") or "")),
-                escape(_render_priority(item.get("priority")) if "priority" in item else "-"),
-                escape(item.get("reason") or _format_timestamp(item.get("updated_at"))),
-            ])
-        fourth_header = "Reason" if key != "recently_completed" else "Updated"
+            if key == "recently_completed":
+                rows.append([
+                    _render_issue_link(item["identifier"], item["title"], item.get("url")),
+                    escape(str(item.get("state") or "")),
+                    escape(str(item.get("project") or "-")),
+                    escape(_format_timestamp(item.get("updated_at"))),
+                    _render_linear_link(item.get("url")),
+                ])
+            else:
+                rows.append([
+                    _render_issue_link(item["identifier"], item["title"], item.get("url")),
+                    escape(str(item.get("state") or "")),
+                    escape(_render_priority(item.get("priority")) if "priority" in item else "-"),
+                    escape(str(item.get("reason") or "")),
+                ])
         queue_sections.append(
             _render_table(
                 title,
                 subtitle,
-                ["Issue", "State", "Priority", fourth_header],
+                headers,
                 rows,
                 empty,
             )

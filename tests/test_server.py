@@ -18,6 +18,7 @@ def _issue(
     identifier: str,
     state: str = "Todo",
     priority: int | None = 2,
+    project_name: str | None = "Bandeira",
     blocked_by: list[BlockerRef] | None = None,
     updated_at: datetime | None = None,
 ) -> Issue:
@@ -25,6 +26,7 @@ def _issue(
         id=issue_id,
         identifier=identifier,
         title=f"Title for {identifier}",
+        project_name=project_name,
         description=None,
         priority=priority,
         state=state,
@@ -154,7 +156,51 @@ def test_build_operator_groups_classifies_ready_waiting_blocked_and_recently_com
     assert [item["identifier"] for item in groups["blocked"]] == ["BAP-104"]
     assert groups["blocked"][0]["reason"] == "Waiting on BAP-099"
     assert [item["identifier"] for item in groups["recently_completed"]] == ["BAP-105"]
+    assert groups["recently_completed"][0]["project"] == "Bandeira"
     assert groups["summary"]["needs_attention"] == 2
+
+
+def test_render_dashboard_recently_completed_includes_project_and_linear_link() -> None:
+    html = _render_dashboard(
+        {
+            "summary": {
+                "running": 0,
+                "retrying": 0,
+                "ready": 0,
+                "waiting": 0,
+                "needs_attention": 0,
+                "capacity_in_use": "0/2",
+            },
+            "totals": {},
+            "generated_at": None,
+            "controls": {},
+            "running": [],
+            "retrying": [],
+            "ready": [],
+            "waiting": [],
+            "blocked": [],
+            "recently_completed": [
+                {
+                    "identifier": "BAP-178",
+                    "title": "Recent terminal-state work for quick operator confirmation.",
+                    "state": "Done",
+                    "project": "Bandeira",
+                    "url": "https://linear.test/BAP-178",
+                    "updated_at": "2026-03-28T21:04:00+00:00",
+                }
+            ],
+            "skipped": [],
+            "waiting_reasons": [],
+            "recent_problems": [],
+        }
+    )
+
+    assert "Recently Completed" in html
+    assert "<th>Project</th>" in html
+    assert "<th>Linear</th>" in html
+    assert "BAP-178 - Recent terminal-state work for quick operator confirmation." in html
+    assert "Bandeira" in html
+    assert ">Open</a>" in html
 
 
 def test_build_operator_groups_respects_state_capacity_limits() -> None:

@@ -35,6 +35,7 @@ class Issue:
     id: str
     identifier: str
     title: str
+    project_name: str | None
     description: str | None
     priority: int | None
     state: str

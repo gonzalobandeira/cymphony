@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cymphony.linear import LinearClient
+from cymphony.linear import LinearClient, _normalize_issue
 from cymphony.models import (
     AgentConfig,
     BlockerRef,
@@ -78,6 +78,7 @@ def _build_issue(
         id=issue_id,
         identifier=identifier,
         title=identifier,
+        project_name=None,
         description=None,
         priority=None,
         state=state,
@@ -234,7 +235,29 @@ async def test_fetch_issues_by_states_scopes_requests_to_configured_project(
     assert [issue.identifier for issue in issues] == ["BAP-153"]
     assert captured_variables == [{"projectSlug": "proj", "states": ["Done"]}]
 
+def test_normalize_issue_reads_project_name() -> None:
+    issue = _normalize_issue(
+        {
+            "id": "issue-148",
+            "identifier": "BAP-148",
+            "title": "Provider abstraction",
+            "project": {"name": "Bandeira"},
+            "description": None,
+            "priority": 2,
+            "state": {"name": "Todo"},
+            "branchName": None,
+            "url": "https://linear.app/bandeira/issue/BAP-148",
+            "labels": {"nodes": []},
+            "relations": {"nodes": []},
+            "inverseRelations": {"nodes": []},
+            "comments": {"nodes": []},
+            "createdAt": "2026-03-28T19:11:32.256Z",
+            "updatedAt": "2026-03-29T09:01:32.404Z",
+        }
+    )
 
+    assert issue is not None
+    assert issue.project_name == "Bandeira"
 @pytest.mark.asyncio
 async def test_startup_terminal_cleanup_removes_only_matching_workspaces_and_logs_project_context(
     monkeypatch: pytest.MonkeyPatch,

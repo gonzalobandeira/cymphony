@@ -41,6 +41,7 @@ query CandidateIssues($projectSlug: String!, $states: [String!]!, $after: String
       id
       identifier
       title
+      project { name }
       description
       priority
       state { name }
@@ -90,6 +91,7 @@ query CandidateIssues($projectSlug: String!, $states: [String!]!, $after: String
       id
       identifier
       title
+      project { name }
       description
       priority
       state { name }
@@ -155,6 +157,7 @@ query IssueStatesByIds($ids: [ID!]!) {
       id
       identifier
       title
+      project { name }
       description
       priority
       state { name }
@@ -538,6 +541,7 @@ def _normalize_issue(node: dict[str, Any]) -> Issue | None:
         id=issue_id,
         identifier=identifier,
         title=title,
+        project_name=((node.get("project") or {}).get("name")),
         description=node.get("description"),
         priority=priority,
         state=state,
@@ -565,6 +569,7 @@ def _normalize_issue_minimal(node: dict[str, Any]) -> Issue | None:
         id=issue_id,
         identifier=identifier,
         title="",
+        project_name=None,
         description=None,
         priority=None,
         state=state,
