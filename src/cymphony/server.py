@@ -778,6 +778,66 @@ def _render_table(title: str, subtitle: str, headers: list[str], rows: list[list
     return (
         "<section class='panel'>"
         f"<div class='panel-head'><h2>{escape(title)}</h2><p>{escape(subtitle)}</p></div>"
+        f"<div class='table-wrap'>{body}</div></section>"
+    )
+
+
+def _render_operator_cards(
+    title: str,
+    subtitle: str,
+    rows: list[dict[str, object]],
+    *,
+    empty: str,
+    mode: str,
+) -> str:
+    if not rows:
+        body = f"<p class='empty'>{escape(empty)}</p>"
+    else:
+        cards: list[str] = []
+        for row in rows:
+            if mode == "running":
+                meta = [
+                    ("Tracker state", str(row.get("state") or "")),
+                    ("Run status", str(row.get("run_status") or "")),
+                    ("Turns", str(row.get("turn_count") or 0)),
+                    ("Started", _format_timestamp(row.get("started_at"))),
+                    ("Session", str(row.get("session_id") or "-")),
+                ]
+                action_html = _issue_controls(str(row.get("issue_identifier") or ""), include_cancel=True)
+                drilldown = _render_issue_drilldown(row)
+            else:
+                meta = [
+                    ("Attempt", str(row.get("attempt") or "")),
+                    ("Due in", _format_relative_due(row.get("due_at"), _now_utc())),
+                    ("Why", str(row.get("error") or "Continuation retry")),
+                ]
+                action_html = _issue_controls(str(row.get("issue_identifier") or ""))
+                drilldown = _render_issue_drilldown(
+                    row,
+                    retry_due=_format_relative_due(row.get("due_at"), _now_utc()),
+                )
+
+            meta_html = "".join(
+                "<div class='operator-meta-item'>"
+                f"<span class='operator-meta-label'>{escape(label)}</span>"
+                f"<span class='operator-meta-value'>{escape(value)}</span>"
+                "</div>"
+                for label, value in meta
+            )
+            cards.append(
+                "<article class='operator-card'>"
+                "<div class='operator-card-head'>"
+                f"<div class='operator-meta'>{meta_html}</div>"
+                f"<div class='issue-actions'>{action_html}</div>"
+                "</div>"
+                f"{drilldown}"
+                "</article>"
+            )
+        body = f"<div class='operator-card-list'>{''.join(cards)}</div>"
+
+    return (
+        "<section class='panel'>"
+        f"<div class='panel-head'><h2>{escape(title)}</h2><p>{escape(subtitle)}</p></div>"
         f"{body}</section>"
     )
 
@@ -791,29 +851,6 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     dispatch_paused = bool(controls.get("dispatch_paused"))
     recent_controls = list(controls.get("recent_actions", []))
 
-    running_rows = [
-        [
-            _render_issue_drilldown(row),
-            escape(str(row.get("state") or "")),
-            escape(str(row.get("run_status") or "")),
-            escape(str(row.get("turn_count") or 0)),
-            escape(_format_timestamp(row.get("started_at"))),
-            escape(str(row.get("session_id") or "-")),
-            _issue_controls(str(row.get("issue_identifier") or ""), include_cancel=True),
-        ]
-        for row in groups["running"]
-    ]
-
-    retry_rows = [
-        [
-            _render_issue_drilldown(row, retry_due=_format_relative_due(row.get("due_at"), now)),
-            escape(str(row.get("attempt") or "")),
-            escape(_format_relative_due(row.get("due_at"), now)),
-            escape(str(row.get("error") or "Continuation retry")),
-            _issue_controls(str(row.get("issue_identifier") or "")),
-        ]
-        for row in groups["retrying"]
-    ]
     skipped_rows = [
         [
             escape(str(row.get("issue_identifier") or "")),
@@ -1031,6 +1068,9 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     padding: 20px 22px;
     overflow: hidden;
   }}
+  .table-wrap {{
+    overflow-x: auto;
+  }}
   .control-toolbar, .issue-actions {{
     display: flex;
     gap: 10px;
@@ -1039,9 +1079,50 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   .issue-actions {{
     min-width: 180px;
+    justify-content: flex-end;
   }}
   .small {{ font-size: 0.9rem; }}
   .muted {{ color: var(--muted); }}
+  .operator-card-list {{
+    display: grid;
+    gap: 16px;
+  }}
+  .operator-card {{
+    padding: 18px;
+    border-radius: 18px;
+    border: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(255, 250, 240, 0.98), rgba(249, 244, 234, 0.92));
+  }}
+  .operator-card-head {{
+    display: flex;
+    justify-content: space-between;
+    align-items: start;
+    gap: 16px;
+    margin-bottom: 12px;
+  }}
+  .operator-meta {{
+    flex: 1;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px 14px;
+  }}
+  .operator-meta-item {{
+    display: grid;
+    gap: 4px;
+  }}
+  .operator-meta-label {{
+    color: var(--muted);
+    font-size: 0.76rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+  }}
+  .operator-meta-value {{
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 1rem;
+    font-weight: 600;
+    word-break: break-word;
+  }}
   .issue-drilldown summary {{
     cursor: pointer;
     font-weight: 700;
@@ -1055,12 +1136,14 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
     gap: 12px;
     margin-top: 12px;
+    align-items: start;
   }}
   .detail-card {{
     background: var(--panel-strong);
     border: 1px solid var(--line);
     border-radius: 16px;
     padding: 14px;
+    min-width: 0;
   }}
   .detail-wide {{
     grid-column: span 2;
@@ -1074,16 +1157,20 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   .kv {{
     display: flex;
     justify-content: space-between;
+    align-items: start;
     gap: 12px;
     padding: 4px 0;
     border-bottom: 1px solid var(--line);
     font-family: "Avenir Next", "Segoe UI", sans-serif;
     font-size: 0.9rem;
+    min-width: 0;
   }}
   .k {{
     color: var(--muted);
+    flex: 0 0 110px;
   }}
   .v {{
+    flex: 1 1 auto;
     text-align: right;
     word-break: break-word;
   }}
@@ -1161,6 +1248,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   table {{
     width: 100%;
+    min-width: 640px;
     border-collapse: collapse;
     font-family: "Avenir Next", "Segoe UI", sans-serif;
     font-size: 0.96rem;
@@ -1193,12 +1281,24 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   @media (max-width: 1100px) {{
     .hero, .layout {{ grid-template-columns: 1fr; }}
     .stats {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    .operator-card-head {{ flex-direction: column; }}
+    .issue-actions {{ justify-content: flex-start; }}
   }}
   @media (max-width: 700px) {{
     main {{ padding: 18px; }}
     .stats {{ grid-template-columns: 1fr; }}
     .hero-card h1 {{ font-size: 2rem; }}
     table {{ font-size: 0.9rem; }}
+    .operator-meta {{ grid-template-columns: 1fr 1fr; }}
+    .detail-wide {{ grid-column: span 1; }}
+    .kv {{
+      flex-direction: column;
+      gap: 2px;
+    }}
+    .k, .v {{
+      flex: initial;
+      text-align: left;
+    }}
   }}
 </style>
 </head>
@@ -1252,8 +1352,8 @@ def _render_dashboard(groups: dict[str, object]) -> str:
           {_post_button("/api/v1/dispatch/resume", "Resume Dispatching")}
         </div>
       </section>
-      {_render_table("Running", "Active workers and current execution status.", ["Issue", "Tracker State", "Run Status", "Turns", "Started", "Session", "Actions"], running_rows, "No active agents.")}
-      {_render_table("Retrying", "Retries scheduled after failures or continuation hand-offs.", ["Issue", "Attempt", "Due In", "Why", "Actions"], retry_rows, "No retries scheduled.")}
+      {_render_operator_cards("Running", "Active workers and current execution status.", list(groups["running"]), empty="No active agents.", mode="running")}
+      {_render_operator_cards("Retrying", "Retries scheduled after failures or continuation hand-offs.", list(groups["retrying"]), empty="No retries scheduled.", mode="retrying")}
     </div>
     <div class="stack">
       {''.join(queue_sections)}
