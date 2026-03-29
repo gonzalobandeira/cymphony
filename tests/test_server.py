@@ -834,3 +834,149 @@ async def test_settings_get_redirects_to_setup_when_in_setup_mode(tmp_path: Path
         await server._handle_settings_get(request)
 
     assert exc_info.value.location == "/setup"
+
+
+def test_render_dashboard_shows_workflow_configuration_section() -> None:
+    html = _render_dashboard(
+        {
+            "generated_at": "2026-03-29T12:00:00+00:00",
+            "summary": {
+                "running": 0,
+                "retrying": 0,
+                "ready": 0,
+                "waiting": 0,
+                "needs_attention": 0,
+                "capacity_in_use": "0/2",
+            },
+            "totals": {},
+            "controls": {},
+            "running": [],
+            "retrying": [],
+            "ready": [],
+            "waiting": [],
+            "blocked": [],
+            "recently_completed": [],
+            "waiting_reasons": [],
+            "recent_problems": [],
+            "skipped": [],
+            "workflow_config": {
+                "active_states": ["Todo", "In Progress"],
+                "terminal_states": ["Done", "Cancelled"],
+                "transitions": {
+                    "dispatch": "In Progress",
+                    "success": "In Review",
+                    "failure": None,
+                    "blocked": None,
+                    "cancelled": None,
+                },
+            },
+            "transition_history": [],
+        }
+    )
+
+    assert "Workflow Configuration" in html
+    assert "Todo, In Progress" in html
+    assert "Done, Cancelled" in html
+    assert "dispatch" in html
+    assert "In Progress" in html
+    assert "In Review" in html
+    assert "not configured" in html
+
+
+def test_render_dashboard_shows_recent_transitions() -> None:
+    html = _render_dashboard(
+        {
+            "generated_at": "2026-03-29T12:00:00+00:00",
+            "summary": {
+                "running": 0,
+                "retrying": 0,
+                "ready": 0,
+                "waiting": 0,
+                "needs_attention": 0,
+                "capacity_in_use": "0/2",
+            },
+            "totals": {},
+            "controls": {},
+            "running": [],
+            "retrying": [],
+            "ready": [],
+            "waiting": [],
+            "blocked": [],
+            "recently_completed": [],
+            "waiting_reasons": [],
+            "recent_problems": [],
+            "skipped": [],
+            "workflow_config": {},
+            "transition_history": [
+                {
+                    "timestamp": "2026-03-29T11:30:00+00:00",
+                    "issue_id": "issue-1",
+                    "issue_identifier": "BAP-200",
+                    "from_state": "Todo",
+                    "to_state": "In Progress",
+                    "trigger": "dispatch",
+                    "success": True,
+                },
+                {
+                    "timestamp": "2026-03-29T11:45:00+00:00",
+                    "issue_id": "issue-1",
+                    "issue_identifier": "BAP-200",
+                    "from_state": "In Progress",
+                    "to_state": "In Review",
+                    "trigger": "success",
+                    "success": True,
+                },
+                {
+                    "timestamp": "2026-03-29T11:50:00+00:00",
+                    "issue_id": "issue-2",
+                    "issue_identifier": "BAP-201",
+                    "from_state": None,
+                    "to_state": "In Progress",
+                    "trigger": "dispatch",
+                    "success": False,
+                },
+            ],
+        }
+    )
+
+    assert "Recent Transitions (3)" in html
+    assert "BAP-200" in html
+    assert "BAP-201" in html
+    assert "dispatch" in html
+    assert "success" in html
+    assert ">ok</span>" in html
+    assert ">fail</span>" in html
+    assert "2026-03-29 11:30 UTC" in html
+
+
+def test_render_dashboard_handles_empty_workflow_config_gracefully() -> None:
+    """Dashboard should not crash when workflow_config is missing or empty."""
+    html = _render_dashboard(
+        {
+            "generated_at": None,
+            "summary": {
+                "running": 0,
+                "retrying": 0,
+                "ready": 0,
+                "waiting": 0,
+                "needs_attention": 0,
+                "capacity_in_use": "0/2",
+            },
+            "totals": {},
+            "controls": {},
+            "running": [],
+            "retrying": [],
+            "ready": [],
+            "waiting": [],
+            "blocked": [],
+            "recently_completed": [],
+            "waiting_reasons": [],
+            "recent_problems": [],
+            "skipped": [],
+            "workflow_config": {},
+            "transition_history": [],
+        }
+    )
+
+    assert "Workflow Configuration" in html
+    assert "No transitions recorded yet." in html

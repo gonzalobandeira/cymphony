@@ -325,6 +325,18 @@ class SkippedEntry:
 
 
 @dataclass
+class TransitionRecord:
+    """Recorded state transition for an issue."""
+    timestamp: datetime
+    issue_id: str
+    issue_identifier: str
+    from_state: str | None
+    to_state: str
+    trigger: str  # e.g. "dispatch", "success", "failure", "blocked", "cancelled"
+    success: bool = True
+
+
+@dataclass
 class ControlAction:
     """Auditable operator control action."""
     timestamp: datetime
@@ -363,6 +375,7 @@ class OrchestratorState:
     last_validation_errors: list[str] = field(default_factory=list)
     last_preflight_errors: list[dict[str, str]] = field(default_factory=list)
     recent_problems: list[ProblemRecord] = field(default_factory=list)
+    transition_history: list[TransitionRecord] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
