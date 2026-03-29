@@ -1029,7 +1029,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   .hero-card, .meta-card, .panel, .stat {{
     background: var(--panel);
     border: 1px solid var(--line);
-    border-radius: 20px;
+    border-radius: 14px;
     box-shadow: var(--shadow);
   }}
   .hero-card {{
@@ -1100,7 +1100,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     gap: 18px;
   }}
   .panel {{
-    padding: 20px 22px;
+    padding: 14px 18px;
     overflow: hidden;
   }}
   .table-wrap {{
@@ -1108,7 +1108,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   .control-toolbar, .issue-actions {{
     display: flex;
-    gap: 10px;
+    gap: 6px;
     flex-wrap: wrap;
     align-items: center;
   }}
@@ -1117,9 +1117,63 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   .control-group {{
     display: flex;
-    gap: 10px;
+    gap: 6px;
     flex-wrap: wrap;
     align-items: center;
+  }}
+  .control-group + .control-group {{
+    border-left: 1px solid var(--line);
+    padding-left: 10px;
+    margin-left: 4px;
+  }}
+  .control-group-label {{
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    white-space: nowrap;
+  }}
+  [data-tooltip] {{
+    position: relative;
+  }}
+  [data-tooltip]:hover::after {{
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--ink);
+    color: #fff;
+    font-size: 0.78rem;
+    font-weight: 400;
+    line-height: 1.35;
+    padding: 5px 10px;
+    border-radius: 8px;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 10;
+    box-shadow: 0 2px 8px rgba(31, 41, 51, 0.18);
+  }}
+  [data-tooltip]:hover::before {{
+    content: "";
+    position: absolute;
+    bottom: calc(100% + 1px);
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: var(--ink);
+    pointer-events: none;
+    z-index: 10;
+  }}
+  .caution-button {{
+    border-color: rgba(180, 120, 0, 0.3);
+    background: rgba(180, 120, 0, 0.07);
+    color: #92600a;
+  }}
+  .caution-button:hover {{
+    border-color: rgba(180, 120, 0, 0.45);
+    background: rgba(180, 120, 0, 0.12);
   }}
   .issue-actions {{
     min-width: 180px;
@@ -1253,9 +1307,14 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     background: var(--panel-strong);
     color: var(--ink);
     border-radius: 999px;
-    padding: 8px 12px;
+    padding: 5px 11px;
     font: inherit;
+    font-size: 0.88rem;
     cursor: pointer;
+  }}
+  button:disabled {{
+    opacity: 0.45;
+    cursor: not-allowed;
   }}
   button:hover {{
     border-color: rgba(15, 118, 110, 0.35);
@@ -1317,9 +1376,9 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     display: inline-flex;
     align-items: center;
     border-radius: 999px;
-    padding: 8px 12px;
+    padding: 4px 10px;
     font-family: "Avenir Next", "Segoe UI", sans-serif;
-    font-size: 0.9rem;
+    font-size: 0.82rem;
     font-weight: 700;
   }}
   .pill.active {{
@@ -1335,12 +1394,15 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     justify-content: space-between;
     align-items: end;
     gap: 12px;
-    margin-bottom: 16px;
+    margin-bottom: 10px;
   }}
   .panel-head h2 {{
     margin: 0;
-    font-size: 1.15rem;
+    font-size: 1.05rem;
     letter-spacing: -0.02em;
+  }}
+  .panel-head p {{
+    font-size: 0.84rem;
   }}
   table {{
     width: 100%;
@@ -1379,6 +1441,8 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     .stats {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
     .operator-card-head {{ flex-direction: column; }}
     .issue-actions {{ justify-content: flex-start; }}
+    .control-toolbar {{ flex-direction: column; align-items: flex-start; gap: 8px; }}
+    .control-group + .control-group {{ border-left: none; padding-left: 0; margin-left: 0; border-top: 1px solid var(--line); padding-top: 8px; }}
   }}
   @media (max-width: 700px) {{
     main {{ padding: 18px; }}
@@ -1565,17 +1629,24 @@ document.addEventListener("DOMContentLoaded", function() {{
       <section class="panel">
         <div class="panel-head">
           <h2>Operator Controls</h2>
-          <p>Intervene safely without leaving the dashboard.</p>
         </div>
         <div class="control-toolbar">
           <div class="control-group">
-            <span class="pill {'paused' if dispatch_paused else 'active'}">{'Paused' if dispatch_paused else 'Active'}</span>
-            {_post_button("/api/v1/refresh", "Refresh Now")}
-            {_post_button("/api/v1/dispatch/pause", "Pause Dispatching")}
-            {_post_button("/api/v1/dispatch/resume", "Resume Dispatching")}
-            <button type="button" id="pause-refresh" title="Pause or resume the automatic 15-second dashboard refresh." onclick="cym.toggleAutoRefresh()">Pause Auto-Refresh</button>
+            <span class="control-group-label">Status</span>
+            <span class="pill {'paused' if dispatch_paused else 'active'}" data-tooltip="Current dispatch state">{'Paused' if dispatch_paused else 'Active'}</span>
           </div>
           <div class="control-group">
+            <span class="control-group-label">View</span>
+            {_post_button("/api/v1/refresh", "Refresh Now", tooltip="Fetch the latest orchestration state immediately.")}
+            <button type="button" id="pause-refresh" data-tooltip="Pause the automatic 15-second dashboard refresh" onclick="cym.toggleAutoRefresh()">Pause Auto-Refresh</button>
+          </div>
+          <div class="control-group">
+            <span class="control-group-label">Dispatch</span>
+            {_post_button("/api/v1/dispatch/pause", "Pause", tooltip="Stop launching new work; active agents continue.", css_class="caution-button")}
+            {_post_button("/api/v1/dispatch/resume", "Resume", tooltip="Allow the orchestrator to start queued work again.")}
+          </div>
+          <div class="control-group">
+            <span class="control-group-label">Shutdown</span>
             {_kill_app_switch(shutdown_requested)}
           </div>
         </div>
@@ -1911,18 +1982,22 @@ async def start_setup_server(
     return runner
 
 
-def _post_button(action: str, label: str) -> str:
+def _post_button(
+    action: str,
+    label: str,
+    *,
+    tooltip: str = "",
+    css_class: str = "",
+) -> str:
     safe_action = html.escape(action, quote=True)
     safe_label = html.escape(label)
-    button_tooltips = {
-        "Refresh Now": "Fetch the latest orchestration state immediately.",
-        "Pause Dispatching": "Stop launching new work while letting active agents continue.",
-        "Resume Dispatching": "Allow the orchestrator to start queued work again.",
-    }
-    tooltip = button_tooltips.get(label)
-    tooltip_attr = f" title='{html.escape(tooltip, quote=True)}'" if tooltip else ""
+    tooltip_attr = (
+        f" data-tooltip='{html.escape(tooltip, quote=True)}'" if tooltip else ""
+    )
+    class_attr = f" class='{html.escape(css_class, quote=True)}'" if css_class else ""
     return (
-        f"<button type='button'{tooltip_attr} onclick=\"cym.post('{safe_action}')\">"
+        f"<button type='button'{class_attr}{tooltip_attr}"
+        f" onclick=\"cym.post('{safe_action}')\">"
         f"{safe_label}</button>"
     )
 
@@ -1934,11 +2009,13 @@ def _kill_app_switch(shutdown_requested: bool) -> str:
     button_label = "Kill Requested" if shutdown_requested else "Kill App"
     return (
         "<div class='switch-form'>"
-        "<label class='switch-label'>"
-        f"<input type='checkbox' id='kill-arm' value='true' title='Enable the kill switch so the app can be shut down.'{checked}{disabled}>"
-        "<span title='Enable the kill switch so the app can be shut down.'>Arm kill</span>"
+        "<label class='switch-label' data-tooltip='Enable the kill switch to allow shutdown'>"
+        f"<input type='checkbox' id='kill-arm' value='true'{checked}{disabled}>"
+        "<span>Arm</span>"
         "</label>"
-        f"<button type='button' id='kill-app-button' class='danger-button' title='Terminate the dashboard process after the kill switch is armed.'{button_disabled} "
+        f"<button type='button' id='kill-app-button' class='danger-button'"
+        f" data-tooltip='Terminate the Cymphony process (requires arming first)'"
+        f"{button_disabled} "
         "onclick=\"cym.killApp()\">"
         f"{escape(button_label)}</button>"
         "</div>"
@@ -1952,9 +2029,30 @@ def _issue_controls(
     requeue_only: bool = False,
 ) -> str:
     safe_identifier = html.escape(identifier, quote=True)
-    buttons = [_post_button(f"/api/v1/issues/{safe_identifier}/requeue", "Requeue")]
+    buttons = [
+        _post_button(
+            f"/api/v1/issues/{safe_identifier}/requeue",
+            "Requeue",
+            tooltip="Move this issue back to the ready queue for another attempt.",
+        )
+    ]
     if not requeue_only:
-        buttons.append(_post_button(f"/api/v1/issues/{safe_identifier}/skip", "Skip"))
+        buttons.append(
+            _post_button(
+                f"/api/v1/issues/{safe_identifier}/skip",
+                "Skip",
+                tooltip="Skip this issue so the orchestrator will not pick it up.",
+                css_class="caution-button",
+            )
+        )
     if include_cancel:
-        buttons.insert(0, _post_button(f"/api/v1/issues/{safe_identifier}/cancel", "Cancel Worker"))
+        buttons.insert(
+            0,
+            _post_button(
+                f"/api/v1/issues/{safe_identifier}/cancel",
+                "Cancel",
+                tooltip="Abort the running agent worker for this issue.",
+                css_class="danger-button",
+            ),
+        )
     return f"<div class='issue-actions'>{''.join(buttons)}</div>"
