@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
-from cymphony.linear import _normalize_issue_minimal
+import pytest
+
+from cymphony.linear import LinearClient, _normalize_issue_minimal
+from cymphony.models import TrackerConfig
 
 
 def test_normalize_issue_minimal_populates_enriched_fields() -> None:
@@ -38,3 +42,38 @@ def test_normalize_issue_minimal_handles_missing_optional_fields() -> None:
     assert issue.project_name is None
     assert issue.url is None
     assert issue.updated_at is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_project_team_ids_paginates_all_project_issues() -> None:
+    client = LinearClient(
+        TrackerConfig(
+            kind="linear",
+            endpoint="https://example.test/graphql",
+            api_key="test-key",
+            project_slug="proj",
+            active_states=["Todo"],
+            terminal_states=["Done"],
+            assignee=None,
+        )
+    )
+    responses = [
+        {
+            "issues": {
+                "nodes": [{"team": {"id": "team-1"}}],
+                "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+            }
+        },
+        {
+            "issues": {
+                "nodes": [{"team": {"id": "team-2"}}, {"team": {"id": "team-1"}}],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }
+        },
+    ]
+
+    with patch.object(client, "_request", AsyncMock(side_effect=responses)) as request_mock:
+        team_ids = await client.fetch_project_team_ids()
+
+    assert team_ids == ["team-1", "team-2"]
+    assert request_mock.await_count == 2

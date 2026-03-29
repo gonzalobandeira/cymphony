@@ -364,3 +364,41 @@ async def test_workflow_reload_validates_transitions() -> None:
     # Validation was called with fail_hard=False (warn only on reload)
     assert len(validate_calls) == 1
     assert validate_calls[0]["fail_hard"] is False
+
+
+@pytest.mark.asyncio
+async def test_workflow_reload_rejects_invalid_transition_config() -> None:
+    """Invalid reloads should not replace the active config."""
+    orch = _build_orchestrator(TransitionsConfig(dispatch="In Progress"))
+    original_config = orch._config
+    original_workflow = orch._workflow
+    orch._state_id_cache[("team-1", "in progress")] = "state-1"
+
+    new_workflow = WorkflowDefinition(
+        config={
+            "tracker": {
+                "kind": "linear",
+                "api_key": "test-key",
+                "project_slug": "proj",
+                "active_states": ["Todo", "In Progress"],
+                "terminal_states": ["Done"],
+            },
+            "workspace": {"root": "/tmp/cymphony-tests"},
+            "transitions": {
+                "dispatch": "Bad State",
+            },
+        },
+        prompt_template="invalid",
+    )
+
+    async def fake_validate(*, fail_hard: bool = False) -> bool:
+        assert fail_hard is False
+        return False
+
+    orch._validate_transitions = fake_validate  # type: ignore[assignment]
+
+    await orch._on_workflow_change(new_workflow)
+
+    assert orch._config is original_config
+    assert orch._workflow is original_workflow
+    assert orch._state_id_cache == {("team-1", "in progress"): "state-1"}

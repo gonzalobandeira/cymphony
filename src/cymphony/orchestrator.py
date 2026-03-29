@@ -132,13 +132,26 @@ class Orchestrator:
         """Apply updated workflow config dynamically (spec §6.2)."""
         try:
             new_config = build_config(new_workflow, self._config.server.port)
+            previous_config = self._config
+            previous_cache = dict(self._state_id_cache)
+
+            # Validate transitions against Linear states before making the new
+            # workflow active so a bad reload cannot leak into runtime behavior.
             self._config = new_config
+            is_valid = await self._validate_transitions(fail_hard=False)
+            if not is_valid:
+                self._config = previous_config
+                self._state_id_cache = previous_cache
+                logger.warning(
+                    "action=workflow_config_reapply_rejected "
+                    "reason=invalid_transition_targets"
+                )
+                return
+
             self._workflow = new_workflow
             self._state.poll_interval_ms = new_config.polling.interval_ms
             self._state.max_concurrent_agents = new_config.agent.max_concurrent_agents
             logger.info("action=workflow_config_reapplied")
-            # Validate transitions against Linear states (warn only on reload)
-            await self._validate_transitions(fail_hard=False)
         except Exception as exc:
             logger.error(f"action=workflow_reapply_failed error={exc}")
 
