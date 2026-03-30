@@ -332,7 +332,7 @@ class TestWorkerDoneTransitions:
         comments: list[tuple[str, str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
-            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+            AsyncMock(side_effect=lambda iid, state, **kwargs: (transitions.append((iid, state)) or True)),
         )
         monkeypatch.setattr(
             orch,
@@ -349,6 +349,8 @@ class TestWorkerDoneTransitions:
         # Should use qa_review.success = "In Review"
         assert transitions == [(issue.id, "In Review")]
         assert comments == [(issue.id, issue.identifier, "Looks good")]
+        assert issue.id not in orch._state.qa_review_bounces
+        assert issue.id not in orch._state.qa_review_comment_ids
 
     @pytest.mark.asyncio
     async def test_review_process_failure_retries_in_review_without_failure_transition(
@@ -417,7 +419,7 @@ class TestWorkerDoneTransitions:
         comments: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
-            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+            AsyncMock(side_effect=lambda iid, state, **kwargs: (transitions.append((iid, state)) or True)),
         )
         monkeypatch.setattr(
             orch,
@@ -428,11 +430,14 @@ class TestWorkerDoneTransitions:
             orch, "_schedule_retry",
             AsyncMock(),
         )
+        orch._state.qa_review_comment_ids[issue.id] = "old-comment"
 
         await orch._on_worker_done(issue.id, issue.identifier, entry, task)
 
         assert transitions == [(issue.id, "Todo")]
         assert comments == [(issue.id, "changes_requested")]
+        assert orch._state.qa_review_bounces[issue.id] == 1
+        assert issue.id not in orch._state.qa_review_comment_ids
 
     @pytest.mark.asyncio
     async def test_review_missing_result_file_skips_transition_and_posts_parse_failure(
@@ -513,7 +518,7 @@ class TestWorkerDoneTransitions:
         transitions: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
-            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+            AsyncMock(side_effect=lambda iid, state, **kwargs: (transitions.append((iid, state)) or True)),
         )
         monkeypatch.setattr(
             orch,
@@ -549,7 +554,7 @@ class TestWorkerDoneTransitions:
         transitions: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
-            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+            AsyncMock(side_effect=lambda iid, state, **kwargs: (transitions.append((iid, state)) or True)),
         )
         monkeypatch.setattr(
             orch, "_schedule_retry",
@@ -580,7 +585,7 @@ class TestWorkerDoneTransitions:
         transitions: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
-            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+            AsyncMock(side_effect=lambda iid, state, **kwargs: (transitions.append((iid, state)) or True)),
         )
         monkeypatch.setattr(
             orch, "_schedule_retry",
@@ -612,7 +617,7 @@ class TestWorkerDoneTransitions:
         transitions: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
-            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+            AsyncMock(side_effect=lambda iid, state, **kwargs: (transitions.append((iid, state)) or True)),
         )
         monkeypatch.setattr(orch, "_schedule_retry", AsyncMock())
 
@@ -623,6 +628,69 @@ class TestWorkerDoneTransitions:
         assert orch._state.skipped[issue.id].reason == "qa_review_bounce_limit"
         assert orch._state.qa_review_bounces[issue.id] == 2
         assert any(p.kind == "qa_review_bounce_limit_reached" for p in orch._state.recent_problems)
+
+    @pytest.mark.asyncio
+    async def test_review_changes_requested_preserves_cycle_state_when_transition_fails(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch = _build_orchestrator()
+        issue = _build_issue(state="QA Review", identifier="BAP-205")
+        entry = _build_running_entry(issue, mode=ExecutionMode.REVIEW)
+        orch._state.running[issue.id] = entry
+        orch._state.qa_review_bounces[issue.id] = 1
+        orch._state.qa_review_comment_ids[issue.id] = "comment-1"
+
+        async def noop() -> None:
+            pass
+
+        task = asyncio.ensure_future(noop())
+        await task
+        entry.task = task
+        _write_review_result(orch, issue.identifier, "changes_requested", "Still broken")
+
+        monkeypatch.setattr(
+            orch, "_transition_issue_state",
+            AsyncMock(return_value=False),
+        )
+        monkeypatch.setattr(orch, "_schedule_retry", AsyncMock())
+        monkeypatch.setattr(orch, "_post_review_result_comment", AsyncMock())
+
+        await orch._on_worker_done(issue.id, issue.identifier, entry, task)
+
+        assert orch._state.qa_review_bounces[issue.id] == 1
+        assert orch._state.qa_review_comment_ids[issue.id] == "comment-1"
+        assert entry.qa_review_bounce_count == 0
+
+    @pytest.mark.asyncio
+    async def test_review_pass_preserves_cycle_state_when_transition_fails(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch = _build_orchestrator()
+        issue = _build_issue(state="QA Review", identifier="BAP-206")
+        entry = _build_running_entry(issue, mode=ExecutionMode.REVIEW)
+        orch._state.running[issue.id] = entry
+        orch._state.qa_review_bounces[issue.id] = 2
+        orch._state.qa_review_comment_ids[issue.id] = "comment-2"
+
+        async def noop() -> None:
+            pass
+
+        task = asyncio.ensure_future(noop())
+        await task
+        entry.task = task
+        _write_review_result(orch, issue.identifier, "pass", "Looks good")
+
+        monkeypatch.setattr(
+            orch, "_transition_issue_state",
+            AsyncMock(return_value=False),
+        )
+        monkeypatch.setattr(orch, "_schedule_retry", AsyncMock())
+        monkeypatch.setattr(orch, "_post_review_result_comment", AsyncMock())
+
+        await orch._on_worker_done(issue.id, issue.identifier, entry, task)
+
+        assert orch._state.qa_review_bounces[issue.id] == 2
+        assert orch._state.qa_review_comment_ids[issue.id] == "comment-2"
 
     @pytest.mark.asyncio
     async def test_review_retry_limit_holds_issue_in_qa_review(
@@ -690,6 +758,16 @@ class TestRenderReviewResultComment:
         assert "Decision: `pass`" in body
         assert "Looks good" in body
 
+    def test_changes_requested_comment_renders_summary(self) -> None:
+        orch = _build_orchestrator()
+        body = orch._render_review_result_comment(
+            ReviewResult(decision=ReviewDecision.CHANGES_REQUESTED, summary="Needs tests")
+        )
+
+        assert "**QA review requested changes**" in body
+        assert "Decision: `changes_requested`" in body
+        assert "Needs tests" in body
+
     def test_parse_failure_comment_includes_error_and_raw_output(self) -> None:
         orch = _build_orchestrator()
         body = orch._render_review_result_comment(
@@ -704,6 +782,182 @@ class TestRenderReviewResultComment:
         assert "did not apply a QA transition" in body
         assert "Review result file not found" in body
         assert '{"decision":"maybe"}' in body
+
+    def test_parse_failure_comment_without_raw_output(self) -> None:
+        orch = _build_orchestrator()
+        body = orch._render_review_result_comment(
+            ReviewResult(decision=None, error="Review result file not found")
+        )
+
+        assert "**QA review result could not be applied**" in body
+        assert "Review result file not found" in body
+        assert "```json" not in body
+
+
+class TestReviewCommentUpsert:
+    """Verify that review comments use upsert semantics to prevent duplicates."""
+
+    @pytest.mark.asyncio
+    async def test_first_comment_creates_new(self) -> None:
+        orch = _build_orchestrator()
+        issue_id = "issue-1"
+        identifier = "BAP-200"
+
+        created_ids: list[str] = []
+        updated_ids: list[str] = []
+
+        async def fake_create(iid: str, body: str) -> str:
+            cid = f"comment-{len(created_ids) + 1}"
+            created_ids.append(cid)
+            return cid
+
+        async def fake_update(cid: str, body: str) -> bool:
+            updated_ids.append(cid)
+            return True
+
+        from cymphony.linear import LinearClient
+        import cymphony.orchestrator as orch_mod
+
+        original_init = LinearClient.__init__
+
+        def patched_init(self_client, *args, **kwargs):
+            original_init(self_client, *args, **kwargs)
+            self_client.create_comment = fake_create
+            self_client.update_comment = fake_update
+
+        from unittest.mock import patch
+        with patch.object(LinearClient, "__init__", patched_init):
+            result = ReviewResult(decision=ReviewDecision.PASS, summary="OK")
+            await orch._post_review_result_comment(issue_id, identifier, result)
+
+        assert created_ids == ["comment-1"]
+        assert updated_ids == []
+        assert orch._state.qa_review_comment_ids[issue_id] == "comment-1"
+
+    @pytest.mark.asyncio
+    async def test_retry_updates_existing_comment(self) -> None:
+        orch = _build_orchestrator()
+        issue_id = "issue-1"
+        identifier = "BAP-200"
+
+        # Simulate a comment already posted in a prior attempt
+        orch._state.qa_review_comment_ids[issue_id] = "existing-comment-42"
+
+        created_ids: list[str] = []
+        updated_ids: list[str] = []
+
+        async def fake_create(iid: str, body: str) -> str:
+            cid = f"comment-new-{len(created_ids) + 1}"
+            created_ids.append(cid)
+            return cid
+
+        async def fake_update(cid: str, body: str) -> bool:
+            updated_ids.append(cid)
+            return True
+
+        from cymphony.linear import LinearClient
+        from unittest.mock import patch
+
+        original_init = LinearClient.__init__
+
+        def patched_init(self_client, *args, **kwargs):
+            original_init(self_client, *args, **kwargs)
+            self_client.create_comment = fake_create
+            self_client.update_comment = fake_update
+
+        with patch.object(LinearClient, "__init__", patched_init):
+            result = ReviewResult(decision=None, error="still broken")
+            await orch._post_review_result_comment(issue_id, identifier, result)
+
+        # Should update existing, not create new
+        assert created_ids == []
+        assert updated_ids == ["existing-comment-42"]
+        # Comment ID unchanged
+        assert orch._state.qa_review_comment_ids[issue_id] == "existing-comment-42"
+
+    @pytest.mark.asyncio
+    async def test_update_failure_falls_back_to_create(self) -> None:
+        orch = _build_orchestrator()
+        issue_id = "issue-1"
+        identifier = "BAP-200"
+
+        orch._state.qa_review_comment_ids[issue_id] = "deleted-comment"
+
+        created_ids: list[str] = []
+        updated_ids: list[str] = []
+
+        async def fake_create(iid: str, body: str) -> str:
+            cid = "comment-new"
+            created_ids.append(cid)
+            return cid
+
+        async def fake_update(cid: str, body: str) -> bool:
+            updated_ids.append(cid)
+            return False  # Update failed (comment deleted?)
+
+        from cymphony.linear import LinearClient
+        from unittest.mock import patch
+
+        original_init = LinearClient.__init__
+
+        def patched_init(self_client, *args, **kwargs):
+            original_init(self_client, *args, **kwargs)
+            self_client.create_comment = fake_create
+            self_client.update_comment = fake_update
+
+        with patch.object(LinearClient, "__init__", patched_init):
+            result = ReviewResult(decision=ReviewDecision.PASS, summary="All good")
+            await orch._post_review_result_comment(issue_id, identifier, result)
+
+        # Update failed, so should have fallen back to create
+        assert updated_ids == ["deleted-comment"]
+        assert created_ids == ["comment-new"]
+        assert orch._state.qa_review_comment_ids[issue_id] == "comment-new"
+
+    def test_clear_bounces_also_clears_comment_id(self) -> None:
+        orch = _build_orchestrator()
+        issue_id = "issue-1"
+        orch._state.qa_review_bounces[issue_id] = 1
+        orch._state.qa_review_comment_ids[issue_id] = "comment-123"
+
+        orch._clear_qa_review_bounces(issue_id)
+
+        assert issue_id not in orch._state.qa_review_bounces
+        assert issue_id not in orch._state.qa_review_comment_ids
+
+    @pytest.mark.asyncio
+    async def test_changes_requested_clears_comment_id_for_next_cycle(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch = _build_orchestrator()
+        issue = _build_issue(state="QA Review")
+        entry = _build_running_entry(issue, mode=ExecutionMode.REVIEW)
+        orch._state.running[issue.id] = entry
+
+        async def noop():
+            pass
+
+        task = asyncio.ensure_future(noop())
+        await task
+        entry.task = task
+        _write_review_result(orch, issue.identifier, "changes_requested", "Needs work")
+
+        monkeypatch.setattr(
+            orch, "_transition_issue_state",
+            AsyncMock(return_value=True),
+        )
+        monkeypatch.setattr(orch, "_schedule_retry", AsyncMock())
+
+        # Simulate a comment already tracked
+        orch._state.qa_review_comment_ids[issue.id] = "old-comment"
+
+        # Stub _post_review_result_comment to avoid real Linear calls
+        monkeypatch.setattr(orch, "_post_review_result_comment", AsyncMock())
+
+        await orch._on_worker_done(issue.id, issue.identifier, entry, task)
+
+        # Comment ID should be cleared after CHANGES_REQUESTED
+        assert issue.id not in orch._state.qa_review_comment_ids
 
 
 # ---------------------------------------------------------------------------
