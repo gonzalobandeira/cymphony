@@ -340,6 +340,7 @@ class RetryEntry:
 class ProblemRecord:
     """Recent operator-visible problem captured by the orchestrator."""
     kind: str
+    severity: str  # "error", "warning", "info"
     summary: str
     detail: str
     observed_at: datetime
