@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cymphony.linear import LinearClient
+from cymphony.linear import LinearClient, _normalize_issue
 from cymphony.models import (
     AgentConfig,
     BlockerRef,
@@ -15,6 +15,7 @@ from cymphony.models import (
     Issue,
     LiveSession,
     PollingConfig,
+    PreflightConfig,
     ProblemRecord,
     RetryEntry,
     RunningEntry,
@@ -22,6 +23,7 @@ from cymphony.models import (
     ServerConfig,
     ServiceConfig,
     TrackerConfig,
+    TransitionsConfig,
     WorkflowDefinition,
     WorkspaceConfig,
     HooksConfig,
@@ -64,6 +66,13 @@ def _build_orchestrator() -> Orchestrator:
             dangerously_skip_permissions=True,
         ),
         server=ServerConfig(port=None),
+        preflight=PreflightConfig(
+            enabled=False,
+            required_clis=[],
+            required_env_vars=[],
+            expect_clean_worktree=False,
+            base_branch="main",
+        ),
     )
     workflow = WorkflowDefinition(config={}, prompt_template="")
     return Orchestrator(Path("WORKFLOW.md"), config, workflow)
@@ -78,6 +87,7 @@ def _build_issue(
         id=issue_id,
         identifier=identifier,
         title=identifier,
+        project_name=None,
         description=None,
         priority=None,
         state=state,
@@ -100,6 +110,48 @@ def test_should_dispatch_blocks_in_progress_issue_with_unresolved_dependencies()
     ]
 
     assert orchestrator._should_dispatch(issue) is False
+
+
+def test_maybe_transition_blocked_issue_uses_configured_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    orchestrator = _build_orchestrator()
+    orchestrator._config.transitions = TransitionsConfig(blocked="Blocked")
+    issue = _build_issue(issue_id="issue-2", identifier="BAN-217", state="Todo")
+    issue.blocked_by = [
+        BlockerRef(id="blocker-1", identifier="BAN-215", state="In Progress"),
+    ]
+    transitions: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_transition_issue_state_background",
+        lambda issue_id, state_name, **kw: transitions.append((issue_id, state_name)),
+    )
+
+    orchestrator._maybe_transition_blocked_issue(issue)
+
+    assert transitions == [(issue.id, "Blocked")]
+
+
+def test_maybe_transition_blocked_issue_skips_when_already_in_blocked_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    orchestrator._config.transitions = TransitionsConfig(blocked="Blocked")
+    issue = _build_issue(issue_id="issue-2", identifier="BAN-217", state="Blocked")
+    issue.blocked_by = [
+        BlockerRef(id="blocker-1", identifier="BAN-215", state="In Progress"),
+    ]
+    transitions: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_transition_issue_state_background",
+        lambda issue_id, state_name, **kw: transitions.append((issue_id, state_name)),
+    )
+
+    orchestrator._maybe_transition_blocked_issue(issue)
+
+    assert transitions == []
 
 
 @pytest.mark.asyncio
@@ -234,7 +286,75 @@ async def test_fetch_issues_by_states_scopes_requests_to_configured_project(
     assert [issue.identifier for issue in issues] == ["BAP-153"]
     assert captured_variables == [{"projectSlug": "proj", "states": ["Done"]}]
 
+def test_normalize_issue_reads_project_name() -> None:
+    issue = _normalize_issue(
+        {
+            "id": "issue-148",
+            "identifier": "BAP-148",
+            "title": "Provider abstraction",
+            "project": {"name": "Bandeira"},
+            "description": None,
+            "priority": 2,
+            "state": {"name": "Todo"},
+            "branchName": None,
+            "url": "https://linear.app/bandeira/issue/BAP-148",
+            "labels": {"nodes": []},
+            "relations": {"nodes": []},
+            "inverseRelations": {"nodes": []},
+            "comments": {"nodes": []},
+            "createdAt": "2026-03-28T19:11:32.256Z",
+            "updatedAt": "2026-03-29T09:01:32.404Z",
+        }
+    )
 
+    assert issue is not None
+    assert issue.project_name == "Bandeira"
+
+
+def test_normalize_issue_uses_only_blocked_by_relations_for_blockers() -> None:
+    issue = _normalize_issue(
+        {
+            "id": "issue-148",
+            "identifier": "BAP-148",
+            "title": "Provider abstraction",
+            "description": None,
+            "priority": 2,
+            "state": {"name": "Todo"},
+            "branchName": None,
+            "url": "https://linear.app/bandeira/issue/BAP-148",
+            "labels": {"nodes": []},
+            "relations": {
+                "nodes": [
+                    {
+                        "type": "blocks",
+                        "relatedIssue": {
+                            "id": "issue-149",
+                            "identifier": "BAP-149",
+                            "state": {"name": "Todo"},
+                        },
+                    },
+                ]
+            },
+            "inverseRelations": {
+                "nodes": [
+                    {
+                        "type": "blocks",
+                        "issue": {
+                            "id": "issue-150",
+                            "identifier": "BAP-150",
+                            "state": {"name": "In Progress"},
+                        },
+                    }
+                ]
+            },
+            "comments": {"nodes": []},
+            "createdAt": "2026-03-28T19:11:32.256Z",
+            "updatedAt": "2026-03-29T09:01:32.404Z",
+        }
+    )
+
+    assert issue is not None
+    assert [blocker.identifier for blocker in issue.blocked_by] == ["BAP-150"]
 @pytest.mark.asyncio
 async def test_startup_terminal_cleanup_removes_only_matching_workspaces_and_logs_project_context(
     monkeypatch: pytest.MonkeyPatch,
@@ -601,11 +721,9 @@ async def test_transition_state_cache_is_scoped_by_team(monkeypatch: pytest.Monk
 
     monkeypatch.setattr("cymphony.orchestrator.LinearClient", FakeLinearClient)
 
-    orchestrator._transition_issue_state("issue-a", "In Review")
-    orchestrator._transition_issue_state("issue-b", "In Review")
-    orchestrator._transition_issue_state("issue-a", "In Review")
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    await orchestrator._transition_issue_state("issue-a", "In Review")
+    await orchestrator._transition_issue_state("issue-b", "In Review")
+    await orchestrator._transition_issue_state("issue-a", "In Review")
 
     assert state_calls == [
         ("team-a", "In Review"),
@@ -620,3 +738,405 @@ async def test_transition_state_cache_is_scoped_by_team(monkeypatch: pytest.Monk
         ("team-a", "in review"): "state-a-review",
         ("team-b", "in review"): "state-b-review",
     }
+
+
+@pytest.mark.asyncio
+async def test_on_worker_done_waits_for_in_review_transition_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    issue = _build_issue(state="In Progress")
+    entry = RunningEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        issue=issue,
+        task=None,
+        session=LiveSession(
+            session_id=None,
+            pid=None,
+            last_event=None,
+            last_event_timestamp=None,
+            last_message=None,
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            last_reported_input_tokens=0,
+            last_reported_output_tokens=0,
+            last_reported_total_tokens=0,
+            turn_count=0,
+        ),
+        retry_attempt=None,
+        started_at=datetime.now(timezone.utc),
+    )
+    events: list[str] = []
+
+    async def fake_transition(issue_id: str, state_name: str, **kw: object) -> bool:
+        events.append(f"transition:{issue_id}:{state_name}")
+        return True
+
+    async def fake_schedule_retry(
+        issue_id: str,
+        identifier: str,
+        attempt: int,
+        delay_ms: float | None = None,
+        error: str | None = None,
+        entry: RunningEntry | None = None,
+    ) -> None:
+        events.append(f"retry:{issue_id}:{attempt}")
+
+    async def fake_worker() -> None:
+        return None
+
+    monkeypatch.setattr(orchestrator, "_transition_issue_state", fake_transition)
+    monkeypatch.setattr(orchestrator, "_schedule_retry", fake_schedule_retry)
+
+    task = asyncio.create_task(fake_worker())
+    await task
+    await orchestrator._on_worker_done(issue.id, issue.identifier, entry, task)
+
+    assert events == [
+        f"transition:{issue.id}:In Review",
+        f"retry:{issue.id}:1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_on_worker_done_preserves_transition_metadata_after_running_entry_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    issue = _build_issue(state="In Progress")
+    entry = RunningEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        issue=issue,
+        task=None,
+        session=LiveSession(
+            session_id=None,
+            pid=None,
+            last_event=None,
+            last_event_timestamp=None,
+            last_message=None,
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            last_reported_input_tokens=0,
+            last_reported_output_tokens=0,
+            last_reported_total_tokens=0,
+            turn_count=0,
+        ),
+        retry_attempt=None,
+        started_at=datetime.now(timezone.utc),
+    )
+    orchestrator._state.running[issue.id] = entry
+
+    class FakeLinearClient:
+        def __init__(self, _config: object) -> None:
+            pass
+
+        async def fetch_issue_team_id(self, issue_id: str) -> str:
+            assert issue_id == issue.id
+            return "team-1"
+
+        async def fetch_team_workflow_state_id(self, team_id: str, state_name: str) -> str:
+            assert team_id == "team-1"
+            assert state_name == "In Review"
+            return "state-1"
+
+        async def set_issue_state(self, issue_id: str, state_id: str) -> None:
+            assert issue_id == issue.id
+            assert state_id == "state-1"
+
+    async def fake_schedule_retry(
+        issue_id: str,
+        identifier: str,
+        attempt: int,
+        delay_ms: float | None = None,
+        error: str | None = None,
+        entry: RunningEntry | None = None,
+    ) -> None:
+        return None
+
+    async def fake_worker() -> None:
+        return None
+
+    monkeypatch.setattr("cymphony.orchestrator.LinearClient", FakeLinearClient)
+    monkeypatch.setattr(orchestrator, "_schedule_retry", fake_schedule_retry)
+
+    task = asyncio.create_task(fake_worker())
+    await task
+    await orchestrator._on_worker_done(issue.id, issue.identifier, entry, task)
+
+    assert len(orchestrator._state.transition_history) == 1
+    record = orchestrator._state.transition_history[0]
+    assert record.issue_identifier == issue.identifier
+    assert record.from_state == "In Progress"
+    assert record.to_state == "In Review"
+    assert record.trigger == "success"
+    assert record.success is True
+
+
+@pytest.mark.asyncio
+async def test_on_worker_done_uses_custom_success_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the orchestrator honours a non-default success transition."""
+    orchestrator = _build_orchestrator()
+    orchestrator._config.transitions = TransitionsConfig(success="Completed")
+    issue = _build_issue(state="In Progress")
+    entry = RunningEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        issue=issue,
+        task=None,
+        session=LiveSession(
+            session_id=None,
+            pid=None,
+            last_event=None,
+            last_event_timestamp=None,
+            last_message=None,
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            last_reported_input_tokens=0,
+            last_reported_output_tokens=0,
+            last_reported_total_tokens=0,
+            turn_count=0,
+        ),
+        retry_attempt=None,
+        started_at=datetime.now(timezone.utc),
+    )
+    events: list[str] = []
+
+    async def fake_transition(issue_id: str, state_name: str, **kw: object) -> bool:
+        events.append(f"transition:{issue_id}:{state_name}")
+        return True
+
+    async def fake_schedule_retry(
+        issue_id: str,
+        identifier: str,
+        attempt: int,
+        delay_ms: float | None = None,
+        error: str | None = None,
+        entry: RunningEntry | None = None,
+    ) -> None:
+        events.append(f"retry:{issue_id}:{attempt}")
+
+    async def fake_worker() -> None:
+        return None
+
+    monkeypatch.setattr(orchestrator, "_transition_issue_state", fake_transition)
+    monkeypatch.setattr(orchestrator, "_schedule_retry", fake_schedule_retry)
+
+    task = asyncio.create_task(fake_worker())
+    await task
+    await orchestrator._on_worker_done(issue.id, issue.identifier, entry, task)
+
+    assert events == [
+        f"transition:{issue.id}:Completed",
+        f"retry:{issue.id}:1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_on_worker_done_skips_transition_when_success_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When success transition is disabled, no state change should occur."""
+    orchestrator = _build_orchestrator()
+    orchestrator._config.transitions = TransitionsConfig(success=None)
+    issue = _build_issue(state="In Progress")
+    entry = RunningEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        issue=issue,
+        task=None,
+        session=LiveSession(
+            session_id=None,
+            pid=None,
+            last_event=None,
+            last_event_timestamp=None,
+            last_message=None,
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            last_reported_input_tokens=0,
+            last_reported_output_tokens=0,
+            last_reported_total_tokens=0,
+            turn_count=0,
+        ),
+        retry_attempt=None,
+        started_at=datetime.now(timezone.utc),
+    )
+    events: list[str] = []
+
+    async def fake_transition(issue_id: str, state_name: str, **kw: object) -> bool:
+        events.append(f"transition:{issue_id}:{state_name}")
+        return True
+
+    async def fake_schedule_retry(
+        issue_id: str,
+        identifier: str,
+        attempt: int,
+        delay_ms: float | None = None,
+        error: str | None = None,
+        entry: RunningEntry | None = None,
+    ) -> None:
+        events.append(f"retry:{issue_id}:{attempt}")
+
+    async def fake_worker() -> None:
+        return None
+
+    monkeypatch.setattr(orchestrator, "_transition_issue_state", fake_transition)
+    monkeypatch.setattr(orchestrator, "_schedule_retry", fake_schedule_retry)
+
+    task = asyncio.create_task(fake_worker())
+    await task
+    await orchestrator._on_worker_done(issue.id, issue.identifier, entry, task)
+
+    # No transition event — only the retry
+    assert events == [
+        f"retry:{issue.id}:1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_retry_releases_blocked_issue_and_applies_blocked_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    orchestrator._config.transitions = TransitionsConfig(blocked="Blocked")
+    issue = _build_issue(state="Todo")
+    issue.blocked_by = [
+        BlockerRef(id="blocker-1", identifier="BAP-170", state="In Progress"),
+    ]
+    orchestrator._state.claimed.add(issue.id)
+    orchestrator._state.completed.add(issue.id)
+    retry_entry = RetryEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        attempt=1,
+        due_at_ms=0.0,
+        error=None,
+    )
+    orchestrator._state.retry_attempts[issue.id] = retry_entry
+    transitions: list[tuple[str, str]] = []
+
+    class FakeLinearClient:
+        def __init__(self, tracker_config: TrackerConfig) -> None:
+            pass
+
+        async def fetch_candidate_issues(self) -> list[Issue]:
+            return [issue]
+
+    monkeypatch.setattr("cymphony.orchestrator.LinearClient", FakeLinearClient)
+    monkeypatch.setattr(
+        orchestrator,
+        "_transition_issue_state_background",
+        lambda issue_id, state_name, **kw: transitions.append((issue_id, state_name)),
+    )
+
+    await orchestrator._on_retry_timer(issue.id)
+
+    assert transitions == [(issue.id, "Blocked")]
+    assert issue.id not in orchestrator._state.claimed
+    assert issue.id not in orchestrator._state.completed
+
+
+@pytest.mark.asyncio
+async def test_dispatch_skips_transition_when_dispatch_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When dispatch transition is disabled, no state change should occur on dispatch."""
+    orchestrator = _build_orchestrator()
+    orchestrator._config.transitions = TransitionsConfig(dispatch=None)
+    issue = _build_issue()
+    transitions: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_transition_issue_state_background",
+        lambda issue_id, state_name, **kw: transitions.append((issue_id, state_name)),
+    )
+
+    async def fake_worker(issue, attempt, entry):
+        return None
+
+    monkeypatch.setattr(orchestrator, "_worker", fake_worker)
+
+    await orchestrator._dispatch_issue(issue, attempt=None)
+
+    assert transitions == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_uses_custom_dispatch_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the orchestrator honours a non-default dispatch transition."""
+    orchestrator = _build_orchestrator()
+    orchestrator._config.transitions = TransitionsConfig(dispatch="Working")
+    issue = _build_issue()
+    transitions: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_transition_issue_state_background",
+        lambda issue_id, state_name, **kw: transitions.append((issue_id, state_name)),
+    )
+
+    async def fake_worker(issue, attempt, entry):
+        return None
+
+    monkeypatch.setattr(orchestrator, "_worker", fake_worker)
+
+    await orchestrator._dispatch_issue(issue, attempt=None)
+
+    assert transitions == [(issue.id, "Working")]
+
+
+def test_snapshot_includes_workflow_config_and_transition_history() -> None:
+    orchestrator = _build_orchestrator()
+    orchestrator._config.transitions = TransitionsConfig(
+        dispatch="In Progress",
+        success="In Review",
+        failure="Failed",
+        blocked=None,
+        cancelled=None,
+    )
+
+    # Record a transition manually
+    orchestrator._record_transition(
+        "issue-1", "BAP-100", "Todo", "In Progress", "dispatch", success=True,
+    )
+
+    snap = orchestrator.snapshot()
+
+    assert "workflow_config" in snap
+    wc = snap["workflow_config"]
+    assert wc["active_states"] == ["Todo", "In Progress"]
+    assert wc["terminal_states"] == ["Done"]
+    assert wc["transitions"]["dispatch"] == "In Progress"
+    assert wc["transitions"]["success"] == "In Review"
+    assert wc["transitions"]["failure"] == "Failed"
+    assert wc["transitions"]["blocked"] is None
+
+    assert "transition_history" in snap
+    assert len(snap["transition_history"]) == 1
+    t = snap["transition_history"][0]
+    assert t["issue_identifier"] == "BAP-100"
+    assert t["from_state"] == "Todo"
+    assert t["to_state"] == "In Progress"
+    assert t["trigger"] == "dispatch"
+    assert t["success"] is True
+
+
+def test_record_transition_caps_history_size() -> None:
+    orchestrator = _build_orchestrator()
+    for i in range(60):
+        orchestrator._record_transition(
+            f"issue-{i}", f"BAP-{i}", "Todo", "In Progress", "dispatch", success=True,
+        )
+
+    assert len(orchestrator._state.transition_history) == 50
+    assert orchestrator._state.transition_history[0].issue_identifier == "BAP-59"

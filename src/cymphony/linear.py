@@ -41,6 +41,7 @@ query CandidateIssues($projectSlug: String!, $states: [String!]!, $after: String
       id
       identifier
       title
+      project { name }
       description
       priority
       state { name }
@@ -51,6 +52,16 @@ query CandidateIssues($projectSlug: String!, $states: [String!]!, $after: String
         nodes {
           type
           relatedIssue {
+            id
+            identifier
+            state { name }
+          }
+        }
+      }
+      inverseRelations {
+        nodes {
+          type
+          issue {
             id
             identifier
             state { name }
@@ -90,6 +101,7 @@ query CandidateIssues($projectSlug: String!, $states: [String!]!, $after: String
       id
       identifier
       title
+      project { name }
       description
       priority
       state { name }
@@ -100,6 +112,16 @@ query CandidateIssues($projectSlug: String!, $states: [String!]!, $after: String
         nodes {
           type
           relatedIssue {
+            id
+            identifier
+            state { name }
+          }
+        }
+      }
+      inverseRelations {
+        nodes {
+          type
+          issue {
             id
             identifier
             state { name }
@@ -138,7 +160,30 @@ query ProjectIssuesByStates($projectSlug: String!, $states: [String!]!, $after: 
     nodes {
       id
       identifier
+      title
+      project { name }
       state { name }
+      url
+      updatedAt
+    }
+  }
+}
+""" % {"page_size": _PAGE_SIZE}
+
+# Project-scoped teams (for transition validation)
+_PROJECT_TEAMS_QUERY = """
+query ProjectTeams($projectSlug: String!, $after: String) {
+  issues(
+    first: %(page_size)d,
+    after: $after,
+    filter: { project: { slugId: { eq: $projectSlug } } }
+  ) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      team { id }
     }
   }
 }
@@ -155,6 +200,7 @@ query IssueStatesByIds($ids: [ID!]!) {
       id
       identifier
       title
+      project { name }
       description
       priority
       state { name }
@@ -165,6 +211,16 @@ query IssueStatesByIds($ids: [ID!]!) {
         nodes {
           type
           relatedIssue {
+            id
+            identifier
+            state { name }
+          }
+        }
+      }
+      inverseRelations {
+        nodes {
+          type
+          issue {
             id
             identifier
             state { name }
@@ -338,6 +394,62 @@ class LinearClient:
         )
         return issues
 
+    async def fetch_project_team_ids(self) -> list[str]:
+        """Return all team IDs that have issues in the configured project."""
+        team_ids: set[str] = set()
+        after: str | None = None
+
+        async with aiohttp.ClientSession(
+            headers=self._headers(), timeout=_NETWORK_TIMEOUT
+        ) as session:
+            while True:
+                variables: dict[str, Any] = {
+                    "projectSlug": self._config.project_slug,
+                }
+                if after:
+                    variables["after"] = after
+
+                data = await self._request(session, _PROJECT_TEAMS_QUERY, variables)
+                page = data.get("issues") or {}
+                nodes = page.get("nodes") or []
+                page_info = page.get("pageInfo") or {}
+
+                for node in nodes:
+                    tid = (node.get("team") or {}).get("id")
+                    if tid:
+                        team_ids.add(tid)
+
+                has_next = page_info.get("hasNextPage", False)
+                if not has_next:
+                    break
+
+                end_cursor = page_info.get("endCursor")
+                if not end_cursor:
+                    raise TrackerError(
+                        "linear_missing_end_cursor",
+                        "Linear pagination: hasNextPage=true but endCursor is missing",
+                    )
+                after = end_cursor
+
+        return sorted(team_ids)
+
+    async def fetch_team_workflow_state_names(self, team_id: str) -> list[str]:
+        """Return all workflow state names for a Linear team."""
+        query = """
+query TeamWorkflowStates($teamId: ID!) {
+  workflowStates(filter: { team: { id: { eq: $teamId } } }) {
+    nodes { id name }
+  }
+}
+"""
+        async with aiohttp.ClientSession(
+            headers=self._headers(), timeout=_NETWORK_TIMEOUT
+        ) as session:
+            data = await self._request(session, query, {"teamId": team_id})
+
+        nodes = (data.get("workflowStates") or {}).get("nodes") or []
+        return [n.get("name") for n in nodes if n.get("name")]
+
     async def fetch_issue_team_id(self, issue_id: str) -> str | None:
         """Return the owning Linear team ID for an issue."""
         team_query = """
@@ -416,6 +528,11 @@ mutation IssueUpdate($id: String!, $stateId: String!) {
             f"action=set_issue_state_result issue_id={issue_id} "
             f"state_id={state_id} success={success}"
         )
+        if not success:
+            raise TrackerError(
+                "linear_issue_state_update_failed",
+                f"issueUpdate returned success={success!r} for issue {issue_id}",
+            )
 
     async def create_comment(self, issue_id: str, body: str) -> str:
         """Create a comment on an issue and return the comment ID."""
@@ -497,13 +614,14 @@ def _normalize_issue(node: dict[str, Any]) -> Issue | None:
     label_nodes = (node.get("labels") or {}).get("nodes") or []
     labels = [str(ln.get("name", "")).lower() for ln in label_nodes if ln.get("name")]
 
-    # blocked_by from relations of type "blocks" (filter client-side; API has no filter arg)
-    relation_nodes = (node.get("relations") or {}).get("nodes") or []
+    # Linear exposes blockers through inverseRelations. For a blocker edge,
+    # inverseRelations[].issue is the upstream blocking issue and relatedIssue is self.
+    relation_nodes = (node.get("inverseRelations") or {}).get("nodes") or []
     blocked_by = []
     for rel in relation_nodes:
         if rel.get("type") != "blocks":
             continue
-        related = rel.get("relatedIssue") or {}
+        related = rel.get("issue") or {}
         blocker_state_obj = related.get("state") or {}
         blocked_by.append(BlockerRef(
             id=related.get("id"),
@@ -533,6 +651,7 @@ def _normalize_issue(node: dict[str, Any]) -> Issue | None:
         id=issue_id,
         identifier=identifier,
         title=title,
+        project_name=((node.get("project") or {}).get("name")),
         description=node.get("description"),
         priority=priority,
         state=state,
@@ -547,7 +666,7 @@ def _normalize_issue(node: dict[str, Any]) -> Issue | None:
 
 
 def _normalize_issue_minimal(node: dict[str, Any]) -> Issue | None:
-    """Normalize a minimal issue node (id, identifier, state only)."""
+    """Normalize a minimal issue node (id, identifier, state, and optional enrichment fields)."""
     if not node:
         return None
     issue_id = node.get("id")
@@ -559,17 +678,18 @@ def _normalize_issue_minimal(node: dict[str, Any]) -> Issue | None:
     return Issue(
         id=issue_id,
         identifier=identifier,
-        title="",
+        title=node.get("title") or "",
+        project_name=((node.get("project") or {}).get("name")),
         description=None,
         priority=None,
         state=state,
         branch_name=None,
-        url=None,
+        url=node.get("url"),
         labels=[],
         blocked_by=[],
         comments=[],
         created_at=None,
-        updated_at=None,
+        updated_at=_parse_dt(node.get("updatedAt")),
     )
 
 

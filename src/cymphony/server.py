@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
-from .config import build_config
+from .config import build_config, validate_dispatch_config
 from .linear import LinearClient
 from .models import Issue, WorkflowDefinition
 from .workflow import load_workflow, save_workflow
@@ -36,6 +36,7 @@ _DEFAULT_SETUP_FORM = {
     "max_concurrent_agents": "5",
     "max_turns": "20",
     "max_retry_backoff_ms": "300000",
+    "provider": "claude",
     "command": "claude",
     "turn_timeout_ms": "3600000",
     "stall_timeout_ms": "300000",
@@ -46,6 +47,11 @@ _DEFAULT_SETUP_FORM = {
     "before_remove": "",
     "hooks_timeout_ms": "120000",
     "server_port": "8080",
+    "qa_review_enabled": False,
+    "qa_review_dispatch": "QA Review",
+    "qa_review_success": "In Review",
+    "qa_review_failure": "Todo",
+    "review_prompt": "",
     "prompt_template": """You are a senior software engineer working on the project.\n\n## Issue\n\n**Title:** {{ issue.title }}\n**Identifier:** {{ issue.identifier }}\n**State:** {{ issue.state }}\n{% if issue.description %}\n**Description:**\n{{ issue.description }}\n{% endif %}\n\n## Instructions\n\n1. Read the issue carefully.\n2. Create and checkout a branch named `agent/{{ issue.identifier | lower }}`.\n3. Implement the requested change.\n4. Update tests as needed.\n5. Keep changes minimal and consistent with the codebase.\n""",
 }
 
@@ -208,7 +214,7 @@ def _render_issue_drilldown(entry: dict, retry_due: str | None = None) -> str:
     ]
 
     return f"""
-<details class="issue-drilldown">
+<details class="issue-drilldown" data-id="{escape(str(entry.get('issue_identifier') or ''), quote=True)}">
   <summary>{escape(str(entry.get("issue_identifier") or ""))} <span class="muted">{escape(" · ".join(summary_bits))}</span></summary>
   <div class="drill-grid">
     <section class="detail-card detail-wide">
@@ -256,6 +262,8 @@ def _workflow_form_data(
         codex = raw.get("codex") or {}
         hooks = raw.get("hooks") or {}
         server = raw.get("server") or {}
+        transitions = raw.get("transitions") or {}
+        qa_review = transitions.get("qa_review") or {}
 
         data.update(
             {
@@ -270,6 +278,7 @@ def _workflow_form_data(
                 "max_concurrent_agents": str(agent.get("max_concurrent_agents") or data["max_concurrent_agents"]),
                 "max_turns": str(agent.get("max_turns") or data["max_turns"]),
                 "max_retry_backoff_ms": str(agent.get("max_retry_backoff_ms") or data["max_retry_backoff_ms"]),
+                "provider": str(agent.get("provider") or data["provider"]),
                 "command": str(codex.get("command") or data["command"]),
                 "turn_timeout_ms": str(codex.get("turn_timeout_ms") or data["turn_timeout_ms"]),
                 "stall_timeout_ms": str(codex.get("stall_timeout_ms") or data["stall_timeout_ms"]),
@@ -280,6 +289,11 @@ def _workflow_form_data(
                 "before_remove": str(hooks.get("before_remove") or ""),
                 "hooks_timeout_ms": str(hooks.get("timeout_ms") or data["hooks_timeout_ms"]),
                 "server_port": str(server.get("port") or data["server_port"]),
+                "qa_review_enabled": bool(qa_review.get("enabled", False)),
+                "qa_review_dispatch": str(qa_review.get("dispatch") or data["qa_review_dispatch"]),
+                "qa_review_success": str(qa_review.get("success") or data["qa_review_success"]),
+                "qa_review_failure": str(qa_review.get("failure") or data["qa_review_failure"]),
+                "review_prompt": str(raw.get("review_prompt") or ""),
                 "prompt_template": workflow.prompt_template or data["prompt_template"],
             }
         )
@@ -326,6 +340,7 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
             "max_concurrent_agents": int(str(form.get("max_concurrent_agents") or "5")),
             "max_turns": int(str(form.get("max_turns") or "20")),
             "max_retry_backoff_ms": int(str(form.get("max_retry_backoff_ms") or "300000")),
+            "provider": str(form.get("provider") or "claude").strip().lower(),
         },
         "codex": {
             "command": str(form.get("command") or "claude").strip(),
@@ -338,6 +353,24 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
             "port": int(str(form.get("server_port") or "8080")),
         },
     }
+
+    qa_enabled = bool(form.get("qa_review_enabled"))
+    qa_dispatch = str(form.get("qa_review_dispatch") or "").strip()
+    qa_success = str(form.get("qa_review_success") or "").strip()
+    qa_failure = str(form.get("qa_review_failure") or "").strip()
+    if qa_enabled or qa_dispatch or qa_success or qa_failure:
+        config["transitions"] = {
+            "qa_review": {
+                "enabled": qa_enabled,
+                "dispatch": qa_dispatch or None,
+                "success": qa_success or None,
+                "failure": qa_failure or None,
+            }
+        }
+
+    review_prompt = str(form.get("review_prompt") or "").strip()
+    if review_prompt:
+        config["review_prompt"] = review_prompt
 
     return WorkflowDefinition(
         config=config,
@@ -364,6 +397,11 @@ def _validate_workflow_form(form: dict[str, object]) -> list[str]:
     if not workflow.config["codex"].get("command"):
         errors.append("codex.command is required.")
 
+    from .models import SUPPORTED_PROVIDERS
+    agent_provider = workflow.config.get("agent", {}).get("provider", "claude")
+    if agent_provider not in SUPPORTED_PROVIDERS:
+        errors.append(f"agent.provider must be one of: {', '.join(SUPPORTED_PROVIDERS)}.")
+
     config = build_config(workflow)
     if config.agent.max_concurrent_agents <= 0:
         errors.append("agent.max_concurrent_agents must be greater than zero.")
@@ -371,6 +409,10 @@ def _validate_workflow_form(form: dict[str, object]) -> list[str]:
         errors.append("agent.max_turns must be greater than zero.")
     if config.polling.interval_ms <= 0:
         errors.append("polling.interval_ms must be greater than zero.")
+    for error in validate_dispatch_config(config).errors:
+        if error == "tracker.api_key is missing or resolved to empty string":
+            continue
+        errors.append(error)
 
     return errors
 
@@ -425,7 +467,7 @@ def _render_setup_page(
     .grid {{ display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }}
     .card {{ background: #fff; border: 1px solid #d1d5db; border-radius: 12px; padding: 18px; }}
     label {{ display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px; }}
-    input, textarea {{ width: 100%; box-sizing: border-box; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px 12px; font: inherit; }}
+    input, textarea, select {{ width: 100%; box-sizing: border-box; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px 12px; font: inherit; }}
     textarea {{ min-height: 120px; resize: vertical; }}
     .full {{ grid-column: 1 / -1; }}
     .notice {{ border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }}
@@ -494,6 +536,13 @@ def _render_setup_page(
         <input id="max_retry_backoff_ms" name="max_retry_backoff_ms" value="{field("max_retry_backoff_ms")}" required />
       </section>
       <section class="card">
+        <label for="provider">Agent provider</label>
+        <select id="provider" name="provider">
+          <option value="claude"{"" if field("provider") == "codex" else " selected"}>claude</option>
+          <option value="codex"{" selected" if field("provider") == "codex" else ""}>codex</option>
+        </select>
+      </section>
+      <section class="card">
         <label for="command">Agent command</label>
         <input id="command" name="command" value="{field("command")}" required />
       </section>
@@ -513,6 +562,23 @@ def _render_setup_page(
         <label>Permissions</label>
         <label class="check"><input type="checkbox" name="dangerously_skip_permissions" value="1"{_checkbox_checked(values.get("dangerously_skip_permissions"))} />Dangerously skip permissions</label>
       </section>
+      <section class="card">
+        <label>QA review lane</label>
+        <label class="check"><input type="checkbox" name="qa_review_enabled" value="1"{_checkbox_checked(values.get("qa_review_enabled"))} />Enable implementation → QA Review → human review</label>
+        <div class="muted">When enabled, successful implementation runs move into the QA review state first.</div>
+      </section>
+      <section class="card">
+        <label for="qa_review_dispatch">QA review dispatch state</label>
+        <input id="qa_review_dispatch" name="qa_review_dispatch" value="{field("qa_review_dispatch")}" />
+      </section>
+      <section class="card">
+        <label for="qa_review_success">QA review pass state</label>
+        <input id="qa_review_success" name="qa_review_success" value="{field("qa_review_success")}" />
+      </section>
+      <section class="card">
+        <label for="qa_review_failure">QA review failure state</label>
+        <input id="qa_review_failure" name="qa_review_failure" value="{field("qa_review_failure")}" />
+      </section>
       <section class="card full">
         <label for="after_create">after_create hook</label>
         <textarea id="after_create" name="after_create">{field("after_create")}</textarea>
@@ -528,6 +594,11 @@ def _render_setup_page(
       <section class="card full">
         <label for="before_remove">before_remove hook</label>
         <textarea id="before_remove" name="before_remove">{field("before_remove")}</textarea>
+      </section>
+      <section class="card full">
+        <label for="review_prompt">QA review prompt template</label>
+        <textarea id="review_prompt" name="review_prompt">{field("review_prompt")}</textarea>
+        <div class="muted">Optional. Used only for issues in the QA review dispatch state.</div>
       </section>
       <section class="card full">
         <label for="prompt_template">Prompt template</label>
@@ -702,8 +773,9 @@ def _build_operator_groups(
                 "identifier": issue.identifier,
                 "title": issue.title,
                 "state": issue.state,
+                "project": issue.project_name,
                 "url": issue.url,
-                "updated_at": issue.updated_at.isoformat() if issue.updated_at else None,
+                "last_worked_on": issue.updated_at.isoformat() if issue.updated_at else None,
             }
             for issue in recently_completed
         ],
@@ -761,6 +833,12 @@ def _render_issue_link(identifier: str, title: str, url: str | None) -> str:
     return f"<a href='{escape(url)}'>{label}</a>"
 
 
+def _render_linear_link(url: str | None) -> str:
+    if not url:
+        return "-"
+    return f"<a href='{escape(url)}' target='_blank' rel='noreferrer'>Open</a>"
+
+
 def _render_table(title: str, subtitle: str, headers: list[str], rows: list[list[str]], empty: str) -> str:
     table_body = "".join(
         "<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>"
@@ -810,6 +888,8 @@ def _render_operator_cards(
                     ("Attempt", str(row.get("attempt") or "")),
                     ("Due in", _format_relative_due(row.get("due_at"), _now_utc())),
                     ("Why", str(row.get("error") or "Continuation retry")),
+                    ("Started", _format_timestamp(row.get("started_at"))),
+                    ("Last event", _format_timestamp(row.get("last_event_at"))),
                 ]
                 action_html = _issue_controls(str(row.get("issue_identifier") or ""))
                 drilldown = _render_issue_drilldown(
@@ -842,15 +922,15 @@ def _render_operator_cards(
     )
 
 
-def _render_problems_panel(problems: list[dict]) -> str:
-    """Render the dedicated problems panel shown above the main layout."""
+def _render_problems_panel(problems: list[dict[str, object]]) -> str:
+    """Render a high-priority panel for active operator problems."""
     if not problems:
         return ""
 
-    error_count = sum(1 for p in problems if p.get("severity") == "error")
-    warning_count = sum(1 for p in problems if p.get("severity") == "warning")
+    error_count = sum(1 for problem in problems if problem.get("severity") == "error")
+    warning_count = sum(1 for problem in problems if problem.get("severity") == "warning")
 
-    counts_parts = []
+    counts_parts: list[str] = []
     if error_count:
         counts_parts.append(f"{error_count} error{'s' if error_count != 1 else ''}")
     if warning_count:
@@ -858,40 +938,34 @@ def _render_problems_panel(problems: list[dict]) -> str:
     subtitle = " · ".join(counts_parts) if counts_parts else f"{len(problems)} problem{'s' if len(problems) != 1 else ''}"
 
     rows: list[str] = []
-    for p in problems:
-        severity = p.get("severity", "error")
-        kind = escape(str(p.get("kind") or ""))
-        summary_text = escape(str(p.get("summary") or ""))
-        detail_text = escape(str(p.get("detail") or ""))
-        observed = escape(_format_timestamp(p.get("observed_at")))
-        issue_id = p.get("issue_identifier")
-
-        severity_class = f"problem-{severity}"
-        severity_label = severity.upper()
+    for problem in problems:
+        severity = escape(str(problem.get("severity") or "error"))
+        kind = escape(str(problem.get("kind") or ""))
+        summary = escape(str(problem.get("summary") or ""))
+        detail = escape(str(problem.get("detail") or ""))
+        observed_at = escape(_format_timestamp(problem.get("observed_at")))
+        issue_identifier = problem.get("issue_identifier")
 
         issue_cell = "-"
-        if issue_id:
-            safe_id = escape(str(issue_id))
-            issue_cell = f"<a href='/api/v1/{escape(str(issue_id), quote=True)}'>{safe_id}</a>"
+        if issue_identifier:
+            safe_identifier = escape(str(issue_identifier))
+            issue_cell = f"<a href='/api/v1/{escape(str(issue_identifier), quote=True)}'>{safe_identifier}</a>"
 
         rows.append(
-            f"<tr class='{severity_class}'>"
-            f"<td><span class='severity-badge severity-{severity}'>{severity_label}</span></td>"
+            f"<tr class='problem-{severity}'>"
+            f"<td><span class='severity-badge severity-{severity}'>{severity.upper()}</span></td>"
             f"<td>{issue_cell}</td>"
-            f"<td><strong>{summary_text}</strong><div class='muted small'>{detail_text}</div></td>"
+            f"<td><strong>{summary}</strong><div class='muted small'>{detail}</div></td>"
             f"<td class='muted'>{kind}</td>"
-            f"<td class='muted'>{observed}</td>"
+            f"<td class='muted'>{observed_at}</td>"
             "</tr>"
         )
 
     return (
         "<section class='panel problems-panel'>"
-        f"<div class='panel-head'><h2>Problems ({len(problems)})</h2>"
-        f"<p>{escape(subtitle)}</p></div>"
+        f"<div class='panel-head'><h2>Problems ({len(problems)})</h2><p>{escape(subtitle)}</p></div>"
         "<div class='table-wrap'>"
-        "<table><thead><tr>"
-        "<th>Severity</th><th>Issue</th><th>Problem</th><th>Kind</th><th>Observed</th>"
-        "</tr></thead><tbody>"
+        "<table><thead><tr><th>Severity</th><th>Issue</th><th>Problem</th><th>Kind</th><th>Observed</th></tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table></div></section>"
     )
@@ -937,27 +1011,106 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         for row in recent_controls[:10]
     ]
 
+    # --- Workflow config section ---
+    wf_config = groups.get("workflow_config") or {}
+    wf_transitions = wf_config.get("transitions") or {}
+    wf_qa = wf_transitions.get("qa_review") or {}
+    wf_active = ", ".join(str(s) for s in (wf_config.get("active_states") or []))
+    wf_terminal = ", ".join(str(s) for s in (wf_config.get("terminal_states") or []))
+    transition_rule_rows = []
+    for event_name in ("dispatch", "success", "failure", "blocked", "cancelled"):
+        target = wf_transitions.get(event_name)
+        transition_rule_rows.append([
+            escape(event_name),
+            escape(str(target)) if target else "<span class='muted'>not configured</span>",
+        ])
+    for event_name in ("dispatch", "success", "failure"):
+        target = wf_qa.get(event_name)
+        transition_rule_rows.append([
+            escape(f"qa_review.{event_name}"),
+            escape(str(target)) if target else "<span class='muted'>not configured</span>",
+        ])
+
+    workflow_config_section = (
+        "<section class='panel'>"
+        "<div class='panel-head'><h2>Workflow Configuration</h2>"
+        "<p>Active states, terminal states, and transition rules from WORKFLOW.md.</p></div>"
+        "<div class='kv'><span class='k'>Active states</span>"
+        f"<span class='v'>{escape(wf_active) or '<span class=\"muted\">none</span>'}</span></div>"
+        "<div class='kv'><span class='k'>Terminal states</span>"
+        f"<span class='v'>{escape(wf_terminal) or '<span class=\"muted\">none</span>'}</span></div>"
+        "<div class='kv'><span class='k'>QA review lane</span>"
+        f"<span class='v'>{'enabled' if wf_qa.get('enabled') else 'disabled'}</span></div>"
+        "<div class='table-wrap' style='margin-top: 10px'>"
+        "<table><thead><tr><th>Event</th><th>Target state</th></tr></thead><tbody>"
+        + "".join(
+            f"<tr><td>{row[0]}</td><td>{row[1]}</td></tr>"
+            for row in transition_rule_rows
+        )
+        + "</tbody></table></div></section>"
+    )
+
+    # --- Recent transitions section ---
+    transition_history = list(groups.get("transition_history") or [])[:20]
+    transition_rows = [
+        [
+            escape(str(row.get("issue_identifier") or "")),
+            escape(str(row.get("trigger") or "")),
+            escape(str(row.get("from_state") or "?")),
+            escape(str(row.get("to_state") or "")),
+            "<span class='pill active'>ok</span>" if row.get("success") else "<span class='pill paused'>fail</span>",
+            escape(_format_timestamp(row.get("timestamp"))),
+        ]
+        for row in transition_history
+    ]
+
     queue_sections = []
+
+    queue_sections.append(workflow_config_section)
+    queue_sections.append(
+        _render_table(
+            f"Recent Transitions ({len(transition_rows)})",
+            "State transitions applied to issues by the orchestrator.",
+            ["Issue", "Trigger", "From", "To", "Result", "At"],
+            transition_rows,
+            "No transitions recorded yet.",
+        )
+    )
+
     for key, title, subtitle, empty in [
         ("ready", "Ready To Dispatch", "Work that can start as soon as capacity is available.", "No immediately dispatchable issues."),
         ("waiting", "Waiting", "Eligible work that is queued behind current capacity limits.", "No queued work is waiting for slots."),
         ("blocked", "Blocked", "Issues still gated by unresolved dependencies or tracker state.", "No active blockers."),
         ("recently_completed", "Recently Completed", "Recent terminal-state work for quick operator confirmation.", "No recent completions found."),
     ]:
+        headers = (
+            ["Issue", "State", "Project", "Last worked on", "Linear"]
+            if key == "recently_completed"
+            else ["Issue", "State", "Priority", "Reason", "Updated"]
+        )
         rows = []
         for item in groups[key]:
-            rows.append([
-                _render_issue_link(item["identifier"], item["title"], item.get("url")),
-                escape(str(item.get("state") or "")),
-                escape(_render_priority(item.get("priority")) if "priority" in item else "-"),
-                escape(item.get("reason") or _format_timestamp(item.get("updated_at"))),
-            ])
-        fourth_header = "Reason" if key != "recently_completed" else "Updated"
+            if key == "recently_completed":
+                rows.append([
+                    _render_issue_link(item["identifier"], item["title"], item.get("url")),
+                    escape(str(item.get("state") or "")),
+                    escape(str(item.get("project") or "-")),
+                    escape(_format_timestamp(item.get("last_worked_on"))),
+                    _render_linear_link(item.get("url")),
+                ])
+            else:
+                rows.append([
+                    _render_issue_link(item["identifier"], item["title"], item.get("url")),
+                    escape(str(item.get("state") or "")),
+                    escape(_render_priority(item.get("priority")) if "priority" in item else "-"),
+                    escape(str(item.get("reason") or "")),
+                    escape(_format_timestamp(item.get("updated_at"))),
+                ])
         queue_sections.append(
             _render_table(
                 title,
                 subtitle,
-                ["Issue", "State", "Priority", fourth_header],
+                headers,
                 rows,
                 empty,
             )
@@ -995,7 +1148,6 @@ def _render_dashboard(groups: dict[str, object]) -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="15">
 <title>Cymphony Operator Dashboard</title>
 <style>
   :root {{
@@ -1004,8 +1156,8 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     --panel: rgba(255, 252, 246, 0.92);
     --panel-strong: #fffaf0;
     --ink: #1f2933;
-    --muted: #5f6c72;
-    --line: rgba(31, 41, 51, 0.12);
+    --muted: #4a5568;
+    --line: rgba(31, 41, 51, 0.22);
     --good: #166534;
     --warn: #b45309;
     --danger: #b91c1c;
@@ -1032,7 +1184,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   .hero-card, .meta-card, .panel, .stat {{
     background: var(--panel);
     border: 1px solid var(--line);
-    border-radius: 20px;
+    border-radius: 14px;
     box-shadow: var(--shadow);
   }}
   .hero-card {{
@@ -1058,7 +1210,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     justify-content: center;
   }}
   .meta-label {{
-    font-size: 0.78rem;
+    font-size: 0.84rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--muted);
@@ -1084,15 +1236,6 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     line-height: 1;
     margin-bottom: 8px;
   }}
-  .stat span {{
-    color: var(--muted);
-    font-size: 0.92rem;
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
-  }}
-  .stat.attention strong {{ color: var(--danger); }}
-  .stat.ready strong {{ color: var(--good); }}
-  .stat.waiting strong {{ color: var(--warn); }}
-  .stat.running strong {{ color: var(--accent); }}
   .problems-panel {{
     margin-bottom: 20px;
     border-left: 4px solid var(--danger);
@@ -1132,6 +1275,15 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   .problem-info {{
     border-left: 3px solid var(--accent);
   }}
+  .stat span {{
+    color: var(--muted);
+    font-size: 0.92rem;
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+  }}
+  .stat.attention strong {{ color: var(--danger); }}
+  .stat.ready strong {{ color: var(--good); }}
+  .stat.waiting strong {{ color: var(--warn); }}
+  .stat.running strong {{ color: var(--accent); }}
   .layout {{
     display: grid;
     grid-template-columns: 1.4fr 1fr;
@@ -1142,7 +1294,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     gap: 18px;
   }}
   .panel {{
-    padding: 20px 22px;
+    padding: 14px 18px;
     overflow: hidden;
   }}
   .table-wrap {{
@@ -1150,7 +1302,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   .control-toolbar, .issue-actions {{
     display: flex;
-    gap: 10px;
+    gap: 6px;
     flex-wrap: wrap;
     align-items: center;
   }}
@@ -1159,9 +1311,67 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   .control-group {{
     display: flex;
-    gap: 10px;
+    gap: 6px;
     flex-wrap: wrap;
     align-items: center;
+  }}
+  .control-group + .control-group {{
+    border-left: 1px solid var(--line);
+    padding-left: 10px;
+    margin-left: 4px;
+  }}
+  .control-group-label {{
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    white-space: nowrap;
+  }}
+  [data-tooltip] {{
+    position: relative;
+  }}
+  [data-tooltip]:hover::after,
+  [data-tooltip]:focus-visible::after,
+  [data-tooltip]:focus-within::after {{
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--ink);
+    color: #fff;
+    font-size: 0.78rem;
+    font-weight: 400;
+    line-height: 1.35;
+    padding: 5px 10px;
+    border-radius: 8px;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 10;
+    box-shadow: 0 2px 8px rgba(31, 41, 51, 0.18);
+  }}
+  [data-tooltip]:hover::before,
+  [data-tooltip]:focus-visible::before,
+  [data-tooltip]:focus-within::before {{
+    content: "";
+    position: absolute;
+    bottom: calc(100% + 1px);
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: var(--ink);
+    pointer-events: none;
+    z-index: 10;
+  }}
+  .caution-button {{
+    border-color: rgba(180, 120, 0, 0.3);
+    background: rgba(180, 120, 0, 0.07);
+    color: #92600a;
+  }}
+  .caution-button:hover {{
+    border-color: rgba(180, 120, 0, 0.45);
+    background: rgba(180, 120, 0, 0.12);
   }}
   .issue-actions {{
     min-width: 180px;
@@ -1198,7 +1408,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   .operator-meta-label {{
     color: var(--muted);
-    font-size: 0.76rem;
+    font-size: 0.84rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     font-family: "Avenir Next", "Segoe UI", sans-serif;
@@ -1273,7 +1483,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     background: rgba(15, 118, 110, 0.1);
     color: var(--accent);
     font-family: "Avenir Next", "Segoe UI", sans-serif;
-    font-size: 0.78rem;
+    font-size: 0.84rem;
   }}
   .event-list {{
     margin: 0;
@@ -1295,9 +1505,14 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     background: var(--panel-strong);
     color: var(--ink);
     border-radius: 999px;
-    padding: 8px 12px;
+    padding: 5px 11px;
     font: inherit;
+    font-size: 0.88rem;
     cursor: pointer;
+  }}
+  button:disabled {{
+    opacity: 0.45;
+    cursor: not-allowed;
   }}
   button:hover {{
     border-color: rgba(15, 118, 110, 0.35);
@@ -1359,9 +1574,9 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     display: inline-flex;
     align-items: center;
     border-radius: 999px;
-    padding: 8px 12px;
+    padding: 4px 10px;
     font-family: "Avenir Next", "Segoe UI", sans-serif;
-    font-size: 0.9rem;
+    font-size: 0.82rem;
     font-weight: 700;
   }}
   .pill.active {{
@@ -1377,12 +1592,15 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     justify-content: space-between;
     align-items: end;
     gap: 12px;
-    margin-bottom: 16px;
+    margin-bottom: 10px;
   }}
   .panel-head h2 {{
     margin: 0;
-    font-size: 1.15rem;
+    font-size: 1.05rem;
     letter-spacing: -0.02em;
+  }}
+  .panel-head p {{
+    font-size: 0.84rem;
   }}
   table {{
     width: 100%;
@@ -1399,7 +1617,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   th {{
     color: var(--muted);
-    font-size: 0.76rem;
+    font-size: 0.82rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
   }}
@@ -1421,6 +1639,8 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     .stats {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
     .operator-card-head {{ flex-direction: column; }}
     .issue-actions {{ justify-content: flex-start; }}
+    .control-toolbar {{ flex-direction: column; align-items: flex-start; gap: 8px; }}
+    .control-group + .control-group {{ border-left: none; padding-left: 0; margin-left: 0; border-top: 1px solid var(--line); padding-top: 8px; }}
   }}
   @media (max-width: 700px) {{
     main {{ padding: 18px; }}
@@ -1438,7 +1658,133 @@ def _render_dashboard(groups: dict[str, object]) -> str:
       text-align: left;
     }}
   }}
+  .cym-toast {{
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: var(--ink);
+    color: #fff;
+    padding: 10px 18px;
+    border-radius: 10px;
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.88rem;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.25s, transform 0.25s;
+    z-index: 9999;
+    pointer-events: none;
+  }}
+  .cym-toast.visible {{
+    opacity: 1;
+    transform: translateY(0);
+  }}
 </style>
+<script>
+window.cym = {{
+  _refreshTimer: null,
+  _INTERVAL: 15000,
+  _paused: false,
+
+  /** Show a brief toast message. */
+  toast: function(msg) {{
+    var el = document.createElement("div");
+    el.className = "cym-toast";
+    el.textContent = msg;
+    document.body.appendChild(el);
+    requestAnimationFrame(function() {{ el.classList.add("visible"); }});
+    setTimeout(function() {{
+      el.classList.remove("visible");
+      setTimeout(function() {{ el.remove(); }}, 300);
+    }}, 2000);
+  }},
+
+  /** POST an action, show feedback, then refresh the dashboard content in place. */
+  post: function(url, body) {{
+    var label = url.split("/").pop().replace(/[-_]/g, " ");
+    fetch(url, {{
+      method: "POST",
+      headers: {{"Content-Type": "application/x-www-form-urlencoded"}},
+      body: body || ""
+    }}).then(function(r) {{
+      cym.toast(r.ok ? "Done: " + label : "Failed: " + label);
+      cym.refresh();
+    }}).catch(function() {{
+      cym.toast("Error: " + label);
+    }});
+  }},
+
+  killApp: function() {{
+    var armed = document.getElementById("kill-arm");
+    if (!armed || !armed.checked) return;
+    cym.post("/api/v1/app/kill", "confirm_kill=true");
+  }},
+
+  syncKillButton: function() {{
+    var armed = document.getElementById("kill-arm");
+    var button = document.getElementById("kill-app-button");
+    if (!armed || !button) return;
+    button.disabled = !armed.checked;
+  }},
+
+  /** Fetch the dashboard HTML and swap <main> content in place. */
+  refresh: function() {{
+    fetch("/", {{headers: {{"Accept": "text/html"}}}}).then(function(r) {{
+      return r.text();
+    }}).then(function(html) {{
+      var parser = new DOMParser();
+      var doc = parser.parseFromString(html, "text/html");
+      var fresh = doc.querySelector("main");
+      var current = document.querySelector("main");
+      if (!fresh || !current) return;
+
+      // Remember which <details> elements are open (by data-id, fall back to index).
+      var openSet = new Set();
+      current.querySelectorAll("details[data-id]").forEach(function(d) {{
+        if (d.open) openSet.add(d.getAttribute("data-id"));
+      }});
+
+      // Remember scroll position.
+      var scrollY = window.scrollY;
+
+      // Swap content.
+      current.innerHTML = fresh.innerHTML;
+
+      // Restore open state.
+      current.querySelectorAll("details[data-id]").forEach(function(d) {{
+        if (openSet.has(d.getAttribute("data-id"))) d.open = true;
+      }});
+
+      // Restore scroll position.
+      window.scrollTo(0, scrollY);
+    }}).catch(function() {{}});
+  }},
+
+  toggleAutoRefresh: function() {{
+    cym._paused = !cym._paused;
+    var btn = document.getElementById("pause-refresh");
+    if (btn) btn.textContent = cym._paused ? "Resume Auto-Refresh" : "Pause Auto-Refresh";
+    if (cym._paused) {{
+      clearInterval(cym._refreshTimer);
+      cym._refreshTimer = null;
+      cym.toast("Auto-refresh paused");
+    }} else {{
+      cym.startAutoRefresh();
+      cym.toast("Auto-refresh resumed");
+    }}
+  }},
+
+  startAutoRefresh: function() {{
+    if (cym._refreshTimer) clearInterval(cym._refreshTimer);
+    cym._refreshTimer = setInterval(cym.refresh, cym._INTERVAL);
+  }}
+}};
+document.addEventListener("DOMContentLoaded", function() {{
+  cym.startAutoRefresh();
+  cym.syncKillButton();
+  var armed = document.getElementById("kill-arm");
+  if (armed) armed.addEventListener("change", cym.syncKillButton);
+}});
+</script>
 </head>
 <body>
 <main>
@@ -1483,16 +1829,24 @@ def _render_dashboard(groups: dict[str, object]) -> str:
       <section class="panel">
         <div class="panel-head">
           <h2>Operator Controls</h2>
-          <p>Intervene safely without leaving the dashboard.</p>
         </div>
         <div class="control-toolbar">
           <div class="control-group">
-            <span class="pill {'paused' if dispatch_paused else 'active'}">{'Paused' if dispatch_paused else 'Active'}</span>
-            {_post_button("/api/v1/refresh", "Refresh Now")}
-            {_post_button("/api/v1/dispatch/pause", "Pause Dispatching")}
-            {_post_button("/api/v1/dispatch/resume", "Resume Dispatching")}
+            <span class="control-group-label">Status</span>
+            <span class="pill {'paused' if dispatch_paused else 'active'}" title="Current dispatch state" data-tooltip="Current dispatch state">{'Paused' if dispatch_paused else 'Active'}</span>
           </div>
           <div class="control-group">
+            <span class="control-group-label">View</span>
+            {_post_button("/api/v1/refresh", "Refresh Now", tooltip="Fetch the latest orchestration state immediately.")}
+            <button type="button" id="pause-refresh" title="Pause the automatic 15-second dashboard refresh" data-tooltip="Pause the automatic 15-second dashboard refresh" onclick="cym.toggleAutoRefresh()">Pause Auto-Refresh</button>
+          </div>
+          <div class="control-group">
+            <span class="control-group-label">Dispatch</span>
+            {_post_button("/api/v1/dispatch/pause", "Pause", tooltip="Stop launching new work; active agents continue.", css_class="caution-button")}
+            {_post_button("/api/v1/dispatch/resume", "Resume", tooltip="Allow the orchestrator to start queued work again.")}
+          </div>
+          <div class="control-group">
+            <span class="control-group-label">Shutdown</span>
             {_kill_app_switch(shutdown_requested)}
           </div>
         </div>
@@ -1507,7 +1861,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
 
   <p class="footer">
     <a href="/api/v1/state">JSON state</a>
-    · Auto-refresh every 15 seconds
+    · Live refresh every 15 s (pausable)
     · Input tokens {totals.get("input_tokens", 0):,}
     · Output tokens {totals.get("output_tokens", 0):,}
   </p>
@@ -1636,12 +1990,17 @@ async def _save_workflow_from_request(request: web.Request, *, setup_mode: bool)
         "turn_timeout_ms": submitted.get("turn_timeout_ms", ""),
         "stall_timeout_ms": submitted.get("stall_timeout_ms", ""),
         "dangerously_skip_permissions": submitted.get("dangerously_skip_permissions") == "1",
+        "qa_review_enabled": submitted.get("qa_review_enabled") == "1",
+        "qa_review_dispatch": submitted.get("qa_review_dispatch", ""),
+        "qa_review_success": submitted.get("qa_review_success", ""),
+        "qa_review_failure": submitted.get("qa_review_failure", ""),
         "after_create": submitted.get("after_create", ""),
         "before_run": submitted.get("before_run", ""),
         "after_run": submitted.get("after_run", ""),
         "before_remove": submitted.get("before_remove", ""),
         "hooks_timeout_ms": submitted.get("hooks_timeout_ms", ""),
         "server_port": submitted.get("server_port", ""),
+        "review_prompt": submitted.get("review_prompt", ""),
         "prompt_template": submitted.get("prompt_template", ""),
     }
 
@@ -1785,6 +2144,8 @@ async def _handle_dashboard(request: web.Request) -> web.Response:
     groups["recent_problems"] = list(snap.get("problems", []))
     groups["skipped"] = list(snap.get("skipped", []))
     groups["controls"] = dict(snap.get("controls", {}))
+    groups["workflow_config"] = dict(snap.get("workflow_config", {}))
+    groups["transition_history"] = list(snap.get("transition_history", []))
     return _html_response(_render_dashboard(groups))
 
 
@@ -1828,28 +2189,46 @@ async def start_setup_server(
     return runner
 
 
-def _post_button(action: str, label: str) -> str:
+def _post_button(
+    action: str,
+    label: str,
+    *,
+    tooltip: str = "",
+    css_class: str = "",
+) -> str:
     safe_action = html.escape(action, quote=True)
     safe_label = html.escape(label)
+    safe_tooltip = html.escape(tooltip, quote=True)
+    tooltip_attr = (
+        f" title='{safe_tooltip}' data-tooltip='{safe_tooltip}'" if tooltip else ""
+    )
+    class_attr = f" class='{html.escape(css_class, quote=True)}'" if css_class else ""
     return (
-        f"<form method='post' action='{safe_action}'>"
-        f"<button type='submit'>{safe_label}</button>"
-        "</form>"
+        f"<button type='button'{class_attr}{tooltip_attr}"
+        f" onclick=\"cym.post('{safe_action}')\">"
+        f"{safe_label}</button>"
     )
 
 
 def _kill_app_switch(shutdown_requested: bool) -> str:
     checked = " checked" if shutdown_requested else ""
     disabled = " disabled" if shutdown_requested else ""
+    button_disabled = " disabled" if shutdown_requested or not checked else ""
     button_label = "Kill Requested" if shutdown_requested else "Kill App"
     return (
-        "<form method='post' action='/api/v1/app/kill' class='switch-form'>"
-        "<label class='switch-label'>"
-        f"<input type='checkbox' name='confirm_kill' value='true'{checked}{disabled}>"
-        "<span>Arm kill</span>"
+        "<div class='switch-form'>"
+        "<label class='switch-label' title='Enable the kill switch to allow shutdown'"
+        " data-tooltip='Enable the kill switch to allow shutdown'>"
+        f"<input type='checkbox' id='kill-arm' value='true' title='Enable the kill switch to allow shutdown'{checked}{disabled}>"
+        "<span>Arm</span>"
         "</label>"
-        f"<button type='submit' class='danger-button'{disabled}>{escape(button_label)}</button>"
-        "</form>"
+        f"<button type='button' id='kill-app-button' class='danger-button'"
+        f" title='Terminate the Cymphony process (requires arming first)'"
+        f" data-tooltip='Terminate the Cymphony process (requires arming first)'"
+        f"{button_disabled} "
+        "onclick=\"cym.killApp()\">"
+        f"{escape(button_label)}</button>"
+        "</div>"
     )
 
 
@@ -1860,9 +2239,30 @@ def _issue_controls(
     requeue_only: bool = False,
 ) -> str:
     safe_identifier = html.escape(identifier, quote=True)
-    buttons = [_post_button(f"/api/v1/issues/{safe_identifier}/requeue", "Requeue")]
+    buttons = [
+        _post_button(
+            f"/api/v1/issues/{safe_identifier}/requeue",
+            "Requeue",
+            tooltip="Move this issue back to the ready queue for another attempt.",
+        )
+    ]
     if not requeue_only:
-        buttons.append(_post_button(f"/api/v1/issues/{safe_identifier}/skip", "Skip"))
+        buttons.append(
+            _post_button(
+                f"/api/v1/issues/{safe_identifier}/skip",
+                "Skip",
+                tooltip="Skip this issue so the orchestrator will not pick it up.",
+                css_class="caution-button",
+            )
+        )
     if include_cancel:
-        buttons.insert(0, _post_button(f"/api/v1/issues/{safe_identifier}/cancel", "Cancel Worker"))
+        buttons.insert(
+            0,
+            _post_button(
+                f"/api/v1/issues/{safe_identifier}/cancel",
+                "Cancel",
+                tooltip="Abort the running agent worker for this issue.",
+                css_class="danger-button",
+            ),
+        )
     return f"<div class='issue-actions'>{''.join(buttons)}</div>"

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .agent import ClaudeAgentRunner
+from .agent import create_agent_runner
 from .config import ServiceConfig, build_config, validate_dispatch_config
 from .linear import LinearClient
 from .logging_ import issue_log, session_log
@@ -19,18 +19,25 @@ from .models import (
     AgentError,
     ControlAction,
     CodexTotals,
+    ExecutionMode,
     Issue,
     LiveSession,
     OrchestratorState,
     ProblemRecord,
+    ReviewDecision,
+    ReviewResult,
     RetryEntry,
     RunningEntry,
     RunStatus,
     SkippedEntry,
+    TransitionRecord,
     WorkflowDefinition,
     WorkflowError,
 )
-from .workflow import WorkflowWatcher, load_workflow, render_plan_prompt, render_prompt
+from .preflight import PreflightResult, run_preflight_checks
+from .review import parse_review_result
+from .state import StateManager
+from .workflow import WorkflowWatcher, load_workflow, render_plan_prompt, render_prompt, render_review_prompt
 from .workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -50,6 +57,7 @@ def _monotonic_ms() -> float:
 _CONTINUATION_RETRY_DELAY_MS = 1000.0
 _MAX_RECENT_PROBLEMS = 25
 _CONTROL_HISTORY_LIMIT = 50
+_MAX_TRANSITION_HISTORY = 50
 
 
 class Orchestrator:
@@ -67,6 +75,9 @@ class Orchestrator:
         self._state = OrchestratorState(
             poll_interval_ms=config.polling.interval_ms,
             max_concurrent_agents=config.agent.max_concurrent_agents,
+        )
+        self._state_manager = StateManager(
+            Path(config.workspace.root) / ".cymphony_state.json"
         )
         self._observers: list[Any] = []
         self._server: Any = None
@@ -102,8 +113,14 @@ class Orchestrator:
                 self._workflow_path,
             )
 
+        # Restore persisted state from previous run
+        await self._restore_persisted_state()
+
         # Startup terminal workspace cleanup (spec §8.6)
         await self._startup_terminal_cleanup()
+
+        # Validate configured transition targets against Linear workflow states
+        await self._validate_transitions(fail_hard=True)
 
         # Schedule immediate first tick
         self._enqueue_tick(delay_ms=0.0)
@@ -121,7 +138,22 @@ class Orchestrator:
         """Apply updated workflow config dynamically (spec §6.2)."""
         try:
             new_config = build_config(new_workflow, self._config.server.port)
+            previous_config = self._config
+            previous_cache = dict(self._state_id_cache)
+
+            # Validate transitions against Linear states before making the new
+            # workflow active so a bad reload cannot leak into runtime behavior.
             self._config = new_config
+            is_valid = await self._validate_transitions(fail_hard=False)
+            if not is_valid:
+                self._config = previous_config
+                self._state_id_cache = previous_cache
+                logger.warning(
+                    "action=workflow_config_reapply_rejected "
+                    "reason=invalid_transition_targets"
+                )
+                return
+
             self._workflow = new_workflow
             self._state.poll_interval_ms = new_config.polling.interval_ms
             self._state.max_concurrent_agents = new_config.agent.max_concurrent_agents
@@ -134,6 +166,95 @@ class Orchestrator:
                 detail=str(exc),
             )
             logger.error(f"action=workflow_reapply_failed error={exc}")
+
+    async def _validate_transitions(self, *, fail_hard: bool = False) -> bool:
+        """Validate configured transition targets against Linear workflow states.
+
+        Fetches teams for the project and checks that each configured
+        transition target exists as a workflow state on every team.
+
+        When *fail_hard* is True (startup), raises ``WorkflowError`` on
+        invalid targets.  When False (reload), logs warnings only.
+
+        Returns True if all targets are valid.
+        """
+        transitions = self._config.transitions
+        targets: dict[str, str] = {}
+        for field in ("dispatch", "success", "failure", "blocked", "cancelled"):
+            value = getattr(transitions, field)
+            if value is not None:
+                targets[field] = value
+
+        # Include QA review targets when enabled
+        if transitions.qa_review.enabled:
+            for qa_field in ("dispatch", "success", "failure"):
+                value = getattr(transitions.qa_review, qa_field)
+                if value is not None:
+                    targets[f"qa_review.{qa_field}"] = value
+
+        if not targets:
+            logger.info("action=validate_transitions result=skip reason=no_targets_configured")
+            return True
+
+        client = LinearClient(self._config.tracker)
+        try:
+            team_ids = await client.fetch_project_team_ids()
+        except Exception as exc:
+            msg = f"Failed to fetch project teams for transition validation: {exc}"
+            if fail_hard:
+                raise WorkflowError("transition_validation_failed", msg) from exc
+            logger.warning(f"action=validate_transitions_skipped reason=team_fetch_failed error={exc}")
+            return False
+
+        if not team_ids:
+            msg = "No teams found for project — cannot validate transition targets"
+            if fail_hard:
+                raise WorkflowError("transition_validation_failed", msg)
+            logger.warning(f"action=validate_transitions_skipped reason=no_teams_found")
+            return False
+
+        all_valid = True
+        for team_id in team_ids:
+            try:
+                state_names = await client.fetch_team_workflow_state_names(team_id)
+            except Exception as exc:
+                msg = f"Failed to fetch workflow states for team {team_id}: {exc}"
+                if fail_hard:
+                    raise WorkflowError("transition_validation_failed", msg) from exc
+                logger.warning(f"action=validate_transitions_skipped team_id={team_id} error={exc}")
+                all_valid = False
+                continue
+
+            available_lower = {s.lower() for s in state_names}
+
+            for field, target in targets.items():
+                if target.lower() not in available_lower:
+                    all_valid = False
+                    msg = (
+                        f"Transition '{field}' targets state '{target}' "
+                        f"which does not exist on team {team_id}. "
+                        f"Available states: {sorted(state_names)}"
+                    )
+                    if fail_hard:
+                        raise WorkflowError("invalid_transition_target", msg)
+                    logger.warning(f"action=invalid_transition_target {msg}")
+
+            # Pre-populate state ID cache for valid targets
+            for field, target in targets.items():
+                if target.lower() in available_lower:
+                    # Resolve the actual state ID and cache it
+                    state_id = await client.fetch_team_workflow_state_id(team_id, target)
+                    if state_id:
+                        cache_key = (team_id, target.lower())
+                        self._state_id_cache[cache_key] = state_id
+
+        if all_valid:
+            logger.info(
+                f"action=validate_transitions result=ok "
+                f"teams={len(team_ids)} targets={list(targets.keys())}"
+            )
+
+        return all_valid
 
     # ------------------------------------------------------------------
     # Startup cleanup
@@ -167,11 +288,120 @@ class Orchestrator:
             )
 
     # ------------------------------------------------------------------
+    # State persistence
+    # ------------------------------------------------------------------
+
+    def _persist_state(self) -> None:
+        """Save current runtime state to disk. Best-effort; never raises."""
+        try:
+            self._state_manager.save(
+                retry_attempts=self._state.retry_attempts,
+                skipped=self._state.skipped,
+                dispatch_paused=self._state.dispatch_paused,
+            )
+        except Exception as exc:
+            logger.warning(f"action=state_persist_failed error={exc}")
+
+    async def _restore_persisted_state(self) -> None:
+        """Restore persisted state and reconcile against current Linear state."""
+        retry_attempts, skipped, dispatch_paused = self._state_manager.restore()
+
+        if not retry_attempts and not skipped and not dispatch_paused:
+            return
+
+        # Reconcile: fetch current issue states from Linear to drop stale entries
+        all_issue_ids = list(set(list(retry_attempts.keys()) + list(skipped.keys())))
+        current_states: dict[str, str] | None = None
+        try:
+            client = LinearClient(self._config.tracker)
+            issues = await client.fetch_issue_states_by_ids(all_issue_ids)
+            current_states = {i.id: i.state for i in issues}
+        except Exception as exc:
+            logger.warning(
+                f"action=state_reconcile_fetch_failed error={exc} "
+                "(restoring all persisted entries without reconciliation)"
+            )
+            # If we can't reach Linear, still restore what we have — the next
+            # tick will reconcile naturally.
+
+        terminal_lower = {s.lower() for s in self._config.tracker.terminal_states}
+        wm = WorkspaceManager(self._config)
+
+        # Reconcile retry attempts
+        restored_retries = 0
+        dropped_retries = 0
+        for issue_id, entry in list(retry_attempts.items()):
+            if current_states is not None:
+                issue_state = current_states.get(issue_id)
+
+                # Drop retries for issues in terminal states
+                if issue_state is not None and issue_state.lower() in terminal_lower:
+                    logger.info(
+                        f"action=state_reconcile_drop_retry issue_id={issue_id} "
+                        f"identifier={entry.identifier} reason=terminal_state "
+                        f"state={issue_state}"
+                    )
+                    dropped_retries += 1
+                    continue
+
+                # Drop retries for issues no longer found in Linear
+                if issue_id not in current_states:
+                    logger.info(
+                        f"action=state_reconcile_drop_retry issue_id={issue_id} "
+                        f"identifier={entry.identifier} reason=not_found_in_linear"
+                    )
+                    dropped_retries += 1
+                    continue
+
+            # Restore: set due_at_ms to fire immediately on next tick
+            entry.due_at_ms = _monotonic_ms()
+            self._state.retry_attempts[issue_id] = entry
+            self._state.claimed.add(issue_id)
+            restored_retries += 1
+
+        # Reconcile skipped entries
+        restored_skipped = 0
+        dropped_skipped = 0
+        for issue_id, entry in list(skipped.items()):
+            if current_states is not None:
+                issue_state = current_states.get(issue_id)
+
+                # Drop skips for terminal issues
+                if issue_state is not None and issue_state.lower() in terminal_lower:
+                    logger.info(
+                        f"action=state_reconcile_drop_skip issue_id={issue_id} "
+                        f"identifier={entry.identifier} reason=terminal_state "
+                        f"state={issue_state}"
+                    )
+                    dropped_skipped += 1
+                    continue
+
+            self._state.skipped[issue_id] = entry
+            restored_skipped += 1
+
+        if dispatch_paused:
+            self._state.dispatch_paused = True
+
+        logger.info(
+            f"action=state_reconcile_complete "
+            f"restored_retries={restored_retries} dropped_retries={dropped_retries} "
+            f"restored_skipped={restored_skipped} dropped_skipped={dropped_skipped} "
+            f"dispatch_paused={dispatch_paused}"
+        )
+
+        # Schedule timers for restored retries
+        for issue_id in list(self._state.retry_attempts.keys()):
+            asyncio.get_event_loop().call_soon(
+                lambda iid=issue_id: asyncio.create_task(self._on_retry_timer(iid)),
+            )
+
+    # ------------------------------------------------------------------
     # Poll tick
     # ------------------------------------------------------------------
 
     async def _tick(self) -> None:
         """Run serialized ticks, coalescing any overlap into one follow-up pass."""
+        normal_completion = False
         try:
             while True:
                 self._tick_rerun_requested = False
@@ -180,13 +410,15 @@ class Orchestrator:
                 if self._tick_rerun_requested:
                     continue
 
-                self._schedule_tick()
+                normal_completion = True
                 break
         finally:
             rerun_requested = self._tick_rerun_requested
             self._tick_task = None
             if rerun_requested:
                 self._enqueue_tick(delay_ms=0.0)
+            elif normal_completion:
+                self._schedule_tick()
 
     async def _tick_once(self) -> None:
         """One poll-and-dispatch tick (spec §8.1, §16.2)."""
@@ -210,6 +442,30 @@ class Orchestrator:
                     )
                 return
             self._state.last_validation_errors = []
+
+            # 2b. Repo preflight checks (CLIs, env vars)
+            if self._config.preflight.enabled:
+                preflight = await run_preflight_checks(
+                    self._config.preflight, workspace_path=None,
+                )
+                if not preflight.ok:
+                    error_dicts = [
+                        {"name": c.name, "message": c.message}
+                        for c in preflight.errors
+                    ]
+                    self._state.last_preflight_errors = error_dicts
+                    for c in preflight.errors:
+                        self._record_problem(
+                            kind="preflight_failed",
+                            summary=f"Preflight check '{c.name}' failed",
+                            detail=c.message,
+                        )
+                        logger.error(
+                            f"action=preflight_check_failed "
+                            f"name={c.name} message={c.message!r}"
+                        )
+                    return
+                self._state.last_preflight_errors = []
 
             # 3. Fetch candidate issues
             try:
@@ -238,6 +494,8 @@ class Orchestrator:
 
         except Exception as exc:
             logger.error(f"action=tick_error error={exc}", exc_info=True)
+        finally:
+            self._persist_state()
 
     def _schedule_tick(self, delay_ms: float | None = None) -> None:
         if delay_ms is None:
@@ -369,6 +627,7 @@ class Orchestrator:
         for issue_id in running_issue_ids:
             await self._terminate_running_issue(issue_id, cleanup_workspace=False)
 
+        self._persist_state()
         self._shutdown_event.set()
         outcome = "noop" if already_requested else "accepted"
         detail = (
@@ -464,6 +723,7 @@ class Orchestrator:
         self._state.skipped.pop(issue_id, None)
         self._state.claimed.discard(issue_id)
         self._state.completed.discard(issue_id)
+        self._persist_state()
         coalesced = self.request_immediate_poll()
         detail = "issue released for redispatch"
         self._record_control(
@@ -518,6 +778,7 @@ class Orchestrator:
             created_at=_now_utc(),
             reason="operator_skip",
         )
+        self._persist_state()
         detail = "issue marked as skipped"
         self._record_control(
             action="skip_issue",
@@ -545,18 +806,12 @@ class Orchestrator:
         # Part A: stall detection
         stall_timeout_ms = self._config.coding_agent.stall_timeout_ms
         if stall_timeout_ms > 0:
-            now_ms = _monotonic_ms()
+            now_utc = _now_utc()
             stalled: list[str] = []
             for issue_id, entry in list(self._state.running.items()):
                 last_event_ts = entry.session.last_event_timestamp
-                if last_event_ts:
-                    elapsed_ms = (
-                        _now_utc() - last_event_ts
-                    ).total_seconds() * 1000.0
-                else:
-                    elapsed_ms = (
-                        _now_utc() - entry.started_at
-                    ).total_seconds() * 1000.0
+                ref = last_event_ts if last_event_ts else entry.started_at
+                elapsed_ms = (now_utc - ref).total_seconds() * 1000.0
 
                 if elapsed_ms > stall_timeout_ms:
                     stalled.append(issue_id)
@@ -711,50 +966,205 @@ class Orchestrator:
 
         asyncio.create_task(_do())
 
-    def _transition_issue_state(self, issue_id: str, state_name: str) -> None:
-        """Fire-and-forget: move an issue to the named workflow state; never raises."""
-        async def _do() -> None:
-            try:
-                client = LinearClient(self._config.tracker)
-                team_id = await client.fetch_issue_team_id(issue_id)
-                if not team_id:
-                    logger.warning(
-                        f"action=state_transition_skipped issue_id={issue_id} "
-                        f"state={state_name!r} reason=team_id_not_found"
-                    )
-                    return
+    def _render_review_result_comment(self, result: ReviewResult) -> str:
+        """Render a QA review verdict into a Linear comment body."""
+        if result.decision == ReviewDecision.PASS:
+            heading = "QA review passed"
+        elif result.decision == ReviewDecision.CHANGES_REQUESTED:
+            heading = "QA review requested changes"
+        else:
+            heading = "QA review result could not be applied"
 
-                cache_key = (team_id, state_name.lower())
-                state_id = self._state_id_cache.get(cache_key)
-                if not state_id:
-                    state_id = await client.fetch_team_workflow_state_id(team_id, state_name)
-                if not state_id:
-                    logger.warning(
-                        f"action=state_transition_skipped issue_id={issue_id} "
-                        f"state={state_name!r} team_id={team_id} reason=state_id_not_found"
-                    )
-                    return
+        lines = [f"**{heading}**"]
+        if result.decision is not None:
+            lines.append(f"Decision: `{result.decision.value}`")
 
-                if cache_key not in self._state_id_cache:
-                    self._state_id_cache[cache_key] = state_id
-                await client.set_issue_state(issue_id, state_id)
-                logger.info(
-                    f"action=issue_state_set issue_id={issue_id} state={state_name!r} "
-                    f"team_id={team_id}"
-                )
-            except Exception as exc:
-                self._record_problem(
-                    kind="transition_failed",
-                    summary=f"State transition to {state_name!r} failed",
-                    detail=str(exc),
-                    issue_id=issue_id,
-                )
+        summary = (result.summary or "").strip()
+        error = (result.error or "").strip()
+        raw_output = (result.raw_output or "").strip()
+
+        if summary:
+            lines.extend(["", summary])
+
+        if error:
+            lines.extend(
+                [
+                    "",
+                    "Cymphony did not apply a QA transition because the review decision was invalid.",
+                    f"Parse error: {error}",
+                ]
+            )
+
+        if raw_output and result.decision is None:
+            lines.extend(["", "Raw review output:", "```json", raw_output, "```"])
+
+        return "\n".join(lines)
+
+    async def _post_review_result_comment(
+        self,
+        issue_id: str,
+        identifier: str,
+        result: ReviewResult,
+    ) -> None:
+        """Persist the QA review outcome to a Linear comment."""
+        body = self._render_review_result_comment(result)
+        try:
+            client = LinearClient(self._config.tracker)
+            comment_id = await client.create_comment(issue_id, body)
+            issue_log(
+                logger,
+                logging.INFO,
+                "qa_review_comment_created",
+                issue_id,
+                identifier,
+                comment_id=comment_id,
+            )
+        except Exception as exc:
+            self._record_problem(
+                kind="qa_review_comment_failed",
+                summary="Failed to publish QA review findings",
+                detail=str(exc),
+                issue_id=issue_id,
+                issue_identifier=identifier,
+            )
+            issue_log(
+                logger,
+                logging.WARNING,
+                "qa_review_comment_failed",
+                issue_id,
+                identifier,
+                error=str(exc),
+            )
+
+    async def _transition_issue_state(
+        self,
+        issue_id: str,
+        state_name: str,
+        *,
+        trigger: str = "unknown",
+        issue_identifier: str | None = None,
+        from_state: str | None = None,
+    ) -> bool:
+        """Move an issue to the named workflow state. Returns True on success."""
+        identifier = issue_identifier or self._resolve_identifier(issue_id)
+        current_state = (
+            from_state if issue_identifier is not None or from_state is not None
+            else self._resolve_current_state(issue_id)
+        )
+        try:
+            client = LinearClient(self._config.tracker)
+            team_id = await client.fetch_issue_team_id(issue_id)
+            if not team_id:
                 logger.warning(
-                    f"action=state_transition_failed issue_id={issue_id} "
-                    f"state={state_name!r} error={exc}"
+                    f"action=state_transition_skipped issue_id={issue_id} "
+                    f"state={state_name!r} reason=team_id_not_found"
                 )
+                self._record_transition(
+                    issue_id, identifier, current_state, state_name, trigger, success=False,
+                )
+                return False
 
-        asyncio.create_task(_do())
+            cache_key = (team_id, state_name.lower())
+            state_id = self._state_id_cache.get(cache_key)
+            if not state_id:
+                state_id = await client.fetch_team_workflow_state_id(team_id, state_name)
+            if not state_id:
+                logger.warning(
+                    f"action=state_transition_skipped issue_id={issue_id} "
+                    f"state={state_name!r} team_id={team_id} reason=state_id_not_found"
+                )
+                self._record_transition(
+                    issue_id, identifier, current_state, state_name, trigger, success=False,
+                )
+                return False
+
+            if cache_key not in self._state_id_cache:
+                self._state_id_cache[cache_key] = state_id
+            await client.set_issue_state(issue_id, state_id)
+            logger.info(
+                f"action=issue_state_set issue_id={issue_id} state={state_name!r} "
+                f"team_id={team_id}"
+            )
+            self._record_transition(
+                issue_id, identifier, current_state, state_name, trigger, success=True,
+            )
+            return True
+        except Exception as exc:
+            self._record_problem(
+                kind="transition_failed",
+                summary=f"State transition to {state_name!r} failed",
+                detail=str(exc),
+                issue_id=issue_id,
+            )
+            logger.warning(
+                f"action=state_transition_failed issue_id={issue_id} "
+                f"state={state_name!r} error={exc}"
+            )
+            self._record_transition(
+                issue_id, identifier, current_state, state_name, trigger, success=False,
+            )
+            return False
+
+    def _transition_issue_state_background(
+        self,
+        issue_id: str,
+        state_name: str,
+        *,
+        trigger: str = "unknown",
+        issue_identifier: str | None = None,
+        from_state: str | None = None,
+    ) -> None:
+        """Schedule a state transition without blocking the caller."""
+        asyncio.create_task(
+            self._transition_issue_state(
+                issue_id,
+                state_name,
+                trigger=trigger,
+                issue_identifier=issue_identifier,
+                from_state=from_state,
+            )
+        )
+
+    def _resolve_identifier(self, issue_id: str) -> str:
+        """Best-effort lookup of issue identifier from running/retry state."""
+        entry = self._state.running.get(issue_id)
+        if entry:
+            return entry.identifier
+        retry = self._state.retry_attempts.get(issue_id)
+        if retry:
+            return retry.identifier
+        return issue_id
+
+    def _resolve_current_state(self, issue_id: str) -> str | None:
+        """Best-effort lookup of the issue's current Linear state."""
+        entry = self._state.running.get(issue_id)
+        if entry:
+            return entry.issue.state
+        return None
+
+    def _record_transition(
+        self,
+        issue_id: str,
+        identifier: str,
+        from_state: str | None,
+        to_state: str,
+        trigger: str,
+        *,
+        success: bool,
+    ) -> None:
+        self._state.transition_history.insert(
+            0,
+            TransitionRecord(
+                timestamp=_now_utc(),
+                issue_id=issue_id,
+                issue_identifier=identifier,
+                from_state=from_state,
+                to_state=to_state,
+                trigger=trigger,
+                success=success,
+            ),
+        )
+        del self._state.transition_history[_MAX_TRANSITION_HISTORY:]
 
     # ------------------------------------------------------------------
     # Dispatch (spec §8.2, §16.4)
@@ -767,6 +1177,24 @@ class Orchestrator:
             self._state.max_concurrent_agents - len(self._state.running), 0
         )
         return global_available > 0
+
+    def _unresolved_blockers(self, issue: Issue) -> list[BlockerRef]:
+        """Return blockers that are not yet in a terminal state."""
+        terminal_lower = {s.lower() for s in self._config.tracker.terminal_states}
+        return [
+            blocker for blocker in issue.blocked_by
+            if (blocker.state or "").lower() not in terminal_lower
+        ]
+
+    def _maybe_transition_blocked_issue(self, issue: Issue) -> None:
+        """Apply the configured blocked transition when an issue is gated by dependencies."""
+        blocked_state = self._config.transitions.resolve("blocked")
+        if not blocked_state:
+            return
+        if issue.state.lower() == blocked_state.lower():
+            return
+        if self._unresolved_blockers(issue):
+            self._transition_issue_state_background(issue.id, blocked_state, trigger="blocked")
 
     def _is_dispatch_eligible(self, issue: Issue) -> bool:
         """Check non-slot dispatch eligibility (spec §8.2)."""
@@ -789,13 +1217,9 @@ class Orchestrator:
         if issue.id in self._state.skipped:
             return False
 
-        # Blocker check for active work that should not run with unresolved dependencies.
-        if state_lower in {"todo", "in progress"}:
-            terminal_lower_set = set(terminal_lower)
-            for blocker in issue.blocked_by:
-                blocker_state = (blocker.state or "").lower()
-                if blocker_state not in terminal_lower_set:
-                    return False
+        # Blocker check: do not dispatch issues with unresolved dependencies.
+        if self._unresolved_blockers(issue):
+            return False
 
         return True
 
@@ -824,6 +1248,14 @@ class Orchestrator:
         """Continuation retries come from a clean worker exit, not an error path."""
         return retry_entry.error is None
 
+    def _resolve_execution_mode(self, issue: Issue) -> ExecutionMode:
+        """Determine whether an issue should run in build or review mode."""
+        qa = self._config.transitions.qa_review
+        if qa.enabled and qa.dispatch:
+            if issue.state.lower() == qa.dispatch.lower():
+                return ExecutionMode.REVIEW
+        return ExecutionMode.BUILD
+
     async def _dispatch_issue(self, issue: Issue, attempt: int | None) -> None:
         """Claim and spawn worker for issue (spec §16.4)."""
         if self._is_shutting_down():
@@ -831,6 +1263,8 @@ class Orchestrator:
         self._state.claimed.add(issue.id)
         self._state.completed.discard(issue.id)
         self._state.retry_attempts.pop(issue.id, None)
+
+        mode = self._resolve_execution_mode(issue)
 
         session = LiveSession(
             session_id=None,
@@ -854,6 +1288,7 @@ class Orchestrator:
             session=session,
             retry_attempt=attempt,
             started_at=_now_utc(),
+            mode=mode,
         )
         self._state.running[issue.id] = entry
 
@@ -873,8 +1308,20 @@ class Orchestrator:
             "issue_dispatched",
             issue.id, issue.identifier,
             attempt=attempt,
+            mode=mode.value,
         )
-        self._transition_issue_state(issue.id, "In Progress")
+        # Review-mode issues are already in the QA dispatch state; skip the
+        # normal dispatch transition to avoid fighting with the review lane.
+        if mode == ExecutionMode.BUILD:
+            target = self._config.transitions.resolve("dispatch")
+            if target:
+                self._transition_issue_state_background(
+                    issue.id,
+                    target,
+                    trigger="dispatch",
+                    issue_identifier=issue.identifier,
+                    from_state=issue.state,
+                )
 
     # ------------------------------------------------------------------
     # Worker (spec §16.5)
@@ -888,7 +1335,9 @@ class Orchestrator:
     ) -> None:
         """Run one agent session for an issue (workspace + hooks + turns)."""
         wm = WorkspaceManager(self._config)
-        agent = ClaudeAgentRunner(self._config.coding_agent)
+        agent = create_agent_runner(
+            self._config.agent.provider, self._config.coding_agent
+        )
 
         # Prepare workspace
         entry.status = RunStatus.PREPARING_WORKSPACE
@@ -906,43 +1355,68 @@ class Orchestrator:
             await wm.run_after_run_hook(workspace)
             raise AgentError("before_run_hook_error", str(exc)) from exc
 
+        # Workspace-level preflight checks (git repo state)
+        if self._config.preflight.enabled:
+            ws_preflight = await run_preflight_checks(
+                self._config.preflight, workspace_path=workspace.path,
+            )
+            if not ws_preflight.ok:
+                entry.status = RunStatus.FAILED
+                errors = "; ".join(c.message for c in ws_preflight.errors)
+                for c in ws_preflight.errors:
+                    self._record_problem(
+                        kind="preflight_failed",
+                        summary=f"Workspace preflight '{c.name}' failed",
+                        detail=c.message,
+                        issue_id=issue.id,
+                        issue_identifier=issue.identifier,
+                    )
+                    issue_log(
+                        logger, logging.ERROR,
+                        "workspace_preflight_failed",
+                        issue.id, issue.identifier,
+                        check=c.name, message=c.message,
+                    )
+                raise AgentError("preflight_failed", f"Workspace preflight failed: {errors}")
+
         max_turns = self._config.agent.max_turns
         session_id: str | None = None
         turn_number = 1
+        is_review = entry.mode == ExecutionMode.REVIEW
 
         async def on_event(event: AgentEvent) -> None:
             await self._handle_agent_event(issue.id, entry, event)
 
         try:
-            # Planning turn: agent produces a TodoWrite checklist only, no code changes.
-            # Reset plan_comment_id so a new comment is always created for this plan,
-            # even if a previous plan comment exists from an earlier attempt.
-            entry.session.plan_comment_id = None
-            entry.status = RunStatus.PLANNING
-            plan_prompt = render_plan_prompt(self._workflow, issue)
-            issue_log(
-                logger, logging.INFO,
-                "planning_turn_start",
-                issue.id, issue.identifier,
-            )
-            title = f"{issue.identifier}: {issue.title}"
-            session_id = await agent.run_turn(
-                workspace_path=workspace.path,
-                prompt=plan_prompt,
-                issue_id=issue.id,
-                issue_identifier=issue.identifier,
-                session_id=None,
-                title=title,
-                on_event=on_event,
-            )
-            issue_log(
-                logger, logging.INFO,
-                "planning_turn_completed",
-                issue.id, issue.identifier,
-                session_id=session_id,
-            )
-            entry.session.turn_count += 1
-            turn_number += 1  # planning turn consumed one slot
+            # Planning turn (build mode only): agent produces a TodoWrite checklist.
+            # Review mode skips planning — the review prompt is self-contained.
+            if not is_review:
+                entry.session.plan_comment_id = None
+                entry.status = RunStatus.PLANNING
+                plan_prompt = render_plan_prompt(self._workflow, issue)
+                issue_log(
+                    logger, logging.INFO,
+                    "planning_turn_start",
+                    issue.id, issue.identifier,
+                )
+                title = f"{issue.identifier}: {issue.title}"
+                session_id = await agent.run_turn(
+                    workspace_path=workspace.path,
+                    prompt=plan_prompt,
+                    issue_id=issue.id,
+                    issue_identifier=issue.identifier,
+                    session_id=None,
+                    title=title,
+                    on_event=on_event,
+                )
+                issue_log(
+                    logger, logging.INFO,
+                    "planning_turn_completed",
+                    issue.id, issue.identifier,
+                    session_id=session_id,
+                )
+                entry.session.turn_count += 1
+                turn_number += 1  # planning turn consumed one slot
 
             first_execution_turn = True
             while True:
@@ -951,7 +1425,10 @@ class Orchestrator:
                 entry.status = RunStatus.BUILDING_PROMPT
                 if first_execution_turn:
                     try:
-                        prompt = render_prompt(self._workflow, issue, attempt)
+                        if is_review:
+                            prompt = render_review_prompt(self._workflow, issue)
+                        else:
+                            prompt = render_prompt(self._workflow, issue, attempt)
                     except WorkflowError as exc:
                         entry.status = RunStatus.FAILED
                         raise AgentError("prompt_error", str(exc)) from exc
@@ -1014,6 +1491,11 @@ class Orchestrator:
                 turn_number += 1
                 # Use attempt=None for continuation turns (spec §7.1)
                 attempt = None
+
+            # Capture the review result before after_run hooks run. Hooks may
+            # clean workspace files as part of post-processing.
+            if is_review:
+                entry.review_result = parse_review_result(workspace.path)
 
         finally:
             # Run after_run hook as an independent task so that a concurrent
@@ -1129,21 +1611,53 @@ class Orchestrator:
                 "worker_cancelled",
                 issue_id, identifier,
             )
+            target = self._config.transitions.resolve("cancelled")
+            if target:
+                self._transition_issue_state_background(
+                    issue_id,
+                    target,
+                    trigger="cancelled",
+                    issue_identifier=identifier,
+                    from_state=entry.issue.state,
+                )
             return
 
+        # Resolve transitions based on execution mode: review-mode workers
+        # use the qa_review sub-config, build-mode workers use top-level transitions.
+        is_review = entry.mode == ExecutionMode.REVIEW
+        qa = self._config.transitions.qa_review
+
         if exc is None:
-            # Normal exit → move to "In Review" if still in an active state,
-            # then schedule continuation retry (spec §8.4)
+            # Normal exit → apply configured success transition if still in
+            # an active state, then schedule continuation retry (spec §8.4)
             entry.status = RunStatus.SUCCEEDED
             self._state.completed.add(issue_id)
             issue_log(
                 logger, logging.INFO,
                 "worker_exited_normal",
                 issue_id, identifier,
+                mode=entry.mode.value,
             )
-            active_lower = [s.lower() for s in self._config.tracker.active_states]
-            if entry.issue.state.lower() in active_lower:
-                self._transition_issue_state(issue_id, "In Review")
+            if is_review:
+                result = entry.review_result
+                if result is None:
+                    workspace_path = str(WorkspaceManager(self._config).get_path(identifier))
+                    result = parse_review_result(workspace_path)
+                    entry.review_result = result
+                await self._post_review_result_comment(issue_id, identifier, result)
+                target = self._resolve_review_completion_target(issue_id, identifier, entry)
+            else:
+                target = qa.dispatch if qa.enabled else self._config.transitions.resolve("success")
+            if target:
+                active_lower = [s.lower() for s in self._config.tracker.active_states]
+                if entry.issue.state.lower() in active_lower:
+                    await self._transition_issue_state(
+                        issue_id,
+                        target,
+                        trigger="success",
+                        issue_identifier=identifier,
+                        from_state=entry.issue.state,
+                    )
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=1,
@@ -1152,38 +1666,97 @@ class Orchestrator:
                 entry=entry,
             )
         else:
-            # Abnormal exit → exponential backoff retry
-            entry.status = RunStatus.FAILED
+            # Abnormal exit ��� set status based on error type, then retry
+            if isinstance(exc, AgentError) and exc.code == "stall_timeout":
+                entry.status = RunStatus.STALLED
+            elif isinstance(exc, AgentError) and exc.code == "turn_timeout":
+                entry.status = RunStatus.TIMED_OUT
+            else:
+                entry.status = RunStatus.FAILED
             next_attempt = _next_attempt(entry.retry_attempt)
             error_str = str(exc)[:200]
-            error_code = getattr(exc, "code", "unknown")
-            severity = "error"
-            kind = "worker_failed"
-            if error_code in ("before_run_hook_error",):
-                kind = "hook_failed"
-            elif error_code in ("workspace_error",):
-                kind = "workspace_error"
-            self._record_problem(
-                kind=kind,
-                severity=severity,
-                summary=f"Worker failed for {identifier}",
-                detail=error_str,
-                issue_id=issue_id,
-                issue_identifier=identifier,
-            )
             issue_log(
                 logger, logging.WARNING,
                 "worker_exited_abnormal",
                 issue_id, identifier,
                 attempt=next_attempt,
                 error=error_str,
+                run_status=entry.status.value,
+                mode=entry.mode.value,
             )
+            error_code = getattr(exc, "code", "unknown")
+            kind = "worker_failed"
+            if error_code == "before_run_hook_error":
+                kind = "hook_failed"
+            elif error_code == "workspace_error":
+                kind = "workspace_error"
+            self._record_problem(
+                kind=kind,
+                severity="error",
+                summary=f"Worker failed for {identifier}",
+                detail=error_str,
+                issue_id=issue_id,
+                issue_identifier=identifier,
+            )
+            if is_review:
+                target = qa.failure if qa.enabled else None
+            else:
+                target = self._config.transitions.resolve("failure")
+            if target:
+                self._transition_issue_state_background(
+                    issue_id,
+                    target,
+                    trigger="failure",
+                    issue_identifier=identifier,
+                    from_state=entry.issue.state,
+                )
             await self._schedule_retry(
                 issue_id, identifier,
                 attempt=next_attempt,
                 error=error_str,
                 entry=entry,
             )
+
+    def _resolve_review_completion_target(
+        self,
+        issue_id: str,
+        identifier: str,
+        entry: RunningEntry,
+    ) -> str | None:
+        """Map a completed review run to the configured QA transition target."""
+        qa = self._config.transitions.qa_review
+        if entry.review_result is not None:
+            result = entry.review_result
+        else:
+            workspace_path = str(WorkspaceManager(self._config).get_path(identifier))
+            result = parse_review_result(workspace_path)
+
+        if result.decision is None:
+            self._record_problem(
+                kind="qa_review_parse_error",
+                summary="QA review result could not be parsed",
+                detail=result.error or "unknown parse error",
+                issue_id=issue_id,
+                issue_identifier=identifier,
+            )
+            issue_log(
+                logger, logging.WARNING,
+                "qa_review_parse_failed",
+                issue_id, identifier,
+                error=result.error,
+            )
+            return None
+
+        issue_log(
+            logger, logging.INFO,
+            "qa_review_decision",
+            issue_id, identifier,
+            decision=result.decision.value,
+            summary=result.summary,
+        )
+        if result.decision == ReviewDecision.PASS:
+            return qa.success if qa.enabled else None
+        return qa.failure if qa.enabled else None
 
     # ------------------------------------------------------------------
     # Retry scheduling (spec §8.4)
@@ -1201,7 +1774,6 @@ class Orchestrator:
         """Schedule a retry for an issue (spec §8.4)."""
         is_continuation = error is None
 
-        # Detect retry storms: warn when repeated error retries accumulate
         if not is_continuation and attempt >= 3:
             self._record_problem(
                 kind="retry_storm",
@@ -1234,6 +1806,7 @@ class Orchestrator:
             error=error,
         )
         if entry is not None:
+            retry_entry.mode = entry.mode.value
             retry_entry.state = entry.issue.state
             retry_entry.run_status = entry.status.value
             retry_entry.session_id = entry.session.session_id
@@ -1311,6 +1884,8 @@ class Orchestrator:
             lambda: asyncio.create_task(self._on_retry_timer(issue_id)),
         )
 
+        self._persist_state()
+
     async def _on_retry_timer(self, issue_id: str) -> None:
         """Handle retry timer firing (spec §16.6)."""
         if self._is_shutting_down():
@@ -1357,6 +1932,7 @@ class Orchestrator:
         self._state.completed.discard(issue_id)
 
         if not self._is_dispatch_eligible(issue):
+            self._maybe_transition_blocked_issue(issue)
             # No longer active — release
             self._state.claimed.discard(issue_id)
             self._state.completed.discard(issue_id)
@@ -1429,6 +2005,7 @@ class Orchestrator:
                 "attempt": retry.attempt,
                 "due_at": due_at.isoformat(),
                 "error": retry.error,
+                "mode": retry.mode,
                 "state": retry.state,
                 "run_status": retry.run_status,
                 "session_id": retry.session_id,
@@ -1486,6 +2063,7 @@ class Orchestrator:
 
         return {
             "generated_at": now.isoformat(),
+            "provider": self._config.agent.provider,
             "counts": {
                 "running": len(running_rows),
                 "retrying": len(retrying_rows),
@@ -1510,6 +2088,37 @@ class Orchestrator:
                 "seconds_running": round(totals.seconds_running + live_seconds, 2),
             },
             "rate_limits": self._state.codex_rate_limits,
+            "preflight_errors": list(self._state.last_preflight_errors),
+            "validation_errors": list(self._state.last_validation_errors),
+            "workflow_config": {
+                "active_states": list(self._config.tracker.active_states),
+                "terminal_states": list(self._config.tracker.terminal_states),
+                "transitions": {
+                    "dispatch": self._config.transitions.dispatch,
+                    "success": self._config.transitions.success,
+                    "failure": self._config.transitions.failure,
+                    "blocked": self._config.transitions.blocked,
+                    "cancelled": self._config.transitions.cancelled,
+                    "qa_review": {
+                        "enabled": self._config.transitions.qa_review.enabled,
+                        "dispatch": self._config.transitions.qa_review.dispatch,
+                        "success": self._config.transitions.qa_review.success,
+                        "failure": self._config.transitions.qa_review.failure,
+                    },
+                },
+            },
+            "transition_history": [
+                {
+                    "timestamp": t.timestamp.isoformat(),
+                    "issue_id": t.issue_id,
+                    "issue_identifier": t.issue_identifier,
+                    "from_state": t.from_state,
+                    "to_state": t.to_state,
+                    "trigger": t.trigger,
+                    "success": t.success,
+                }
+                for t in self._state.transition_history
+            ],
         }
 
     def _record_problem(
@@ -1625,12 +2234,8 @@ class Orchestrator:
                 "detail": "The orchestrator has already reserved this issue for work.",
             }
 
-        if state_lower in {"todo", "in progress"}:
-            blockers = [
-                blocker for blocker in issue.blocked_by
-                if (blocker.state or "").lower() not in terminal_lower
-            ]
-            if blockers:
+        blockers = self._unresolved_blockers(issue)
+        if blockers:
                 blocker_desc = ", ".join(
                     f"{blocker.identifier or blocker.id or 'unknown'} ({blocker.state or 'unknown'})"
                     for blocker in blockers
@@ -1747,6 +2352,7 @@ class Orchestrator:
                 for comment in entry.issue.comments
             ],
             "state": entry.issue.state,
+            "mode": entry.mode.value,
             "run_status": entry.status.value,
             "session_id": s.session_id,
             "turn_count": s.turn_count,

@@ -8,13 +8,17 @@ from pathlib import Path
 from typing import Any
 
 from .models import (
+    SUPPORTED_PROVIDERS,
     AgentConfig,
     CodingAgentConfig,
     HooksConfig,
     PollingConfig,
+    PreflightConfig,
+    QAReviewConfig,
     ServerConfig,
     ServiceConfig,
     TrackerConfig,
+    TransitionsConfig,
     WorkflowDefinition,
     WorkflowError,
     WorkspaceConfig,
@@ -36,6 +40,7 @@ _DEFAULT_CLAUDE_COMMAND = "claude"
 _DEFAULT_TURN_TIMEOUT_MS = 3_600_000
 _DEFAULT_READ_TIMEOUT_MS = 5_000
 _DEFAULT_STALL_TIMEOUT_MS = 300_000
+_MISSING = object()
 
 
 def _default_workspace_root() -> str:
@@ -77,6 +82,15 @@ def _to_int(value: Any, default: int) -> int:
 def _to_str(value: Any, default: str) -> str:
     if value is None:
         return default
+    return str(value)
+
+
+def _to_optional_str(value: Any, default: str | None) -> str | None:
+    """Coerce to optional str. Explicit null/false/empty string → None."""
+    if value is _MISSING:
+        return default
+    if value is None or value is False or value == "":
+        return None
     return str(value)
 
 
@@ -164,6 +178,8 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
             except (TypeError, ValueError):
                 pass  # ignore invalid entries per spec
 
+    provider = _to_str(agent_raw.get("provider"), "claude").lower()
+
     agent = AgentConfig(
         max_concurrent_agents=_to_int(
             agent_raw.get("max_concurrent_agents"), _DEFAULT_MAX_CONCURRENT_AGENTS
@@ -173,12 +189,15 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
             agent_raw.get("max_retry_backoff_ms"), _DEFAULT_MAX_RETRY_BACKOFF_MS
         ),
         max_concurrent_agents_by_state=per_state,
+        provider=provider,
     )
 
     # --- coding agent (codex in spec) ---
     command = _to_str(codex_raw.get("command"), _DEFAULT_CLAUDE_COMMAND)
     if not command:
         command = _DEFAULT_CLAUDE_COMMAND
+
+    provider = _to_str(codex_raw.get("provider"), "claude")
 
     coding_agent = CodingAgentConfig(
         command=command,
@@ -188,6 +207,7 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
         dangerously_skip_permissions=bool(
             codex_raw.get("dangerously_skip_permissions", True)
         ),
+        provider=provider,
     )
 
     # --- server (optional extension) ---
@@ -199,6 +219,74 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
 
     server = ServerConfig(port=server_port)
 
+    # --- preflight ---
+    preflight_raw: dict[str, Any] = raw.get("preflight") or {}
+    preflight_enabled = preflight_raw.get("enabled")
+    if preflight_enabled is None:
+        preflight_enabled = True  # on by default
+    else:
+        preflight_enabled = bool(preflight_enabled)
+
+    preflight = PreflightConfig(
+        enabled=preflight_enabled,
+        required_clis=_to_str_list(preflight_raw.get("required_clis"), ["git"]),
+        required_env_vars=_to_str_list(preflight_raw.get("required_env_vars"), []),
+        expect_clean_worktree=bool(preflight_raw.get("expect_clean_worktree", False)),
+        base_branch=_to_str(preflight_raw.get("base_branch"), "main"),
+    )
+
+    # --- transitions ---
+    transitions_raw: dict[str, Any] = raw.get("transitions") or {}
+    _TRANSITION_DEFAULTS = TransitionsConfig()
+
+    # --- qa_review sub-config ---
+    qa_raw: Any = transitions_raw.get("qa_review")
+    _QA_DEFAULTS = QAReviewConfig()
+    if isinstance(qa_raw, dict):
+        qa_enabled = qa_raw.get("enabled")
+        qa_review = QAReviewConfig(
+            enabled=bool(qa_enabled) if qa_enabled is not None else _QA_DEFAULTS.enabled,
+            dispatch=_to_optional_str(
+                qa_raw.get("dispatch", _MISSING), _QA_DEFAULTS.dispatch
+            ),
+            success=_to_optional_str(
+                qa_raw.get("success", _MISSING), _QA_DEFAULTS.success
+            ),
+            failure=_to_optional_str(
+                qa_raw.get("failure", _MISSING), _QA_DEFAULTS.failure
+            ),
+        )
+    elif qa_raw is True:
+        # Shorthand: `qa_review: true` enables with all defaults
+        qa_review = QAReviewConfig(enabled=True)
+    else:
+        qa_review = QAReviewConfig()
+
+    # A QA review lane is agent-driven only if the review state is dispatchable.
+    if qa_review.enabled and qa_review.dispatch:
+        active_lower = {state.lower() for state in tracker.active_states}
+        if qa_review.dispatch.lower() not in active_lower:
+            tracker.active_states = [*tracker.active_states, qa_review.dispatch]
+
+    transitions = TransitionsConfig(
+        dispatch=_to_optional_str(
+            transitions_raw.get("dispatch", _MISSING), _TRANSITION_DEFAULTS.dispatch
+        ),
+        success=_to_optional_str(
+            transitions_raw.get("success", _MISSING), _TRANSITION_DEFAULTS.success
+        ),
+        failure=_to_optional_str(
+            transitions_raw.get("failure", _MISSING), _TRANSITION_DEFAULTS.failure
+        ),
+        blocked=_to_optional_str(
+            transitions_raw.get("blocked", _MISSING), _TRANSITION_DEFAULTS.blocked
+        ),
+        cancelled=_to_optional_str(
+            transitions_raw.get("cancelled", _MISSING), _TRANSITION_DEFAULTS.cancelled
+        ),
+        qa_review=qa_review,
+    )
+
     return ServiceConfig(
         tracker=tracker,
         polling=polling,
@@ -207,6 +295,8 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
         agent=agent,
         coding_agent=coding_agent,
         server=server,
+        preflight=preflight,
+        transitions=transitions,
     )
 
 
@@ -246,5 +336,18 @@ def validate_dispatch_config(config: ServiceConfig) -> ValidationResult:
 
     if not config.coding_agent.command:
         result.fail("codex.command is missing or empty")
+
+    if config.agent.provider not in SUPPORTED_PROVIDERS:
+        result.fail(
+            f"agent.provider={config.agent.provider!r} is not supported "
+            f"(expected one of {', '.join(SUPPORTED_PROVIDERS)})"
+        )
+
+    # --- qa_review validation ---
+    qa = config.transitions.qa_review
+    if qa.enabled and not qa.dispatch:
+        result.fail(
+            "transitions.qa_review.dispatch is required when qa_review is enabled"
+        )
 
     return result

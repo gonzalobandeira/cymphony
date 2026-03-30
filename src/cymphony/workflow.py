@@ -179,6 +179,91 @@ def render_plan_prompt(workflow: WorkflowDefinition, issue: Any) -> str:  # noqa
     return tmpl.render(issue=issue_dict).strip()
 
 
+_REVIEW_PROMPT_TEMPLATE = """\
+You are a senior QA reviewer for the **{{ issue.title }}** issue.
+
+## Issue
+
+**Title:** {{ issue.title }}
+**Identifier:** {{ issue.identifier }}
+**State:** {{ issue.state }}
+{% if issue.description %}
+**Description:**
+{{ issue.description }}
+{% endif %}
+{% if issue.comments %}
+
+**Comments:**
+{% for c in issue.comments %}
+- **{{ c.author }}** ({{ c.created_at }}): {{ c.body }}
+{% endfor %}
+{% endif %}
+
+## Review instructions
+
+You are running in **review mode**. Your job is to review the implementation — NOT to write new code.
+
+1. Read the issue description and any reviewer comments carefully.
+2. Explore the workspace: check the branch, recent commits, and changed files.
+3. Review the code changes for correctness, style, test coverage, and adherence to the issue requirements.
+4. If the implementation is acceptable, record a `pass` verdict with a concise rationale in `REVIEW_RESULT.json`.
+5. If changes are needed, record a `changes_requested` verdict with an actionable summary in `REVIEW_RESULT.json`.
+
+Do NOT create new branches, push code, open PRs, or post directly to Linear. Cymphony will publish your review result to Linear after the run completes.
+"""
+
+
+_REVIEW_DECISION_CONTRACT = """
+
+## Decision format (REQUIRED)
+
+After completing your review, you MUST write a file called `REVIEW_RESULT.json` at the
+workspace root with your decision. The file must contain valid JSON with this exact structure:
+
+**If the changes look good:**
+```json
+{"decision": "pass", "summary": "Brief explanation of why the changes are acceptable."}
+```
+
+**If changes are needed:**
+```json
+{"decision": "changes_requested", "summary": "Brief explanation of what needs to change."}
+```
+
+The `decision` field is REQUIRED and must be exactly `"pass"` or `"changes_requested"`.
+The `summary` field is optional but recommended.
+
+Do NOT write any other value for `decision`. Do NOT skip writing the file.
+"""
+
+
+def render_review_prompt(workflow: WorkflowDefinition, issue: Any) -> str:
+    """Render the QA review prompt for review-mode workers."""
+    # Use the review_prompt from workflow config if provided, otherwise use built-in template.
+    review_template = (workflow.config.get("review_prompt") or "").strip()
+    if not review_template:
+        review_template = _REVIEW_PROMPT_TEMPLATE
+
+    env = Environment(undefined=StrictUndefined, autoescape=False)
+    try:
+        tmpl = env.from_string(review_template)
+    except TemplateSyntaxError as exc:
+        raise WorkflowError(
+            "review_template_parse_error",
+            f"Review template syntax error: {exc}",
+        ) from exc
+
+    issue_dict = _issue_to_dict(issue)
+    try:
+        rendered = tmpl.render(issue=issue_dict).strip()
+    except UndefinedError as exc:
+        raise WorkflowError(
+            "review_template_render_error",
+            f"Review template render error: {exc}",
+        ) from exc
+    return f"{rendered}\n{_REVIEW_DECISION_CONTRACT}".strip()
+
+
 def _issue_to_dict(issue: Any) -> dict[str, Any]:
     """Recursively convert issue dataclass to template-friendly dict."""
     from .models import Issue, BlockerRef

@@ -35,6 +35,7 @@ class Issue:
     id: str
     identifier: str
     title: str
+    project_name: str | None
     description: str | None
     priority: int | None
     state: str
@@ -88,28 +89,84 @@ class HooksConfig:
     timeout_ms: int
 
 
+SUPPORTED_PROVIDERS = ("claude", "codex")
+
+
 @dataclass
 class AgentConfig:
     max_concurrent_agents: int
     max_turns: int
     max_retry_backoff_ms: int
     max_concurrent_agents_by_state: dict[str, int]
+    provider: str = "claude"
 
 
 @dataclass
 class CodingAgentConfig:
-    """Config for the coding agent (Claude Code CLI, called 'codex' in spec)."""
+    """Config for the coding agent subprocess."""
     command: str
     turn_timeout_ms: int
     read_timeout_ms: int
     stall_timeout_ms: int
-    # High-trust Claude Code specific
     dangerously_skip_permissions: bool
+    provider: str = "claude"
+
+
+@dataclass
+class PreflightConfig:
+    """Configuration for repo preflight checks before dispatch."""
+    enabled: bool
+    required_clis: list[str]
+    required_env_vars: list[str]
+    expect_clean_worktree: bool
+    base_branch: str
 
 
 @dataclass
 class ServerConfig:
     port: int | None
+
+
+@dataclass
+class QAReviewConfig:
+    """Configuration for the agent-driven QA review lane (spec §4.1.9.1).
+
+    When enabled, the workflow becomes:
+        Todo -> In Progress -> QA Review -> (Todo | In Review)
+
+    Instead of transitioning directly to ``success`` after implementation,
+    the issue moves to ``dispatch`` (the QA review state).  A separate QA
+    agent run then transitions the issue to ``success`` (QA passed) or
+    ``failure`` (QA failed, back to development).
+    """
+    enabled: bool = False
+    dispatch: str | None = "QA Review"
+    success: str | None = "In Review"
+    failure: str | None = "Todo"
+
+
+@dataclass
+class TransitionsConfig:
+    """Declarative workflow state transitions (spec §4.1.9).
+
+    Each field maps a lifecycle event to the Linear workflow state name
+    the issue should be moved to.  A ``None`` value means "do not
+    transition" for that event.
+    """
+    dispatch: str | None = "In Progress"
+    success: str | None = "In Review"
+    failure: str | None = None
+    blocked: str | None = None
+    cancelled: str | None = None
+    qa_review: QAReviewConfig = field(default_factory=QAReviewConfig)
+
+    def resolve(self, event: str) -> str | None:
+        """Look up the target state for a lifecycle event.
+
+        Returns the configured state name, or ``None`` if no transition
+        is configured (meaning the orchestrator should skip the state change).
+        """
+        return getattr(self, event, None)
 
 
 @dataclass
@@ -122,6 +179,27 @@ class ServiceConfig:
     agent: AgentConfig
     coding_agent: CodingAgentConfig
     server: ServerConfig
+    preflight: PreflightConfig
+    transitions: TransitionsConfig = field(default_factory=TransitionsConfig)
+
+
+# ---------------------------------------------------------------------------
+# QA review decision contract
+# ---------------------------------------------------------------------------
+
+class ReviewDecision(str, Enum):
+    """Machine-readable outcome of a QA review run."""
+    PASS = "pass"
+    CHANGES_REQUESTED = "changes_requested"
+
+
+@dataclass
+class ReviewResult:
+    """Parsed result from a QA review agent run."""
+    decision: ReviewDecision | None
+    summary: str | None = None
+    error: str | None = None
+    raw_output: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +217,12 @@ class Workspace:
 # ---------------------------------------------------------------------------
 # Agent / session models
 # ---------------------------------------------------------------------------
+
+class ExecutionMode(str, Enum):
+    """Whether the orchestrator is running a build (implementation) or review (QA) flow."""
+    BUILD = "build"
+    REVIEW = "review"
+
 
 class AgentEventType(str, Enum):
     SESSION_STARTED = "session_started"
@@ -213,6 +297,8 @@ class RunningEntry:
     session: LiveSession
     retry_attempt: int | None  # None = first run
     started_at: datetime
+    review_result: ReviewResult | None = None
+    mode: ExecutionMode = field(default=ExecutionMode.BUILD)
     status: RunStatus = field(default=RunStatus.PREPARING_WORKSPACE)
 
 
@@ -224,6 +310,7 @@ class RetryEntry:
     attempt: int
     due_at_ms: float  # monotonic clock
     error: str | None
+    mode: str = "build"
     state: str | None = None
     run_status: str | None = None
     session_id: str | None = None
@@ -267,6 +354,18 @@ class SkippedEntry:
 
 
 @dataclass
+class TransitionRecord:
+    """Recorded state transition for an issue."""
+    timestamp: datetime
+    issue_id: str
+    issue_identifier: str
+    from_state: str | None
+    to_state: str
+    trigger: str  # e.g. "dispatch", "success", "failure", "blocked", "cancelled"
+    success: bool = True
+
+
+@dataclass
 class ControlAction:
     """Auditable operator control action."""
     timestamp: datetime
@@ -303,7 +402,9 @@ class OrchestratorState:
     codex_rate_limits: dict[str, Any] | None = None
     last_candidates: list[Issue] = field(default_factory=list)
     last_validation_errors: list[str] = field(default_factory=list)
+    last_preflight_errors: list[dict[str, str]] = field(default_factory=list)
     recent_problems: list[ProblemRecord] = field(default_factory=list)
+    transition_history: list[TransitionRecord] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +439,13 @@ class WorkspaceError(CymphonyError):
 
 class AgentError(CymphonyError):
     """Agent runner errors (spec §10.6)."""
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class PreflightError(CymphonyError):
+    """Repo preflight check failure."""
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code

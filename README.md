@@ -4,7 +4,7 @@ An autonomous orchestration service that polls [Linear](https://linear.app) issu
 
 ## How it works
 
-1. Cymphony polls your Linear project for issues in configured active states (e.g. `Todo`, `In Progress`)
+1. Cymphony polls your Linear project for issues in configured active states (e.g. `Todo`, `In Progress`, and optionally `QA Review`)
 2. For each eligible issue, it creates an isolated workspace directory and runs a `before_run` hook (e.g. clone the repo, reset to `main`)
 3. A Claude Code agent is launched with a rendered prompt containing the issue title, description, comments, labels, and blocking issues
 4. After the agent completes its turn, an `after_run` hook runs (e.g. push branch, open PR)
@@ -27,6 +27,12 @@ Linear Issue (Todo)
       │
       ▼
   after_run hook (git push, gh pr create)
+      │
+      ▼
+  Optional QA review lane
+      │
+      ▼
+  QA reviewer agent runs → Todo or In Review
       │
       ▼
   Reconcile: issue Done → clean up workspace
@@ -99,6 +105,7 @@ workspace:
   root: ~/my-workspaces        # ~ and $VAR are expanded
 
 agent:
+  provider: claude               # agent provider: "claude" or "codex"
   max_concurrent_agents: 5     # max parallel agents across all issues
   max_turns: 20                # max agent turns per issue before giving up
   max_retry_backoff_ms: 300000 # 5 min cap for exponential backoff on failures
@@ -128,8 +135,22 @@ hooks:
     ...
   timeout_ms: 120000           # hook timeout
 
+preflight:
+  enabled: true                # set false to skip all preflight checks
+  required_clis: [git]         # CLIs that must be on PATH before dispatch
+  required_env_vars: []        # env vars that must be set (e.g. ANTHROPIC_API_KEY)
+  expect_clean_worktree: false # if true, fail when workspace has uncommitted changes
+  base_branch: main            # expected base branch in each workspace
+
 server:
   port: 8080                   # omit to disable the HTTP server
+
+transitions:
+  dispatch: In Progress        # default: move issue when work starts
+  success: In Review           # default: move issue after a clean worker exit
+  failure: null                # optional: move issue after an abnormal worker exit
+  blocked: Blocked             # optional: move issue when dependencies block dispatch
+  cancelled: null              # optional: move issue when reconciliation cancels a worker
 ---
 You are a senior software engineer working on the **MyProject** project.
 
@@ -173,6 +194,66 @@ You are a senior software engineer working on the **MyProject** project.
 | `issue.blocked_by` | `list` | Blocking issues with `.identifier`, `.state` |
 | `attempt` | `int \| None` | Retry attempt number (>1 means re-attempt) |
 
+### Workflow transitions
+
+`WORKFLOW.md` can define a `transitions` block that maps orchestrator lifecycle events to Linear workflow state names:
+
+- `dispatch`: state to apply when an issue is claimed and a worker starts
+- `success`: state to apply after a clean worker exit, before the continuation retry is scheduled
+- `failure`: state to apply after an abnormal worker exit
+- `blocked`: state to apply when dispatch is skipped because dependencies are unresolved
+- `cancelled`: state to apply when reconciliation cancels a running worker
+
+Defaults are backward-compatible with the previous hardcoded behavior:
+
+- `dispatch: In Progress`
+- `success: In Review`
+- `failure`, `blocked`, `cancelled`: no transition
+
+Set a transition to `null`, `false`, or `""` to disable it explicitly. Omitting a key keeps the default for that event.
+
+### Agent-driven QA review
+
+Enable the QA review lane when you want a second agent pass to validate implementation work before a human sees the issue in `In Review`.
+
+Required Linear states:
+
+- `Todo`
+- `In Progress`
+- `QA Review`
+- `In Review`
+
+When `transitions.qa_review.enabled: true`, the lifecycle becomes:
+
+`Todo` -> `In Progress` -> `QA Review` -> (`Todo` | `In Review`)
+
+Behavior:
+
+- Implementation runs in `Todo` and `In Progress`.
+- A successful implementation run transitions to `transitions.qa_review.dispatch` instead of directly to `transitions.success`.
+- Review-mode runs only in the QA review dispatch state.
+- A review decision of `pass` transitions to `transitions.qa_review.success`.
+- A review decision of `changes_requested` transitions to `transitions.qa_review.failure`.
+
+Example:
+
+```yaml
+transitions:
+  dispatch: In Progress
+  success: In Review
+  qa_review:
+    enabled: true
+    dispatch: QA Review
+    success: In Review
+    failure: Todo
+```
+
+Notes:
+
+- `QA Review` must exist in Linear before you enable the feature.
+- You do not need to add `QA Review` to `tracker.active_states` manually when it matches `qa_review.dispatch`; Cymphony adds it automatically.
+- The setup/settings UI exposes the QA review toggle, state targets, and an optional dedicated review prompt template.
+
 ## HTTP API
 
 When `server.port` is configured:
@@ -184,6 +265,79 @@ When `server.port` is configured:
 | `POST` | `/api/v1/refresh` | Trigger an immediate poll |
 | `POST` | `/api/v1/app/kill` | Stop the orchestrator and cancel active workers |
 | `GET` | `/api/v1/<IDENTIFIER>` | Per-issue debug details |
+
+## Preflight checks
+
+Cymphony runs preflight checks before dispatching work to agents, catching common setup problems before expensive agent work begins. Checks run at two levels:
+
+**Global checks** (every poll tick):
+- Required CLIs are on PATH (default: `git`)
+- Required environment variables are set
+
+**Workspace checks** (per-issue, after workspace creation and `before_run` hook):
+- Workspace is a git repository (`.git` exists)
+- At least one git remote is configured
+- The configured `base_branch` exists locally or on origin
+- Worktree is clean (when `expect_clean_worktree: true`)
+
+Preflight failures are surfaced as:
+- Structured log messages (`action=preflight_check_failed`)
+- Problems in the dashboard and `/api/v1/state` JSON
+- `preflight_errors` array in the state snapshot
+
+To disable all checks: set `preflight.enabled: false` in your WORKFLOW.md.
+
+## Recommended safe hook patterns
+
+When running Cymphony against real project repos, use these hook patterns for reliable workspace lifecycle management.
+
+### Clone (after_create)
+
+```bash
+# Clone once when workspace is first created
+git clone git@github.com:org/repo.git .
+```
+
+### Sync and reset (before_run)
+
+```bash
+# Ensure clean state on the base branch before each agent run
+git fetch origin
+git checkout main
+git reset --hard origin/main
+git clean -fd
+# Delete stale agent branches to avoid conflicts
+git branch --list 'agent/*' | xargs -r git branch -D 2>/dev/null || true
+```
+
+### Branch, commit, and publish (after_run)
+
+```bash
+# Only push and create PR if the agent created a branch
+BRANCH=$(git branch --show-current)
+if [ "$BRANCH" != "main" ]; then
+  git add -A
+  git commit -m "agent: $(git branch --show-current)" || true
+  git push -u origin "$BRANCH" --force-with-lease || true
+  # Use first commit subject as PR title
+  TITLE=$(git log --format="%s" origin/main..HEAD | tail -1)
+  gh pr create --title "$TITLE" --body "Automated PR by Cymphony agent" --head "$BRANCH" 2>/dev/null || true
+fi
+```
+
+### Cleanup (before_remove)
+
+```bash
+# Delete the remote branch when workspace is removed
+BRANCH=$(git branch --show-current 2>/dev/null)
+if [ -n "$BRANCH" ] && [ "$BRANCH" != "main" ]; then
+  git push origin --delete "$BRANCH" 2>/dev/null || true
+fi
+```
+
+### How preflight interacts with hooks
+
+Preflight checks run **after** workspace creation and the `before_run` hook. This means the `before_run` hook is responsible for getting the workspace into the expected state (e.g., fetching, resetting to the base branch). Preflight then **verifies** the result before the agent starts. If preflight fails, no agent turns are consumed.
 
 ## Architecture
 
@@ -200,6 +354,39 @@ src/cymphony/
   models.py       Domain dataclasses and enums
   logging_.py     Structured logging helpers
 ```
+
+## Restart and Recovery
+
+Cymphony persists runtime state to a JSON file (`<workspace.root>/.cymphony_state.json`) so that restarts do not silently drop pending work.
+
+### What is persisted
+
+- **Retry queue** — issues waiting for retry timers, including attempt count, error info, and session metadata (tokens, plan, recent events)
+- **Skipped issues** — issues manually held out of dispatch by an operator
+- **Dispatch paused flag** — whether dispatching was paused before shutdown
+
+Running workers and their async tasks are *not* persisted — they cannot survive a process restart. On the next startup, any issue that was mid-execution will be picked up again by the normal poll cycle if it is still in an active state.
+
+### Startup reconciliation
+
+On startup, Cymphony loads the state file and reconciles each entry against the current Linear issue state:
+
+| Condition | Action |
+|-----------|--------|
+| Issue is now in a terminal state (Done, Cancelled, etc.) | Retry/skip entry is dropped |
+| Issue is no longer found in Linear | Retry entry is dropped |
+| Linear is unreachable | All entries are restored as-is; the next tick reconciles naturally |
+| State file is missing, corrupt, or has a version mismatch | Start fresh (no crash) |
+
+Restored retries fire immediately rather than waiting for their original timer — any backoff delay from a previous session is not carried over.
+
+### State file location
+
+The state file is stored at `<workspace.root>/.cymphony_state.json`. It is written atomically (temp file + rename) to prevent corruption on crash. To reset all persisted state, delete this file before starting Cymphony.
+
+### When state is saved
+
+State is persisted after every mutation (retry scheduled, issue skipped/requeued, worker completed, shutdown) and at the end of every poll tick as a safety net.
 
 ## Development
 
