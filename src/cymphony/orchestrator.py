@@ -1006,19 +1006,43 @@ class Orchestrator:
         identifier: str,
         result: ReviewResult,
     ) -> None:
-        """Persist the QA review outcome to a Linear comment."""
+        """Persist the QA review outcome to a Linear comment.
+
+        Uses upsert semantics: if a review comment was already posted for this
+        issue during the current review cycle, the existing comment is updated
+        instead of creating a duplicate.  The comment ID is tracked in
+        ``_state.qa_review_comment_ids`` and cleared when the issue transitions
+        out of the QA review lane.
+        """
         body = self._render_review_result_comment(result)
+        existing_comment_id = self._state.qa_review_comment_ids.get(issue_id)
         try:
             client = LinearClient(self._config.tracker)
-            comment_id = await client.create_comment(issue_id, body)
-            issue_log(
-                logger,
-                logging.INFO,
-                "qa_review_comment_created",
-                issue_id,
-                identifier,
-                comment_id=comment_id,
-            )
+            if existing_comment_id:
+                success = await client.update_comment(existing_comment_id, body)
+                if success:
+                    issue_log(
+                        logger,
+                        logging.INFO,
+                        "qa_review_comment_updated",
+                        issue_id,
+                        identifier,
+                        comment_id=existing_comment_id,
+                    )
+                else:
+                    # Update failed (comment deleted?); fall through to create.
+                    existing_comment_id = None
+            if not existing_comment_id:
+                comment_id = await client.create_comment(issue_id, body)
+                self._state.qa_review_comment_ids[issue_id] = comment_id
+                issue_log(
+                    logger,
+                    logging.INFO,
+                    "qa_review_comment_created",
+                    issue_id,
+                    identifier,
+                    comment_id=comment_id,
+                )
         except Exception as exc:
             self._record_problem(
                 kind="qa_review_comment_failed",
@@ -1667,6 +1691,7 @@ class Orchestrator:
                 else:
                     bounce_count = self._increment_qa_review_bounces(issue_id)
                     entry.qa_review_bounce_count = bounce_count
+                    self._state.qa_review_comment_ids.pop(issue_id, None)
                     target = qa.failure if qa.enabled else None
             else:
                 target = qa.dispatch if qa.enabled else self._config.transitions.resolve("success")
@@ -1834,6 +1859,7 @@ class Orchestrator:
 
     def _clear_qa_review_bounces(self, issue_id: str) -> None:
         self._state.qa_review_bounces.pop(issue_id, None)
+        self._state.qa_review_comment_ids.pop(issue_id, None)
         self._persist_state()
 
     def _increment_qa_review_bounces(self, issue_id: str) -> int:
@@ -1852,6 +1878,7 @@ class Orchestrator:
         self._state.retry_attempts.pop(issue_id, None)
         self._state.claimed.discard(issue_id)
         self._state.completed.discard(issue_id)
+        self._state.qa_review_comment_ids.pop(issue_id, None)
         self._state.skipped[issue_id] = SkippedEntry(
             issue_id=issue_id,
             identifier=identifier,

@@ -397,6 +397,7 @@ class OrchestratorState:
     claimed: set[str] = field(default_factory=set)
     retry_attempts: dict[str, RetryEntry] = field(default_factory=dict)
     qa_review_bounces: dict[str, int] = field(default_factory=dict)
+    qa_review_comment_ids: dict[str, str] = field(default_factory=dict)
     skipped: dict[str, SkippedEntry] = field(default_factory=dict)
     completed: set[str] = field(default_factory=set)
     dispatch_paused: bool = False
