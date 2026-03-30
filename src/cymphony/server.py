@@ -616,13 +616,23 @@ def _render_setup_page(
 
 
 def _format_timestamp(raw: str | None) -> str:
+    """Return an HTML ``<time>`` element with a ``data-utc`` attribute.
+
+    The element's text content is the UTC-formatted display string.  Client-side
+    JavaScript can read ``data-utc`` and re-render it in the user's chosen
+    timezone.  Because this returns raw HTML, callers must **not** escape the
+    result.
+    """
     if not raw:
-        return "Unknown"
+        return escape("Unknown")
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
-        return raw
-    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        return escape(raw)
+    utc_dt = parsed.astimezone(timezone.utc)
+    iso_str = utc_dt.isoformat()
+    display = utc_dt.strftime("%Y-%m-%d %H:%M UTC")
+    return f'<time class="cym-ts" data-utc="{escape(iso_str)}">{escape(display)}</time>'
 
 
 def _format_relative_due(raw: str | None, now: datetime) -> str:
@@ -875,19 +885,19 @@ def _render_operator_cards(
         for row in rows:
             if mode == "running":
                 meta = [
-                    ("Tracker state", str(row.get("state") or "")),
-                    ("Run status", str(row.get("run_status") or "")),
-                    ("Turns", str(row.get("turn_count") or 0)),
+                    ("Tracker state", escape(str(row.get("state") or ""))),
+                    ("Run status", escape(str(row.get("run_status") or ""))),
+                    ("Turns", escape(str(row.get("turn_count") or 0))),
                     ("Started", _format_timestamp(row.get("started_at"))),
-                    ("Session", str(row.get("session_id") or "-")),
+                    ("Session", escape(str(row.get("session_id") or "-"))),
                 ]
                 action_html = _issue_controls(str(row.get("issue_identifier") or ""), include_cancel=True)
                 drilldown = _render_issue_drilldown(row)
             else:
                 meta = [
-                    ("Attempt", str(row.get("attempt") or "")),
-                    ("Due in", _format_relative_due(row.get("due_at"), _now_utc())),
-                    ("Why", str(row.get("error") or "Continuation retry")),
+                    ("Attempt", escape(str(row.get("attempt") or ""))),
+                    ("Due in", escape(_format_relative_due(row.get("due_at"), _now_utc()))),
+                    ("Why", escape(str(row.get("error") or "Continuation retry"))),
                     ("Started", _format_timestamp(row.get("started_at"))),
                     ("Last event", _format_timestamp(row.get("last_event_at"))),
                 ]
@@ -900,7 +910,7 @@ def _render_operator_cards(
             meta_html = "".join(
                 "<div class='operator-meta-item'>"
                 f"<span class='operator-meta-label'>{escape(label)}</span>"
-                f"<span class='operator-meta-value'>{escape(value)}</span>"
+                f"<span class='operator-meta-value'>{value}</span>"
                 "</div>"
                 for label, value in meta
             )
@@ -936,7 +946,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         [
             escape(str(row.get("issue_identifier") or "")),
             escape(str(row.get("reason") or "")),
-            escape(_format_timestamp(row.get("created_at"))),
+            _format_timestamp(row.get("created_at")),
             _issue_controls(str(row.get("issue_identifier") or ""), requeue_only=True),
         ]
         for row in groups.get("skipped", [])
@@ -955,13 +965,13 @@ def _render_dashboard(groups: dict[str, object]) -> str:
             escape(str(row.get("issue_identifier") or "-")),
             escape(str(row.get("summary") or "")),
             escape(str(row.get("detail") or "")),
-            escape(_format_timestamp(row.get("observed_at"))),
+            _format_timestamp(row.get("observed_at")),
         ]
         for row in groups.get("recent_problems", [])
     ]
     recent_control_rows = [
         [
-            escape(_format_timestamp(row.get("timestamp"))),
+            _format_timestamp(row.get("timestamp")),
             escape(str(row.get("action") or "")),
             escape(str(row.get("scope") or "")),
             escape(str(row.get("outcome") or "")),
@@ -1019,7 +1029,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
             escape(str(row.get("from_state") or "?")),
             escape(str(row.get("to_state") or "")),
             "<span class='pill active'>ok</span>" if row.get("success") else "<span class='pill paused'>fail</span>",
-            escape(_format_timestamp(row.get("timestamp"))),
+            _format_timestamp(row.get("timestamp")),
         ]
         for row in transition_history
     ]
@@ -1055,7 +1065,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
                     _render_issue_link(item["identifier"], item["title"], item.get("url")),
                     escape(str(item.get("state") or "")),
                     escape(str(item.get("project") or "-")),
-                    escape(_format_timestamp(item.get("last_worked_on"))),
+                    _format_timestamp(item.get("last_worked_on")),
                     _render_linear_link(item.get("url")),
                 ])
             else:
@@ -1064,7 +1074,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
                     escape(str(item.get("state") or "")),
                     escape(_render_priority(item.get("priority")) if "priority" in item else "-"),
                     escape(str(item.get("reason") or "")),
-                    escape(_format_timestamp(item.get("updated_at"))),
+                    _format_timestamp(item.get("updated_at")),
                 ])
         queue_sections.append(
             _render_table(
@@ -1457,6 +1467,20 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     border-color: rgba(185, 28, 28, 0.42);
     background: rgba(185, 28, 28, 0.14);
   }}
+  #tz-select {{
+    border: 1px solid var(--line);
+    background: var(--panel-strong);
+    color: var(--ink);
+    border-radius: 999px;
+    padding: 5px 11px;
+    font: inherit;
+    font-size: 0.88rem;
+    cursor: pointer;
+  }}
+  #tz-select:hover {{
+    border-color: rgba(15, 118, 110, 0.35);
+    background: #f7f2e7;
+  }}
   .switch-form {{
     display: inline-flex;
     align-items: center;
@@ -1686,6 +1710,9 @@ window.cym = {{
 
       // Restore scroll position.
       window.scrollTo(0, scrollY);
+
+      // Re-apply timezone to new content.
+      cym.restoreTimezone();
     }}).catch(function() {{}});
   }},
 
@@ -1706,11 +1733,43 @@ window.cym = {{
   startAutoRefresh: function() {{
     if (cym._refreshTimer) clearInterval(cym._refreshTimer);
     cym._refreshTimer = setInterval(cym.refresh, cym._INTERVAL);
+  }},
+
+  /** Apply the chosen timezone to all <time class="cym-ts"> elements. */
+  applyTimezone: function(tz) {{
+    document.querySelectorAll("time.cym-ts[data-utc]").forEach(function(el) {{
+      var utc = el.getAttribute("data-utc");
+      if (!utc) return;
+      try {{
+        var d = new Date(utc);
+        if (isNaN(d.getTime())) return;
+        el.textContent = d.toLocaleString("sv-SE", {{
+          timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+          hour: "2-digit", minute: "2-digit", hour12: false
+        }}).replace(",", "") + " " + tz.replace(/^.*\//, "");
+      }} catch(e) {{}}
+    }});
+  }},
+
+  /** Set timezone, persist, and apply. */
+  setTimezone: function(tz) {{
+    try {{ localStorage.setItem("cym_tz", tz); }} catch(e) {{}}
+    cym.applyTimezone(tz);
+  }},
+
+  /** Restore saved timezone and apply to page. */
+  restoreTimezone: function() {{
+    var tz = "UTC";
+    try {{ tz = localStorage.getItem("cym_tz") || "UTC"; }} catch(e) {{}}
+    var sel = document.getElementById("tz-select");
+    if (sel) sel.value = tz;
+    cym.applyTimezone(tz);
   }}
 }};
 document.addEventListener("DOMContentLoaded", function() {{
   cym.startAutoRefresh();
   cym.syncKillButton();
+  cym.restoreTimezone();
   var armed = document.getElementById("kill-arm");
   if (armed) armed.addEventListener("change", cym.syncKillButton);
 }});
@@ -1726,7 +1785,7 @@ document.addEventListener("DOMContentLoaded", function() {{
     <aside class="meta-card">
       <div>
         <div class="meta-label">Snapshot</div>
-        <div class="meta-value">{escape(generated_at)}</div>
+        <div class="meta-value">{generated_at}</div>
       </div>
       <div>
         <div class="meta-label">Capacity</div>
@@ -1767,6 +1826,30 @@ document.addEventListener("DOMContentLoaded", function() {{
             <span class="control-group-label">View</span>
             {_post_button("/api/v1/refresh", "Refresh Now", tooltip="Fetch the latest orchestration state immediately.")}
             <button type="button" id="pause-refresh" title="Pause the automatic 15-second dashboard refresh" data-tooltip="Pause the automatic 15-second dashboard refresh" onclick="cym.toggleAutoRefresh()">Pause Auto-Refresh</button>
+            <select id="tz-select" title="Display timestamps in this timezone" onchange="cym.setTimezone(this.value)">
+              <option value="UTC">UTC</option>
+              <option value="Europe/London">Europe/London</option>
+              <option value="Europe/Berlin">Europe/Berlin (CET)</option>
+              <option value="Europe/Paris">Europe/Paris</option>
+              <option value="Europe/Madrid">Europe/Madrid</option>
+              <option value="Europe/Rome">Europe/Rome</option>
+              <option value="Europe/Amsterdam">Europe/Amsterdam</option>
+              <option value="Europe/Zurich">Europe/Zurich</option>
+              <option value="Europe/Athens">Europe/Athens</option>
+              <option value="Europe/Helsinki">Europe/Helsinki</option>
+              <option value="Europe/Moscow">Europe/Moscow</option>
+              <option value="Asia/Dubai">Asia/Dubai</option>
+              <option value="Asia/Kolkata">Asia/Kolkata</option>
+              <option value="Asia/Shanghai">Asia/Shanghai</option>
+              <option value="Asia/Tokyo">Asia/Tokyo</option>
+              <option value="Australia/Sydney">Australia/Sydney</option>
+              <option value="Pacific/Auckland">Pacific/Auckland</option>
+              <option value="America/New_York">America/New_York (EST)</option>
+              <option value="America/Chicago">America/Chicago (CST)</option>
+              <option value="America/Denver">America/Denver (MST)</option>
+              <option value="America/Los_Angeles">America/Los_Angeles (PST)</option>
+              <option value="America/Sao_Paulo">America/Sao_Paulo</option>
+            </select>
           </div>
           <div class="control-group">
             <span class="control-group-label">Dispatch</span>

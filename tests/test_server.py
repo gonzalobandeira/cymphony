@@ -1059,3 +1059,101 @@ def test_render_dashboard_handles_empty_workflow_config_gracefully() -> None:
 
     assert "Workflow Configuration" in html
     assert "No transitions recorded yet." in html
+
+
+# ---- Timezone selector tests ----
+
+
+class TestFormatTimestamp:
+    def test_returns_time_element_with_data_utc(self):
+        result = server._format_timestamp("2026-03-28T14:30:00Z")
+        assert "<time" in result
+        assert 'class="cym-ts"' in result
+        assert 'data-utc="2026-03-28T14:30:00+00:00"' in result
+        assert "2026-03-28 14:30 UTC" in result
+
+    def test_returns_escaped_unknown_for_none(self):
+        result = server._format_timestamp(None)
+        assert result == "Unknown"
+
+    def test_returns_escaped_raw_for_invalid(self):
+        result = server._format_timestamp("not-a-date")
+        assert result == "not-a-date"
+
+    def test_non_utc_input_normalized(self):
+        result = server._format_timestamp("2026-03-28T16:30:00+02:00")
+        assert 'data-utc="2026-03-28T14:30:00+00:00"' in result
+        assert "2026-03-28 14:30 UTC" in result
+
+
+class TestDashboardTimezoneSelector:
+    def test_tz_select_present_in_dashboard(self):
+        html = _render_dashboard(
+            {
+                "generated_at": "2026-03-28T14:30:00Z",
+                "summary": {
+                    "running": 0,
+                    "retrying": 0,
+                    "ready": 0,
+                    "waiting": 0,
+                    "needs_attention": 0,
+                    "capacity_in_use": "0/5",
+                },
+                "totals": {
+                    "total_tokens": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "seconds_running": 0,
+                },
+                "controls": {},
+                "running": [],
+                "retrying": [],
+                "ready": [],
+                "waiting": [],
+                "blocked": [],
+                "recently_completed": [],
+                "waiting_reasons": [],
+                "recent_problems": [],
+                "skipped": [],
+                "workflow_config": {},
+                "transition_history": [],
+            }
+        )
+        assert 'id="tz-select"' in html
+        assert "Europe/Berlin" in html
+        assert "America/New_York" in html
+        assert "cym.setTimezone" in html
+
+    def test_timestamps_render_as_time_elements(self):
+        html = _render_dashboard(
+            {
+                "generated_at": "2026-03-28T14:30:00Z",
+                "summary": {
+                    "running": 0,
+                    "retrying": 0,
+                    "ready": 0,
+                    "waiting": 0,
+                    "needs_attention": 0,
+                    "capacity_in_use": "0/5",
+                },
+                "totals": {
+                    "total_tokens": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "seconds_running": 0,
+                },
+                "controls": {},
+                "running": [],
+                "retrying": [],
+                "ready": [],
+                "waiting": [],
+                "blocked": [],
+                "recently_completed": [],
+                "waiting_reasons": [],
+                "recent_problems": [],
+                "skipped": [],
+                "workflow_config": {},
+                "transition_history": [],
+            }
+        )
+        assert '<time class="cym-ts" data-utc=' in html
