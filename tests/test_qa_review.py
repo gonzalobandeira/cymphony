@@ -794,6 +794,117 @@ class TestExecutionModeEnum:
 # ---------------------------------------------------------------------------
 
 class TestQAAgentConfig:
+    @pytest.mark.asyncio
+    async def test_worker_uses_qa_agent_config_in_review_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify _worker instantiates the QA agent runner in review mode."""
+        qa_agent = CodingAgentConfig(
+            command="review-cli",
+            turn_timeout_ms=111,
+            read_timeout_ms=111,
+            stall_timeout_ms=111,
+            dangerously_skip_permissions=False,
+            provider="codex",
+        )
+        orch = _build_orchestrator(qa_agent=qa_agent)
+        issue = _build_issue(state="QA Review")
+
+        calls: list[tuple[str, CodingAgentConfig]] = []
+        original_create = create_agent_runner
+
+        def spy_create(provider: str, config: CodingAgentConfig):
+            calls.append((provider, config))
+            return original_create(provider, config)
+
+        monkeypatch.setattr("cymphony.orchestrator.create_agent_runner", spy_create)
+
+        # Stub out workspace creation so _worker proceeds past it
+        async def fake_create_for_issue(identifier):
+            from cymphony.workspace import Workspace
+            return Workspace(path=Path("/tmp/fake"), branch="agent/fake")
+
+        monkeypatch.setattr(
+            "cymphony.workspace.WorkspaceManager.create_for_issue",
+            fake_create_for_issue,
+        )
+
+        entry = RunningEntry(
+            issue_id=issue.id,
+            identifier=issue.identifier,
+            issue=issue,
+            task=None,
+            session=_build_session(),
+            retry_attempt=None,
+            started_at=datetime.now(timezone.utc),
+            mode=ExecutionMode.REVIEW,
+        )
+
+        # The worker will fail when trying to render prompt, but we only
+        # care that create_agent_runner was called with the QA config.
+        try:
+            await orch._worker(issue, attempt=None, entry=entry)
+        except Exception:
+            pass
+
+        assert len(calls) == 1
+        assert calls[0][0] == "codex"
+        assert calls[0][1] is qa_agent
+
+    @pytest.mark.asyncio
+    async def test_worker_uses_main_agent_config_in_build_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify _worker uses the main agent config when not in review mode."""
+        qa_agent = CodingAgentConfig(
+            command="review-cli",
+            turn_timeout_ms=111,
+            read_timeout_ms=111,
+            stall_timeout_ms=111,
+            dangerously_skip_permissions=False,
+            provider="codex",
+        )
+        orch = _build_orchestrator(qa_agent=qa_agent)
+        issue = _build_issue(state="Todo")
+
+        calls: list[tuple[str, CodingAgentConfig]] = []
+        original_create = create_agent_runner
+
+        def spy_create(provider: str, config: CodingAgentConfig):
+            calls.append((provider, config))
+            return original_create(provider, config)
+
+        monkeypatch.setattr("cymphony.orchestrator.create_agent_runner", spy_create)
+
+        async def fake_create_for_issue(identifier):
+            from cymphony.workspace import Workspace
+            return Workspace(path=Path("/tmp/fake"), branch="agent/fake")
+
+        monkeypatch.setattr(
+            "cymphony.workspace.WorkspaceManager.create_for_issue",
+            fake_create_for_issue,
+        )
+
+        entry = RunningEntry(
+            issue_id=issue.id,
+            identifier=issue.identifier,
+            issue=issue,
+            task=None,
+            session=_build_session(),
+            retry_attempt=None,
+            started_at=datetime.now(timezone.utc),
+            mode=ExecutionMode.BUILD,
+        )
+
+        try:
+            await orch._worker(issue, attempt=None, entry=entry)
+        except Exception:
+            pass
+
+        assert len(calls) == 1
+        assert calls[0][0] == orch._config.agent.provider
+        assert calls[0][1] is orch._config.coding_agent
+
     def test_snapshot_includes_qa_agent_when_configured(self) -> None:
         qa_agent = CodingAgentConfig(
             command="review-agent",
