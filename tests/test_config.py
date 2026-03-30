@@ -298,3 +298,107 @@ def test_qa_review_disabled_does_not_extend_active_states() -> None:
         "qa_review": {"enabled": False, "dispatch": "QA Review"},
     }))
     assert "QA Review" not in config.tracker.active_states
+
+
+# ---------------------------------------------------------------------------
+# QA agent config tests (BAP-199)
+# ---------------------------------------------------------------------------
+
+def test_qa_agent_defaults_to_none_when_omitted() -> None:
+    """No qa_review.agent block → QAReviewConfig.agent is None."""
+    config = build_config(_workflow_with_transitions({
+        "qa_review": {"enabled": True},
+    }))
+    assert config.transitions.qa_review.agent is None
+
+
+def test_qa_agent_explicit_override() -> None:
+    """Explicit qa_review.agent block creates a CodingAgentConfig."""
+    config = build_config(_workflow_with_transitions({
+        "qa_review": {
+            "enabled": True,
+            "agent": {
+                "provider": "codex",
+                "command": "codex-cli",
+                "turn_timeout_ms": 999,
+                "stall_timeout_ms": 555,
+            },
+        },
+    }))
+    qa_agent = config.transitions.qa_review.agent
+    assert qa_agent is not None
+    assert qa_agent.provider == "codex"
+    assert qa_agent.command == "codex-cli"
+    assert qa_agent.turn_timeout_ms == 999
+    assert qa_agent.stall_timeout_ms == 555
+
+
+def test_qa_agent_inherits_defaults_from_main_coding_agent() -> None:
+    """Fields omitted in qa_review.agent inherit from the main codex config."""
+    config = build_config(_workflow_with_transitions({
+        "qa_review": {
+            "enabled": True,
+            "agent": {
+                "provider": "claude",
+            },
+        },
+    }))
+    qa_agent = config.transitions.qa_review.agent
+    assert qa_agent is not None
+    assert qa_agent.provider == "claude"
+    # command should inherit from the main codex block default ("claude")
+    assert qa_agent.command == "claude"
+    # timeouts inherit from main coding_agent defaults
+    assert qa_agent.turn_timeout_ms == config.coding_agent.turn_timeout_ms
+    assert qa_agent.stall_timeout_ms == config.coding_agent.stall_timeout_ms
+
+
+def test_qa_agent_validation_rejects_invalid_provider() -> None:
+    config = build_config(_workflow_with_transitions({
+        "qa_review": {
+            "enabled": True,
+            "agent": {"provider": "gpt4"},
+        },
+    }))
+    result = validate_dispatch_config(config)
+    assert not result.ok
+    assert any("qa_review.agent.provider" in e for e in result.errors)
+
+
+def test_qa_agent_empty_command_inherits_from_main() -> None:
+    """An empty command in qa_review.agent falls back to the main codex command."""
+    config = build_config(_workflow_with_transitions({
+        "qa_review": {
+            "enabled": True,
+            "agent": {"command": ""},
+        },
+    }))
+    qa_agent = config.transitions.qa_review.agent
+    assert qa_agent is not None
+    assert qa_agent.command == config.coding_agent.command
+    result = validate_dispatch_config(config)
+    assert result.ok
+
+
+def test_qa_agent_validation_passes_with_valid_config() -> None:
+    config = build_config(_workflow_with_transitions({
+        "qa_review": {
+            "enabled": True,
+            "agent": {
+                "provider": "claude",
+                "command": "claude",
+            },
+        },
+    }))
+    result = validate_dispatch_config(config)
+    assert result.ok
+
+
+def test_qa_agent_backward_compat_no_agent_block() -> None:
+    """Legacy workflow without qa_review.agent works exactly as before."""
+    config = build_config(_workflow_with_transitions({
+        "qa_review": {"enabled": True, "dispatch": "QA Review"},
+    }))
+    assert config.transitions.qa_review.agent is None
+    assert config.transitions.qa_review.enabled is True
+    assert config.transitions.qa_review.dispatch == "QA Review"

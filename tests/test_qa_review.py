@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -39,6 +39,7 @@ from cymphony.models import (
     WorkflowDefinition,
     WorkspaceConfig,
 )
+from cymphony.runners import create_agent_runner
 from cymphony.orchestrator import Orchestrator
 from cymphony.review import REVIEW_RESULT_FILENAME
 from cymphony.workflow import render_review_prompt
@@ -54,6 +55,7 @@ def _build_config(
     *,
     max_bounces: int = 2,
     max_retries: int = 2,
+    qa_agent: CodingAgentConfig | None = None,
 ) -> ServiceConfig:
     if active_states is None:
         active_states = ["Todo", "In Progress", "QA Review"]
@@ -108,6 +110,7 @@ def _build_config(
                 failure="Todo",
                 max_bounces=max_bounces,
                 max_retries=max_retries,
+                agent=qa_agent,
             ),
         ),
     )
@@ -118,11 +121,13 @@ def _build_orchestrator(
     *,
     max_bounces: int = 2,
     max_retries: int = 2,
+    qa_agent: CodingAgentConfig | None = None,
 ) -> Orchestrator:
     config = _build_config(
         qa_enabled=qa_enabled,
         max_bounces=max_bounces,
         max_retries=max_retries,
+        qa_agent=qa_agent,
     )
     workflow = WorkflowDefinition(config={}, prompt_template="Build prompt for {{ issue.title }}")
     return Orchestrator(Path("WORKFLOW.md"), config, workflow)
@@ -782,3 +787,182 @@ class TestExecutionModeEnum:
             started_at=datetime.now(timezone.utc),
         )
         assert entry.mode == ExecutionMode.BUILD
+
+
+# ---------------------------------------------------------------------------
+# QA agent config wiring (BAP-199)
+# ---------------------------------------------------------------------------
+
+class TestQAAgentConfig:
+
+    @staticmethod
+    def _qa_agent_config() -> CodingAgentConfig:
+        return CodingAgentConfig(
+            command="review-cli",
+            turn_timeout_ms=111,
+            read_timeout_ms=111,
+            stall_timeout_ms=111,
+            dangerously_skip_permissions=False,
+            provider="codex",
+        )
+
+    @staticmethod
+    async def _run_worker_with_spy(
+        monkeypatch: pytest.MonkeyPatch,
+        qa_agent: CodingAgentConfig,
+        issue_state: str,
+        mode: ExecutionMode,
+    ) -> tuple["Orchestrator", list[tuple[str, CodingAgentConfig]]]:
+        """Spawn a worker with a spy on create_agent_runner and return (orch, calls)."""
+        orch = _build_orchestrator(qa_agent=qa_agent)
+        issue = _build_issue(state=issue_state)
+
+        calls: list[tuple[str, CodingAgentConfig]] = []
+        original_create = create_agent_runner
+
+        def spy_create(provider: str, config: CodingAgentConfig):
+            calls.append((provider, config))
+            return original_create(provider, config)
+
+        monkeypatch.setattr("cymphony.orchestrator.create_agent_runner", spy_create)
+
+        async def fake_create_for_issue(identifier):
+            from cymphony.workspace import Workspace
+            return Workspace(path=Path("/tmp/fake"), branch="agent/fake")
+
+        monkeypatch.setattr(
+            "cymphony.workspace.WorkspaceManager.create_for_issue",
+            fake_create_for_issue,
+        )
+
+        entry = RunningEntry(
+            issue_id=issue.id,
+            identifier=issue.identifier,
+            issue=issue,
+            task=None,
+            session=_build_session(),
+            retry_attempt=None,
+            started_at=datetime.now(timezone.utc),
+            mode=mode,
+        )
+
+        try:
+            await orch._worker(issue, attempt=None, entry=entry)
+        except Exception:
+            pass
+
+        return orch, calls
+
+    @pytest.mark.asyncio
+    async def test_worker_uses_qa_agent_config_in_review_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify _worker instantiates the QA agent runner in review mode."""
+        qa_agent = self._qa_agent_config()
+        _, calls = await self._run_worker_with_spy(
+            monkeypatch, qa_agent, issue_state="QA Review", mode=ExecutionMode.REVIEW,
+        )
+        assert len(calls) == 1
+        assert calls[0][0] == "codex"
+        assert calls[0][1] is qa_agent
+
+    @pytest.mark.asyncio
+    async def test_worker_uses_main_agent_config_in_build_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify _worker uses the main agent config when not in review mode."""
+        qa_agent = self._qa_agent_config()
+        orch, calls = await self._run_worker_with_spy(
+            monkeypatch, qa_agent, issue_state="Todo", mode=ExecutionMode.BUILD,
+        )
+        assert len(calls) == 1
+        assert calls[0][0] == orch._config.agent.provider
+        assert calls[0][1] is orch._config.coding_agent
+
+    def test_snapshot_includes_qa_agent_when_configured(self) -> None:
+        qa_agent = CodingAgentConfig(
+            command="review-agent",
+            turn_timeout_ms=500,
+            read_timeout_ms=500,
+            stall_timeout_ms=500,
+            dangerously_skip_permissions=True,
+            provider="codex",
+        )
+        orch = _build_orchestrator(qa_agent=qa_agent)
+        snapshot = orch.snapshot()
+        qa = snapshot["workflow_config"]["transitions"]["qa_review"]
+        assert qa["agent"] is not None
+        assert qa["agent"]["provider"] == "codex"
+        assert qa["agent"]["command"] == "review-agent"
+        assert qa["agent"]["turn_timeout_ms"] == 500
+        assert qa["agent"]["read_timeout_ms"] == 500
+        assert qa["agent"]["stall_timeout_ms"] == 500
+        assert qa["agent"]["dangerously_skip_permissions"] is True
+
+    def test_snapshot_qa_agent_is_none_when_not_configured(self) -> None:
+        orch = _build_orchestrator()
+        snapshot = orch.snapshot()
+        qa = snapshot["workflow_config"]["transitions"]["qa_review"]
+        assert qa["agent"] is None
+
+    def test_qa_review_config_defaults_agent_to_none(self) -> None:
+        qa = QAReviewConfig(enabled=True)
+        assert qa.agent is None
+
+    def test_qa_review_config_accepts_agent(self) -> None:
+        agent = CodingAgentConfig(
+            command="qa-cli",
+            turn_timeout_ms=100,
+            read_timeout_ms=100,
+            stall_timeout_ms=100,
+            dangerously_skip_permissions=False,
+            provider="claude",
+        )
+        qa = QAReviewConfig(enabled=True, agent=agent)
+        assert qa.agent is agent
+        assert qa.agent.command == "qa-cli"
+
+    @pytest.mark.asyncio
+    async def test_reconcile_uses_qa_agent_stall_timeout_in_review_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        qa_agent = CodingAgentConfig(
+            command="review-cli",
+            turn_timeout_ms=111,
+            read_timeout_ms=111,
+            stall_timeout_ms=50,
+            dangerously_skip_permissions=False,
+            provider="codex",
+        )
+        orch = _build_orchestrator(qa_agent=qa_agent)
+        issue = _build_issue(state="QA Review")
+        entry = _build_running_entry(issue, mode=ExecutionMode.REVIEW)
+        entry.started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        orch._state.running[issue.id] = entry
+
+        retries: list[tuple[str, str, int | None, str | None]] = []
+
+        async def fake_terminate(issue_id: str, cleanup_workspace: bool = False) -> None:
+            return None
+
+        async def fake_schedule_retry(
+            issue_id: str,
+            identifier: str,
+            attempt: int | None,
+            *,
+            error: str | None = None,
+            retry_delay_ms: int | None = None,
+        ) -> None:
+            retries.append((issue_id, identifier, attempt, error))
+
+        monkeypatch.setattr(orch, "_terminate_running_issue", fake_terminate)
+        monkeypatch.setattr(orch, "_schedule_retry", fake_schedule_retry)
+        monkeypatch.setattr(
+            "cymphony.orchestrator._now_utc",
+            lambda: entry.started_at + timedelta(milliseconds=100),
+        )
+
+        await orch._reconcile_running_issues()
+
+        assert entry.status == RunStatus.STALLED
+        assert retries == [(issue.id, issue.identifier, 1, "stall_timeout")]
