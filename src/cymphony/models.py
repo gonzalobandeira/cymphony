@@ -150,6 +150,7 @@ class QAReviewConfig:
     failure: str | None = "Todo"
     max_bounces: int = 2
     max_retries: int = 2
+    agent: CodingAgentConfig | None = None
 
 
 @dataclass
@@ -188,6 +189,18 @@ class ServiceConfig:
     server: ServerConfig
     preflight: PreflightConfig
     transitions: TransitionsConfig = field(default_factory=TransitionsConfig)
+    coding_agent: CodingAgentConfig = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Populate the legacy coding_agent alias from the canonical runner config."""
+        self.coding_agent = CodingAgentConfig(
+            command=self.runner.command,
+            turn_timeout_ms=self.runner.turn_timeout_ms,
+            read_timeout_ms=self.runner.read_timeout_ms,
+            stall_timeout_ms=self.runner.stall_timeout_ms,
+            dangerously_skip_permissions=self.runner.dangerously_skip_permissions,
+            provider=self.agent.provider,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +358,7 @@ class RetryEntry:
 class ProblemRecord:
     """Recent operator-visible problem captured by the orchestrator."""
     kind: str
+    severity: str  # "error", "warning", "info"
     summary: str
     detail: str
     observed_at: datetime
@@ -402,6 +416,7 @@ class OrchestratorState:
     claimed: set[str] = field(default_factory=set)
     retry_attempts: dict[str, RetryEntry] = field(default_factory=dict)
     qa_review_bounces: dict[str, int] = field(default_factory=dict)
+    qa_review_comment_ids: dict[str, str] = field(default_factory=dict)
     skipped: dict[str, SkippedEntry] = field(default_factory=dict)
     completed: set[str] = field(default_factory=set)
     dispatch_paused: bool = False

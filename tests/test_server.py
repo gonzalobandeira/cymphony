@@ -477,6 +477,8 @@ def test_render_dashboard_shows_waiting_reasons_and_recent_problems(
             "recent_problems": [
                 {
                     "issue_identifier": "BAP-173",
+                    "severity": "error",
+                    "kind": "invalid_config",
                     "summary": "Dispatch configuration is invalid",
                     "detail": "tracker.project_slug is required",
                     "observed_at": now.isoformat(),
@@ -505,7 +507,10 @@ def test_render_dashboard_shows_waiting_reasons_and_recent_problems(
     assert "Paused" in html
     assert "BAP-155" in html
     assert "Waiting Reasons (2)" in html
-    assert "Recent Problems (1)" in html
+    assert "Problems (1)" in html
+    assert "1 error" in html
+    assert "invalid_config" in html
+    assert "severity-error" in html
     assert "pause_dispatching" in html
 
 
@@ -796,12 +801,19 @@ async def test_setup_post_writes_workflow_file(tmp_path: Path) -> None:
             "max_retry_backoff_ms": "300000",
             "command": "claude",
             "turn_timeout_ms": "3600000",
+            "read_timeout_ms": "60000",
             "stall_timeout_ms": "300000",
             "dangerously_skip_permissions": "1",
             "qa_review_enabled": "1",
             "qa_review_dispatch": "QA Review",
             "qa_review_success": "In Review",
             "qa_review_failure": "Todo",
+            "qa_agent_provider": "codex",
+            "qa_agent_command": "review-cli",
+            "qa_agent_turn_timeout_ms": "120000",
+            "qa_agent_read_timeout_ms": "45000",
+            "qa_agent_stall_timeout_ms": "15000",
+            "qa_agent_dangerously_skip_permissions": "1",
             "after_create": "git clone git@github.com:org/repo.git .",
             "before_run": "git fetch origin",
             "after_run": "git status",
@@ -821,11 +833,20 @@ async def test_setup_post_writes_workflow_file(tmp_path: Path) -> None:
     assert saved.config["tracker"]["project_slug"] == "cymphony-b2a8d0064141"
     assert saved.config["tracker"]["assignee"] == "gonzalobandeira"
     assert saved.config["runner"]["command"] == "claude"
+    assert saved.config["runner"]["read_timeout_ms"] == 60000
     assert saved.config["transitions"]["qa_review"] == {
         "enabled": True,
         "dispatch": "QA Review",
         "success": "In Review",
         "failure": "Todo",
+        "agent": {
+            "provider": "codex",
+            "command": "review-cli",
+            "turn_timeout_ms": 120000,
+            "read_timeout_ms": 45000,
+            "stall_timeout_ms": 15000,
+            "dangerously_skip_permissions": True,
+        },
     }
     assert saved.config["review_prompt"] == "Review {{ issue.identifier }} carefully."
     assert saved.prompt_template == "You are working on {{ issue.identifier }}."
@@ -925,6 +946,7 @@ agent:
 codex:
   command: claude
   turn_timeout_ms: 1000
+  read_timeout_ms: 2222
   stall_timeout_ms: 1000
   dangerously_skip_permissions: true
 hooks:
@@ -937,6 +959,13 @@ transitions:
     dispatch: QA Review
     success: In Review
     failure: Todo
+    agent:
+      provider: codex
+      command: review-cli
+      turn_timeout_ms: 500
+      read_timeout_ms: 600
+      stall_timeout_ms: 700
+      dangerously_skip_permissions: true
 review_prompt: Review {{ issue.identifier }} carefully.
 ---
 Implement {{ issue.identifier }}.
@@ -957,8 +986,11 @@ Implement {{ issue.identifier }}.
     assert response.status == 200
     assert 'name="qa_review_enabled"' in response.text
     assert 'name="qa_review_enabled" value="1" checked' in response.text
+    assert 'name="read_timeout_ms" value="2222"' in response.text
     assert 'name="qa_review_dispatch" value="QA Review"' in response.text
     assert 'name="qa_review_failure" value="Todo"' in response.text
+    assert 'name="qa_agent_provider" value="codex"' in response.text
+    assert 'name="qa_agent_read_timeout_ms" value="600"' in response.text
     assert "Review {{ issue.identifier }} carefully." in response.text
 
 
@@ -1059,3 +1091,244 @@ def test_render_dashboard_handles_empty_workflow_config_gracefully() -> None:
 
     assert "Workflow Configuration" in html
     assert "No transitions recorded yet." in html
+
+# ---- Timezone selector tests ----
+
+
+class TestFormatTimestamp:
+    def test_returns_time_element_with_data_utc(self):
+        result = server._format_timestamp("2026-03-28T14:30:00Z")
+        assert "<time" in result
+        assert 'class="cym-ts"' in result
+        assert 'data-utc="2026-03-28T14:30:00+00:00"' in result
+        assert "2026-03-28 14:30 UTC" in result
+
+    def test_returns_escaped_unknown_for_none(self):
+        result = server._format_timestamp(None)
+        assert result == "Unknown"
+
+    def test_returns_escaped_raw_for_invalid(self):
+        result = server._format_timestamp("not-a-date")
+        assert result == "not-a-date"
+
+    def test_non_utc_input_normalized(self):
+        result = server._format_timestamp("2026-03-28T16:30:00+02:00")
+        assert 'data-utc="2026-03-28T14:30:00+00:00"' in result
+        assert "2026-03-28 14:30 UTC" in result
+
+
+class TestDashboardTimezoneSelector:
+    def test_tz_select_present_in_dashboard(self):
+        html = _render_dashboard(
+            {
+                "generated_at": "2026-03-28T14:30:00Z",
+                "summary": {
+                    "running": 0,
+                    "retrying": 0,
+                    "ready": 0,
+                    "waiting": 0,
+                    "needs_attention": 0,
+                    "capacity_in_use": "0/5",
+                },
+                "totals": {
+                    "total_tokens": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "seconds_running": 0,
+                },
+                "controls": {},
+                "running": [],
+                "retrying": [],
+                "ready": [],
+                "waiting": [],
+                "blocked": [],
+                "recently_completed": [],
+                "waiting_reasons": [],
+                "recent_problems": [],
+                "skipped": [],
+                "workflow_config": {},
+                "transition_history": [],
+            }
+        )
+        assert 'id="tz-select"' in html
+        assert "Europe/Berlin" in html
+        assert "America/New_York" in html
+        assert "cym.setTimezone" in html
+        assert "Europe/Berlin (CET)" not in html
+        assert "America/New_York (EST)" not in html
+
+    def test_timestamps_render_as_time_elements(self):
+        html = _render_dashboard(
+            {
+                "generated_at": "2026-03-28T14:30:00Z",
+                "summary": {
+                    "running": 0,
+                    "retrying": 0,
+                    "ready": 0,
+                    "waiting": 0,
+                    "needs_attention": 0,
+                    "capacity_in_use": "0/5",
+                },
+                "totals": {
+                    "total_tokens": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "seconds_running": 0,
+                },
+                "controls": {},
+                "running": [],
+                "retrying": [],
+                "ready": [],
+                "waiting": [],
+                "blocked": [],
+                "recently_completed": [],
+                "waiting_reasons": [],
+                "recent_problems": [],
+                "skipped": [],
+                "workflow_config": {},
+                "transition_history": [],
+            }
+        )
+        assert '<time class="cym-ts" data-utc=' in html
+
+
+class TestDashboardDrilldownTimestamps:
+    def test_issue_drilldown_renders_timestamps_as_time_elements(self):
+        html = server._render_issue_drilldown(
+            {
+                "issue_identifier": "BAP-203",
+                "started_at": "2026-03-28T14:30:00Z",
+                "last_event_at": "2026-03-28T15:00:00Z",
+            }
+        )
+
+        assert html.count('<time class="cym-ts" data-utc=') >= 2
+        assert "2026-03-28 14:30 UTC" in html
+        assert "2026-03-28 15:00 UTC" in html
+
+    def test_issue_comments_render_timestamp_as_time_element(self):
+        html = server._render_issue_comments(
+            [
+                {
+                    "author": "Gonzalo",
+                    "created_at": "2026-03-28T14:30:00Z",
+                    "body": "Looks good",
+                }
+            ]
+        )
+
+        assert '<time class="cym-ts" data-utc="2026-03-28T14:30:00+00:00">' in html
+
+    def test_recent_events_render_timestamp_as_time_element(self):
+        html = server._render_recent_events(
+            [
+                {
+                    "event": "turn.completed",
+                    "timestamp": "2026-03-28T14:30:00Z",
+                    "message": "Finished run",
+                    "usage": {"input_tokens": 1, "output_tokens": 2},
+                }
+            ]
+        )
+
+        assert '<time class="cym-ts" data-utc="2026-03-28T14:30:00+00:00">' in html
+def test_problems_panel_renders_severity_badges_and_issue_links() -> None:
+    now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)
+    html = _render_dashboard(
+        {
+            "generated_at": now.isoformat(),
+            "summary": {
+                "running": 0,
+                "retrying": 0,
+                "ready": 0,
+                "waiting": 0,
+                "needs_attention": 2,
+                "capacity_in_use": "0/5",
+            },
+            "totals": {},
+            "controls": {"dispatch_paused": False, "shutdown_requested": False, "recent_actions": []},
+            "running": [],
+            "retrying": [],
+            "ready": [],
+            "waiting": [],
+            "blocked": [],
+            "recently_completed": [],
+            "waiting_reasons": [],
+            "recent_problems": [
+                {
+                    "issue_identifier": "BAP-200",
+                    "severity": "error",
+                    "kind": "hook_failed",
+                    "summary": "Worker failed for BAP-200",
+                    "detail": "before_run hook exited with code 1",
+                    "observed_at": now.isoformat(),
+                },
+                {
+                    "issue_identifier": "BAP-201",
+                    "severity": "warning",
+                    "kind": "stall_detected",
+                    "summary": "Worker stalled for BAP-201",
+                    "detail": "No agent events received within 300s timeout.",
+                    "observed_at": now.isoformat(),
+                },
+                {
+                    "issue_identifier": None,
+                    "severity": "error",
+                    "kind": "fetch_candidates_failed",
+                    "summary": "Failed to refresh candidate issues",
+                    "detail": "Connection refused",
+                    "observed_at": now.isoformat(),
+                },
+            ],
+            "skipped": [],
+            "workflow_config": {},
+            "transition_history": [],
+        }
+    )
+
+    assert "Problems (3)" in html
+    assert "2 errors" in html
+    assert "1 warning" in html
+    assert "severity-error" in html
+    assert "severity-warning" in html
+    assert "ERROR" in html
+    assert "WARNING" in html
+    assert "BAP-200" in html
+    assert "BAP-201" in html
+    assert "/api/v1/BAP-200" in html
+    assert "hook_failed" in html
+    assert "stall_detected" in html
+    assert "fetch_candidates_failed" in html
+    assert "problems-panel" in html
+
+
+def test_problems_panel_hidden_when_no_problems() -> None:
+    now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)
+    html = _render_dashboard(
+        {
+            "generated_at": now.isoformat(),
+            "summary": {
+                "running": 0,
+                "retrying": 0,
+                "ready": 0,
+                "waiting": 0,
+                "needs_attention": 0,
+                "capacity_in_use": "0/5",
+            },
+            "totals": {},
+            "controls": {"dispatch_paused": False, "shutdown_requested": False, "recent_actions": []},
+            "running": [],
+            "retrying": [],
+            "ready": [],
+            "waiting": [],
+            "blocked": [],
+            "recently_completed": [],
+            "waiting_reasons": [],
+            "recent_problems": [],
+            "skipped": [],
+            "workflow_config": {},
+            "transition_history": [],
+        }
+    )
+
+    assert "class='panel problems-panel'" not in html

@@ -125,6 +125,7 @@ class StateManager:
         self,
         retry_attempts: dict[str, RetryEntry],
         qa_review_bounces: dict[str, int],
+        qa_review_comment_ids: dict[str, str],
         skipped: dict[str, SkippedEntry],
         dispatch_paused: bool,
     ) -> None:
@@ -137,6 +138,7 @@ class StateManager:
                 for issue_id, entry in retry_attempts.items()
             },
             "qa_review_bounces": dict(qa_review_bounces),
+            "qa_review_comment_ids": dict(qa_review_comment_ids),
             "skipped": {
                 issue_id: _skipped_entry_to_dict(entry)
                 for issue_id, entry in skipped.items()
@@ -211,20 +213,28 @@ class StateManager:
     def restore(self) -> tuple[
         dict[str, RetryEntry],
         dict[str, int],
+        dict[str, str],
         dict[str, SkippedEntry],
         bool,
     ]:
         """Load and deserialize persisted state.
 
-        Returns (retry_attempts, qa_review_bounces, skipped, dispatch_paused).
+        Returns (
+            retry_attempts,
+            qa_review_bounces,
+            qa_review_comment_ids,
+            skipped,
+            dispatch_paused,
+        ).
         On any failure, returns empty collections and False.
         """
         data = self.load()
         if data is None:
-            return {}, {}, {}, False
+            return {}, {}, {}, {}, False
 
         retry_attempts: dict[str, RetryEntry] = {}
         qa_review_bounces: dict[str, int] = {}
+        qa_review_comment_ids: dict[str, str] = {}
         skipped: dict[str, SkippedEntry] = {}
         dispatch_paused = bool(data.get("dispatch_paused", False))
 
@@ -250,6 +260,17 @@ class StateManager:
                         f"error={exc}"
                     )
 
+        raw_comment_ids = data.get("qa_review_comment_ids", {})
+        if isinstance(raw_comment_ids, dict):
+            for issue_id, comment_id in raw_comment_ids.items():
+                if isinstance(comment_id, str) and comment_id:
+                    qa_review_comment_ids[issue_id] = comment_id
+                else:
+                    logger.warning(
+                        "action=state_restore_qa_comment_id_skip "
+                        f"issue_id={issue_id} error=invalid_comment_id"
+                    )
+
         raw_skipped = data.get("skipped", {})
         if isinstance(raw_skipped, dict):
             for issue_id, entry_data in raw_skipped.items():
@@ -264,8 +285,15 @@ class StateManager:
         logger.info(
             f"action=state_restored path={self._path} "
             f"retry_attempts={len(retry_attempts)} qa_review_bounces={len(qa_review_bounces)} "
+            f"qa_review_comment_ids={len(qa_review_comment_ids)} "
             f"skipped={len(skipped)} "
             f"dispatch_paused={dispatch_paused}"
         )
 
-        return retry_attempts, qa_review_bounces, skipped, dispatch_paused
+        return (
+            retry_attempts,
+            qa_review_bounces,
+            qa_review_comment_ids,
+            skipped,
+            dispatch_paused,
+        )

@@ -10,14 +10,14 @@ import math
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from aiohttp import web
 
 from .config import build_config, validate_dispatch_config
 from .linear import LinearClient
 from .models import Issue, WorkflowDefinition
-from .workflow import load_workflow, save_workflow
+from .workflow import LOCAL_CONFIG_DIR, LOCAL_WORKFLOW_FILENAME, load_workflow, save_workflow
 
 if TYPE_CHECKING:
     from .orchestrator import Orchestrator
@@ -39,6 +39,7 @@ _DEFAULT_SETUP_FORM = {
     "provider": "claude",
     "command": "",
     "turn_timeout_ms": "3600000",
+    "read_timeout_ms": "60000",
     "stall_timeout_ms": "300000",
     "dangerously_skip_permissions": True,
     "after_create": "",
@@ -51,6 +52,12 @@ _DEFAULT_SETUP_FORM = {
     "qa_review_dispatch": "QA Review",
     "qa_review_success": "In Review",
     "qa_review_failure": "Todo",
+    "qa_agent_provider": "",
+    "qa_agent_command": "",
+    "qa_agent_turn_timeout_ms": "",
+    "qa_agent_read_timeout_ms": "",
+    "qa_agent_stall_timeout_ms": "",
+    "qa_agent_dangerously_skip_permissions": False,
     "review_prompt": "",
     "prompt_template": """You are a senior software engineer working on the project.\n\n## Issue\n\n**Title:** {{ issue.title }}\n**Identifier:** {{ issue.identifier }}\n**State:** {{ issue.state }}\n{% if issue.description %}\n**Description:**\n{{ issue.description }}\n{% endif %}\n\n## Instructions\n\n1. Read the issue carefully.\n2. Create and checkout a branch named `agent/{{ issue.identifier | lower }}`.\n3. Implement the requested change.\n4. Update tests as needed.\n5. Keep changes minimal and consistent with the codebase.\n""",
 }
@@ -121,13 +128,14 @@ def _find_issue_snapshot(snapshot: dict, identifier: str) -> dict | None:
     return None
 
 
-def _render_key_value(label: str, value: str | None) -> str:
+def _render_key_value(label: str, value: str | None, *, escape_value: bool = True) -> str:
     if not value:
         return ""
+    rendered_value = escape(value) if escape_value else value
     return (
         f"<div class='kv'>"
         f"<span class='k'>{escape(label)}</span>"
-        f"<span class='v'>{escape(value)}</span>"
+        f"<span class='v'>{rendered_value}</span>"
         f"</div>"
     )
 
@@ -139,7 +147,7 @@ def _render_issue_comments(comments: list[dict]) -> str:
     items = []
     for comment in comments:
         author = escape(str(comment.get("author") or "Unknown"))
-        created_at = escape(str(comment.get("created_at") or ""))
+        created_at = _format_timestamp(str(comment.get("created_at") or ""))
         body = escape(str(comment.get("body") or ""))
         items.append(
             f"<li><strong>{author}</strong>"
@@ -156,7 +164,7 @@ def _render_recent_events(events: list[dict]) -> str:
     items = []
     for event in reversed(events):
         label = escape(str(event.get("event") or "unknown"))
-        timestamp = escape(str(event.get("timestamp") or ""))
+        timestamp = _format_timestamp(str(event.get("timestamp") or ""))
         message = escape(str(event.get("message") or ""))
         usage = event.get("usage") or {}
         usage_text = ""
@@ -205,8 +213,8 @@ def _render_issue_drilldown(entry: dict, retry_due: str | None = None) -> str:
         _render_key_value("Run status", entry.get("run_status") or entry.get("status")),
         _render_key_value("Session", entry.get("session_id")),
         _render_key_value("Workspace", entry.get("workspace_path")),
-        _render_key_value("Started", entry.get("started_at")),
-        _render_key_value("Last event at", entry.get("last_event_at")),
+        _render_key_value("Started", _format_timestamp(entry.get("started_at")), escape_value=False),
+        _render_key_value("Last event at", _format_timestamp(entry.get("last_event_at")), escape_value=False),
         _render_key_value("Retry attempt", str(entry.get("retry_attempt")) if entry.get("retry_attempt") is not None else None),
         _render_key_value("Queued retry", retry_due),
         _render_key_value("Plan comment", entry.get("plan_comment_id")),
@@ -264,6 +272,7 @@ def _workflow_form_data(
         server = raw.get("server") or {}
         transitions = raw.get("transitions") or {}
         qa_review = transitions.get("qa_review") or {}
+        qa_agent = qa_review.get("agent") or {}
 
         data.update(
             {
@@ -281,6 +290,7 @@ def _workflow_form_data(
                 "provider": str(agent.get("provider") or data["provider"]),
                 "command": str(runner.get("command") or data["command"]),
                 "turn_timeout_ms": str(runner.get("turn_timeout_ms") or data["turn_timeout_ms"]),
+                "read_timeout_ms": str(runner.get("read_timeout_ms") or data["read_timeout_ms"]),
                 "stall_timeout_ms": str(runner.get("stall_timeout_ms") or data["stall_timeout_ms"]),
                 "dangerously_skip_permissions": bool(runner.get("dangerously_skip_permissions", True)),
                 "after_create": str(hooks.get("after_create") or ""),
@@ -293,6 +303,12 @@ def _workflow_form_data(
                 "qa_review_dispatch": str(qa_review.get("dispatch") or data["qa_review_dispatch"]),
                 "qa_review_success": str(qa_review.get("success") or data["qa_review_success"]),
                 "qa_review_failure": str(qa_review.get("failure") or data["qa_review_failure"]),
+                "qa_agent_provider": str(qa_agent.get("provider") or ""),
+                "qa_agent_command": str(qa_agent.get("command") or ""),
+                "qa_agent_turn_timeout_ms": str(qa_agent.get("turn_timeout_ms") or ""),
+                "qa_agent_read_timeout_ms": str(qa_agent.get("read_timeout_ms") or ""),
+                "qa_agent_stall_timeout_ms": str(qa_agent.get("stall_timeout_ms") or ""),
+                "qa_agent_dangerously_skip_permissions": bool(qa_agent.get("dangerously_skip_permissions", False)),
                 "review_prompt": str(raw.get("review_prompt") or ""),
                 "prompt_template": workflow.prompt_template or data["prompt_template"],
             }
@@ -345,6 +361,7 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
         "runner": {
             "command": str(form.get("command") or "").strip(),
             "turn_timeout_ms": int(str(form.get("turn_timeout_ms") or "3600000")),
+            "read_timeout_ms": int(str(form.get("read_timeout_ms") or "60000")),
             "stall_timeout_ms": int(str(form.get("stall_timeout_ms") or "300000")),
             "dangerously_skip_permissions": bool(form.get("dangerously_skip_permissions")),
         },
@@ -358,15 +375,37 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
     qa_dispatch = str(form.get("qa_review_dispatch") or "").strip()
     qa_success = str(form.get("qa_review_success") or "").strip()
     qa_failure = str(form.get("qa_review_failure") or "").strip()
+    qa_agent_provider = str(form.get("qa_agent_provider") or "").strip()
+    qa_agent_command = str(form.get("qa_agent_command") or "").strip()
+    qa_agent_turn_timeout = str(form.get("qa_agent_turn_timeout_ms") or "").strip()
+    qa_agent_read_timeout = str(form.get("qa_agent_read_timeout_ms") or "").strip()
+    qa_agent_stall_timeout = str(form.get("qa_agent_stall_timeout_ms") or "").strip()
+    qa_agent_skip_perms = bool(form.get("qa_agent_dangerously_skip_permissions"))
     if qa_enabled or qa_dispatch or qa_success or qa_failure:
-        config["transitions"] = {
-            "qa_review": {
-                "enabled": qa_enabled,
-                "dispatch": qa_dispatch or None,
-                "success": qa_success or None,
-                "failure": qa_failure or None,
-            }
+        qa_review_block: dict[str, Any] = {
+            "enabled": qa_enabled,
+            "dispatch": qa_dispatch or None,
+            "success": qa_success or None,
+            "failure": qa_failure or None,
         }
+        # Build QA agent override only when at least one field is set
+        qa_agent_block: dict[str, Any] = {}
+        if qa_agent_provider:
+            qa_agent_block["provider"] = qa_agent_provider
+        if qa_agent_command:
+            qa_agent_block["command"] = qa_agent_command
+        if qa_agent_turn_timeout:
+            qa_agent_block["turn_timeout_ms"] = int(qa_agent_turn_timeout)
+        if qa_agent_read_timeout:
+            qa_agent_block["read_timeout_ms"] = int(qa_agent_read_timeout)
+        if qa_agent_stall_timeout:
+            qa_agent_block["stall_timeout_ms"] = int(qa_agent_stall_timeout)
+        if qa_agent_skip_perms:
+            qa_agent_block["dangerously_skip_permissions"] = True
+        if qa_agent_block:
+            qa_review_block["agent"] = qa_agent_block
+
+        config["transitions"] = {"qa_review": qa_review_block}
 
     review_prompt = str(form.get("review_prompt") or "").strip()
     if review_prompt:
@@ -427,7 +466,7 @@ def _render_setup_page(
 ) -> str:
     title = "Set Up Cymphony" if setup_mode else "Workflow Settings"
     subtitle = (
-        "Create a WORKFLOW.md so the service can start."
+        f"Create a config in {LOCAL_CONFIG_DIR}/{LOCAL_WORKFLOW_FILENAME} so the service can start."
         if setup_mode
         else "Edit the current workflow. Running services will reload changes when the file updates."
     )
@@ -548,6 +587,10 @@ def _render_setup_page(
         <input id="turn_timeout_ms" name="turn_timeout_ms" value="{field("turn_timeout_ms")}" required />
       </section>
       <section class="card">
+        <label for="read_timeout_ms">Read timeout (ms)</label>
+        <input id="read_timeout_ms" name="read_timeout_ms" value="{field("read_timeout_ms")}" required />
+      </section>
+      <section class="card">
         <label for="stall_timeout_ms">Stall timeout (ms)</label>
         <input id="stall_timeout_ms" name="stall_timeout_ms" value="{field("stall_timeout_ms")}" required />
       </section>
@@ -575,6 +618,32 @@ def _render_setup_page(
       <section class="card">
         <label for="qa_review_failure">QA review failure state</label>
         <input id="qa_review_failure" name="qa_review_failure" value="{field("qa_review_failure")}" />
+      </section>
+      <section class="card">
+        <label for="qa_agent_provider">QA agent provider (optional override)</label>
+        <input id="qa_agent_provider" name="qa_agent_provider" value="{field("qa_agent_provider")}" placeholder="inherit from main" />
+        <div class="muted">Leave blank to use the main agent provider.</div>
+      </section>
+      <section class="card">
+        <label for="qa_agent_command">QA agent command (optional override)</label>
+        <input id="qa_agent_command" name="qa_agent_command" value="{field("qa_agent_command")}" placeholder="inherit from main" />
+        <div class="muted">Leave blank to use the main agent command.</div>
+      </section>
+      <section class="card">
+        <label for="qa_agent_turn_timeout_ms">QA agent turn timeout (ms, optional)</label>
+        <input id="qa_agent_turn_timeout_ms" name="qa_agent_turn_timeout_ms" value="{field("qa_agent_turn_timeout_ms")}" placeholder="inherit from main" />
+      </section>
+      <section class="card">
+        <label for="qa_agent_read_timeout_ms">QA agent read timeout (ms, optional)</label>
+        <input id="qa_agent_read_timeout_ms" name="qa_agent_read_timeout_ms" value="{field("qa_agent_read_timeout_ms")}" placeholder="inherit from main" />
+      </section>
+      <section class="card">
+        <label for="qa_agent_stall_timeout_ms">QA agent stall timeout (ms, optional)</label>
+        <input id="qa_agent_stall_timeout_ms" name="qa_agent_stall_timeout_ms" value="{field("qa_agent_stall_timeout_ms")}" placeholder="inherit from main" />
+      </section>
+      <section class="card">
+        <label class="check"><input type="checkbox" name="qa_agent_dangerously_skip_permissions" value="1"{_checkbox_checked(values.get("qa_agent_dangerously_skip_permissions"))} />QA agent: dangerously skip permissions</label>
+        <div class="muted">Leave unchecked to inherit from main agent.</div>
       </section>
       <section class="card full">
         <label for="after_create">after_create hook</label>
@@ -613,13 +682,23 @@ def _render_setup_page(
 
 
 def _format_timestamp(raw: str | None) -> str:
+    """Return an HTML ``<time>`` element with a ``data-utc`` attribute.
+
+    The element's text content is the UTC-formatted display string.  Client-side
+    JavaScript can read ``data-utc`` and re-render it in the user's chosen
+    timezone.  Because this returns raw HTML, callers must **not** escape the
+    result.
+    """
     if not raw:
-        return "Unknown"
+        return escape("Unknown")
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
-        return raw
-    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        return escape(raw)
+    utc_dt = parsed.astimezone(timezone.utc)
+    iso_str = utc_dt.isoformat()
+    display = utc_dt.strftime("%Y-%m-%d %H:%M UTC")
+    return f'<time class="cym-ts" data-utc="{escape(iso_str)}">{escape(display)}</time>'
 
 
 def _format_relative_due(raw: str | None, now: datetime) -> str:
@@ -872,19 +951,19 @@ def _render_operator_cards(
         for row in rows:
             if mode == "running":
                 meta = [
-                    ("Tracker state", str(row.get("state") or "")),
-                    ("Run status", str(row.get("run_status") or "")),
-                    ("Turns", str(row.get("turn_count") or 0)),
+                    ("Tracker state", escape(str(row.get("state") or ""))),
+                    ("Run status", escape(str(row.get("run_status") or ""))),
+                    ("Turns", escape(str(row.get("turn_count") or 0))),
                     ("Started", _format_timestamp(row.get("started_at"))),
-                    ("Session", str(row.get("session_id") or "-")),
+                    ("Session", escape(str(row.get("session_id") or "-"))),
                 ]
                 action_html = _issue_controls(str(row.get("issue_identifier") or ""), include_cancel=True)
                 drilldown = _render_issue_drilldown(row)
             else:
                 meta = [
-                    ("Attempt", str(row.get("attempt") or "")),
-                    ("Due in", _format_relative_due(row.get("due_at"), _now_utc())),
-                    ("Why", str(row.get("error") or "Continuation retry")),
+                    ("Attempt", escape(str(row.get("attempt") or ""))),
+                    ("Due in", escape(_format_relative_due(row.get("due_at"), _now_utc()))),
+                    ("Why", escape(str(row.get("error") or "Continuation retry"))),
                     ("Started", _format_timestamp(row.get("started_at"))),
                     ("Last event", _format_timestamp(row.get("last_event_at"))),
                 ]
@@ -897,7 +976,7 @@ def _render_operator_cards(
             meta_html = "".join(
                 "<div class='operator-meta-item'>"
                 f"<span class='operator-meta-label'>{escape(label)}</span>"
-                f"<span class='operator-meta-value'>{escape(value)}</span>"
+                f"<span class='operator-meta-value'>{value}</span>"
                 "</div>"
                 for label, value in meta
             )
@@ -919,6 +998,55 @@ def _render_operator_cards(
     )
 
 
+def _render_problems_panel(problems: list[dict[str, object]]) -> str:
+    """Render a high-priority panel for active operator problems."""
+    if not problems:
+        return ""
+
+    error_count = sum(1 for problem in problems if problem.get("severity") == "error")
+    warning_count = sum(1 for problem in problems if problem.get("severity") == "warning")
+
+    counts_parts: list[str] = []
+    if error_count:
+        counts_parts.append(f"{error_count} error{'s' if error_count != 1 else ''}")
+    if warning_count:
+        counts_parts.append(f"{warning_count} warning{'s' if warning_count != 1 else ''}")
+    subtitle = " · ".join(counts_parts) if counts_parts else f"{len(problems)} problem{'s' if len(problems) != 1 else ''}"
+
+    rows: list[str] = []
+    for problem in problems:
+        severity = escape(str(problem.get("severity") or "error"))
+        kind = escape(str(problem.get("kind") or ""))
+        summary = escape(str(problem.get("summary") or ""))
+        detail = escape(str(problem.get("detail") or ""))
+        observed_at = escape(_format_timestamp(problem.get("observed_at")))
+        issue_identifier = problem.get("issue_identifier")
+
+        issue_cell = "-"
+        if issue_identifier:
+            safe_identifier = escape(str(issue_identifier))
+            issue_cell = f"<a href='/api/v1/{escape(str(issue_identifier), quote=True)}'>{safe_identifier}</a>"
+
+        rows.append(
+            f"<tr class='problem-{severity}'>"
+            f"<td><span class='severity-badge severity-{severity}'>{severity.upper()}</span></td>"
+            f"<td>{issue_cell}</td>"
+            f"<td><strong>{summary}</strong><div class='muted small'>{detail}</div></td>"
+            f"<td class='muted'>{kind}</td>"
+            f"<td class='muted'>{observed_at}</td>"
+            "</tr>"
+        )
+
+    return (
+        "<section class='panel problems-panel'>"
+        f"<div class='panel-head'><h2>Problems ({len(problems)})</h2><p>{escape(subtitle)}</p></div>"
+        "<div class='table-wrap'>"
+        "<table><thead><tr><th>Severity</th><th>Issue</th><th>Problem</th><th>Kind</th><th>Observed</th></tr></thead><tbody>"
+        + "".join(rows)
+        + "</tbody></table></div></section>"
+    )
+
+
 def _render_dashboard(groups: dict[str, object]) -> str:
     summary = groups["summary"]
     totals = groups["totals"]
@@ -933,7 +1061,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         [
             escape(str(row.get("issue_identifier") or "")),
             escape(str(row.get("reason") or "")),
-            escape(_format_timestamp(row.get("created_at"))),
+            _format_timestamp(row.get("created_at")),
             _issue_controls(str(row.get("issue_identifier") or ""), requeue_only=True),
         ]
         for row in groups.get("skipped", [])
@@ -947,18 +1075,9 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         ]
         for row in groups.get("waiting_reasons", [])
     ]
-    problem_rows = [
-        [
-            escape(str(row.get("issue_identifier") or "-")),
-            escape(str(row.get("summary") or "")),
-            escape(str(row.get("detail") or "")),
-            escape(_format_timestamp(row.get("observed_at"))),
-        ]
-        for row in groups.get("recent_problems", [])
-    ]
     recent_control_rows = [
         [
-            escape(_format_timestamp(row.get("timestamp"))),
+            _format_timestamp(row.get("timestamp")),
             escape(str(row.get("action") or "")),
             escape(str(row.get("scope") or "")),
             escape(str(row.get("outcome") or "")),
@@ -1016,7 +1135,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
             escape(str(row.get("from_state") or "?")),
             escape(str(row.get("to_state") or "")),
             "<span class='pill active'>ok</span>" if row.get("success") else "<span class='pill paused'>fail</span>",
-            escape(_format_timestamp(row.get("timestamp"))),
+            _format_timestamp(row.get("timestamp")),
         ]
         for row in transition_history
     ]
@@ -1052,7 +1171,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
                     _render_issue_link(item["identifier"], item["title"], item.get("url")),
                     escape(str(item.get("state") or "")),
                     escape(str(item.get("project") or "-")),
-                    escape(_format_timestamp(item.get("last_worked_on"))),
+                    _format_timestamp(item.get("last_worked_on")),
                     _render_linear_link(item.get("url")),
                 ])
             else:
@@ -1061,7 +1180,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
                     escape(str(item.get("state") or "")),
                     escape(_render_priority(item.get("priority")) if "priority" in item else "-"),
                     escape(str(item.get("reason") or "")),
-                    escape(_format_timestamp(item.get("updated_at"))),
+                    _format_timestamp(item.get("updated_at")),
                 ])
         queue_sections.append(
             _render_table(
@@ -1079,15 +1198,6 @@ def _render_dashboard(groups: dict[str, object]) -> str:
             ["Issue", "Reason", "Detail", "Timing"],
             waiting_reason_rows,
             "No waiting reasons captured in the latest snapshot.",
-        )
-    )
-    queue_sections.append(
-        _render_table(
-            f"Recent Problems ({len(problem_rows)})",
-            "Recent operator-visible orchestration issues for quick follow-up.",
-            ["Issue", "Problem", "Detail", "Observed"],
-            problem_rows,
-            "No recent orchestration problems captured.",
         )
     )
     queue_sections.append(
@@ -1201,6 +1311,45 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     font-size: 2rem;
     line-height: 1;
     margin-bottom: 8px;
+  }}
+  .problems-panel {{
+    margin-bottom: 20px;
+    border-left: 4px solid var(--danger);
+    background: linear-gradient(135deg, rgba(185, 28, 28, 0.06), var(--panel));
+  }}
+  .problems-panel .panel-head h2 {{
+    color: var(--danger);
+  }}
+  .severity-badge {{
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }}
+  .severity-error {{
+    background: rgba(185, 28, 28, 0.12);
+    color: var(--danger);
+  }}
+  .severity-warning {{
+    background: rgba(180, 83, 9, 0.12);
+    color: var(--warn);
+  }}
+  .severity-info {{
+    background: rgba(15, 118, 110, 0.12);
+    color: var(--accent);
+  }}
+  .problem-error {{
+    border-left: 3px solid var(--danger);
+  }}
+  .problem-warning {{
+    border-left: 3px solid var(--warn);
+  }}
+  .problem-info {{
+    border-left: 3px solid var(--accent);
   }}
   .stat span {{
     color: var(--muted);
@@ -1454,6 +1603,20 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     border-color: rgba(185, 28, 28, 0.42);
     background: rgba(185, 28, 28, 0.14);
   }}
+  #tz-select {{
+    border: 1px solid var(--line);
+    background: var(--panel-strong);
+    color: var(--ink);
+    border-radius: 999px;
+    padding: 5px 11px;
+    font: inherit;
+    font-size: 0.88rem;
+    cursor: pointer;
+  }}
+  #tz-select:hover {{
+    border-color: rgba(15, 118, 110, 0.35);
+    background: #f7f2e7;
+  }}
   .switch-form {{
     display: inline-flex;
     align-items: center;
@@ -1683,6 +1846,9 @@ window.cym = {{
 
       // Restore scroll position.
       window.scrollTo(0, scrollY);
+
+      // Re-apply timezone to new content.
+      cym.restoreTimezone();
     }}).catch(function() {{}});
   }},
 
@@ -1703,11 +1869,43 @@ window.cym = {{
   startAutoRefresh: function() {{
     if (cym._refreshTimer) clearInterval(cym._refreshTimer);
     cym._refreshTimer = setInterval(cym.refresh, cym._INTERVAL);
+  }},
+
+  /** Apply the chosen timezone to all <time class="cym-ts"> elements. */
+  applyTimezone: function(tz) {{
+    document.querySelectorAll("time.cym-ts[data-utc]").forEach(function(el) {{
+      var utc = el.getAttribute("data-utc");
+      if (!utc) return;
+      try {{
+        var d = new Date(utc);
+        if (isNaN(d.getTime())) return;
+        el.textContent = d.toLocaleString("sv-SE", {{
+          timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+          hour: "2-digit", minute: "2-digit", hour12: false
+        }}).replace(",", "") + " " + tz.replace(/^.*\//, "");
+      }} catch(e) {{}}
+    }});
+  }},
+
+  /** Set timezone, persist, and apply. */
+  setTimezone: function(tz) {{
+    try {{ localStorage.setItem("cym_tz", tz); }} catch(e) {{}}
+    cym.applyTimezone(tz);
+  }},
+
+  /** Restore saved timezone and apply to page. */
+  restoreTimezone: function() {{
+    var tz = "UTC";
+    try {{ tz = localStorage.getItem("cym_tz") || "UTC"; }} catch(e) {{}}
+    var sel = document.getElementById("tz-select");
+    if (sel) sel.value = tz;
+    cym.applyTimezone(tz);
   }}
 }};
 document.addEventListener("DOMContentLoaded", function() {{
   cym.startAutoRefresh();
   cym.syncKillButton();
+  cym.restoreTimezone();
   var armed = document.getElementById("kill-arm");
   if (armed) armed.addEventListener("change", cym.syncKillButton);
 }});
@@ -1723,7 +1921,7 @@ document.addEventListener("DOMContentLoaded", function() {{
     <aside class="meta-card">
       <div>
         <div class="meta-label">Snapshot</div>
-        <div class="meta-value">{escape(generated_at)}</div>
+        <div class="meta-value">{generated_at}</div>
       </div>
       <div>
         <div class="meta-label">Capacity</div>
@@ -1749,6 +1947,8 @@ document.addEventListener("DOMContentLoaded", function() {{
     <div class="stat"><strong>{totals.get("total_tokens", 0):,}</strong><span>Total tokens</span></div>
   </section>
 
+  {_render_problems_panel(list(groups.get("recent_problems", [])))}
+
   <section class="layout">
     <div class="stack">
       <section class="panel">
@@ -1764,6 +1964,30 @@ document.addEventListener("DOMContentLoaded", function() {{
             <span class="control-group-label">View</span>
             {_post_button("/api/v1/refresh", "Refresh Now", tooltip="Fetch the latest orchestration state immediately.")}
             <button type="button" id="pause-refresh" title="Pause the automatic 15-second dashboard refresh" data-tooltip="Pause the automatic 15-second dashboard refresh" onclick="cym.toggleAutoRefresh()">Pause Auto-Refresh</button>
+            <select id="tz-select" title="Display timestamps in this timezone" onchange="cym.setTimezone(this.value)">
+              <option value="UTC">UTC</option>
+              <option value="Europe/London">Europe/London</option>
+              <option value="Europe/Berlin">Europe/Berlin</option>
+              <option value="Europe/Paris">Europe/Paris</option>
+              <option value="Europe/Madrid">Europe/Madrid</option>
+              <option value="Europe/Rome">Europe/Rome</option>
+              <option value="Europe/Amsterdam">Europe/Amsterdam</option>
+              <option value="Europe/Zurich">Europe/Zurich</option>
+              <option value="Europe/Athens">Europe/Athens</option>
+              <option value="Europe/Helsinki">Europe/Helsinki</option>
+              <option value="Europe/Moscow">Europe/Moscow</option>
+              <option value="Asia/Dubai">Asia/Dubai</option>
+              <option value="Asia/Kolkata">Asia/Kolkata</option>
+              <option value="Asia/Shanghai">Asia/Shanghai</option>
+              <option value="Asia/Tokyo">Asia/Tokyo</option>
+              <option value="Australia/Sydney">Australia/Sydney</option>
+              <option value="Pacific/Auckland">Pacific/Auckland</option>
+              <option value="America/New_York">America/New_York</option>
+              <option value="America/Chicago">America/Chicago</option>
+              <option value="America/Denver">America/Denver</option>
+              <option value="America/Los_Angeles">America/Los_Angeles</option>
+              <option value="America/Sao_Paulo">America/Sao_Paulo</option>
+            </select>
           </div>
           <div class="control-group">
             <span class="control-group-label">Dispatch</span>
@@ -1913,12 +2137,19 @@ async def _save_workflow_from_request(request: web.Request, *, setup_mode: bool)
         "max_retry_backoff_ms": submitted.get("max_retry_backoff_ms", ""),
         "command": submitted.get("command", ""),
         "turn_timeout_ms": submitted.get("turn_timeout_ms", ""),
+        "read_timeout_ms": submitted.get("read_timeout_ms", ""),
         "stall_timeout_ms": submitted.get("stall_timeout_ms", ""),
         "dangerously_skip_permissions": submitted.get("dangerously_skip_permissions") == "1",
         "qa_review_enabled": submitted.get("qa_review_enabled") == "1",
         "qa_review_dispatch": submitted.get("qa_review_dispatch", ""),
         "qa_review_success": submitted.get("qa_review_success", ""),
         "qa_review_failure": submitted.get("qa_review_failure", ""),
+        "qa_agent_provider": submitted.get("qa_agent_provider", ""),
+        "qa_agent_command": submitted.get("qa_agent_command", ""),
+        "qa_agent_turn_timeout_ms": submitted.get("qa_agent_turn_timeout_ms", ""),
+        "qa_agent_read_timeout_ms": submitted.get("qa_agent_read_timeout_ms", ""),
+        "qa_agent_stall_timeout_ms": submitted.get("qa_agent_stall_timeout_ms", ""),
+        "qa_agent_dangerously_skip_permissions": submitted.get("qa_agent_dangerously_skip_permissions") == "1",
         "after_create": submitted.get("after_create", ""),
         "before_run": submitted.get("before_run", ""),
         "after_run": submitted.get("after_run", ""),

@@ -10,23 +10,52 @@ import sys
 from pathlib import Path
 
 from .config import build_config, validate_dispatch_config
-from .workflow import load_workflow, resolve_workflow_path
+from .workflow import (
+    LOCAL_CONFIG_DIR,
+    LOCAL_WORKFLOW_FILENAME,
+    ConfigSource,
+    load_workflow,
+    migrate_legacy_workflow,
+    resolve_config_source,
+    resolve_workflow_path,
+)
+
+
+def _dotenv_candidates(workflow_path: Path) -> list[Path]:
+    """Return .env locations to load for the resolved workflow path."""
+    candidates = [workflow_path.parent / ".env"]
+
+    # Keep repo-root .env working after migrating to .cymphony/workflow.md.
+    if (
+        workflow_path.name == LOCAL_WORKFLOW_FILENAME
+        and workflow_path.parent.name == LOCAL_CONFIG_DIR
+    ):
+        candidates.append(workflow_path.parent.parent / ".env")
+
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            ordered.append(resolved)
+    return ordered
 
 
 def _load_dotenv(workflow_path: Path) -> None:
-    """Load .env from the workflow file's directory, if present."""
-    env_path = workflow_path.parent / ".env"
-    if not env_path.exists():
-        return
-    with env_path.open() as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            if key and key not in os.environ:
-                os.environ[key] = value.strip()
+    """Load .env files associated with the resolved workflow path."""
+    for env_path in _dotenv_candidates(workflow_path):
+        if not env_path.exists():
+            continue
+        with env_path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                if key and key not in os.environ:
+                    os.environ[key] = value.strip()
 
 
 def _configure_logging(level: str = "INFO") -> None:
@@ -114,7 +143,25 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     _configure_logging(args.log_level)
 
-    workflow_path = resolve_workflow_path(args.workflow_path)
+    log = logging.getLogger(__name__)
+
+    # Attempt legacy migration before resolving the config path.
+    if not args.workflow_path:
+        migrated = migrate_legacy_workflow()
+        if migrated:
+            log.info(f"action=legacy_migration target={migrated}")
+
+    workflow_path, source = resolve_config_source(args.workflow_path)
+
+    if source == ConfigSource.LEGACY_COMMITTED:
+        log.warning(
+            f"action=config_source_deprecated path={workflow_path} "
+            "hint='Using legacy WORKFLOW.md. Run the setup screen or move "
+            "your config to .cymphony/workflow.md.'"
+        )
+    else:
+        log.info(f"action=config_source source={source.value} path={workflow_path}")
+
     _load_dotenv(workflow_path)
 
     try:

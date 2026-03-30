@@ -10,6 +10,7 @@ from typing import Any
 from .models import (
     SUPPORTED_PROVIDERS,
     AgentConfig,
+    CodingAgentConfig,
     HooksConfig,
     PollingConfig,
     PreflightConfig,
@@ -212,6 +213,14 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
             runner_raw.get("dangerously_skip_permissions", True)
         ),
     )
+    coding_agent = CodingAgentConfig(
+        command=runner.command,
+        turn_timeout_ms=runner.turn_timeout_ms,
+        read_timeout_ms=runner.read_timeout_ms,
+        stall_timeout_ms=runner.stall_timeout_ms,
+        dangerously_skip_permissions=runner.dangerously_skip_permissions,
+        provider=provider,
+    )
 
     # --- server (optional extension) ---
     if server_port_override is not None:
@@ -247,6 +256,23 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
     _QA_DEFAULTS = QAReviewConfig()
     if isinstance(qa_raw, dict):
         qa_enabled = qa_raw.get("enabled")
+
+        # --- optional QA agent override ---
+        qa_agent_raw: dict[str, Any] = qa_raw.get("agent") or {}
+        qa_agent: CodingAgentConfig | None = None
+        if qa_agent_raw:
+            qa_provider = _to_str(qa_agent_raw.get("provider"), coding_agent.provider)
+            qa_agent = CodingAgentConfig(
+                command=_to_str(qa_agent_raw.get("command"), coding_agent.command) or coding_agent.command,
+                turn_timeout_ms=_to_int(qa_agent_raw.get("turn_timeout_ms"), coding_agent.turn_timeout_ms),
+                read_timeout_ms=_to_int(qa_agent_raw.get("read_timeout_ms"), coding_agent.read_timeout_ms),
+                stall_timeout_ms=_to_int(qa_agent_raw.get("stall_timeout_ms"), coding_agent.stall_timeout_ms),
+                dangerously_skip_permissions=bool(
+                    qa_agent_raw.get("dangerously_skip_permissions", coding_agent.dangerously_skip_permissions)
+                ),
+                provider=qa_provider,
+            )
+
         qa_review = QAReviewConfig(
             enabled=bool(qa_enabled) if qa_enabled is not None else _QA_DEFAULTS.enabled,
             dispatch=_to_optional_str(
@@ -264,6 +290,7 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
             max_retries=_to_int(
                 qa_raw.get("max_retries"), _QA_DEFAULTS.max_retries
             ),
+            agent=qa_agent,
         )
     elif qa_raw is True:
         # Shorthand: `qa_review: true` enables with all defaults
@@ -358,5 +385,14 @@ def validate_dispatch_config(config: ServiceConfig) -> ValidationResult:
         result.fail(
             "transitions.qa_review.dispatch is required when qa_review is enabled"
         )
+
+    if qa.agent is not None:
+        if not qa.agent.command:
+            result.fail("transitions.qa_review.agent.command is missing or empty")
+        if qa.agent.provider not in SUPPORTED_PROVIDERS:
+            result.fail(
+                f"transitions.qa_review.agent.provider={qa.agent.provider!r} is not supported "
+                f"(expected one of {', '.join(SUPPORTED_PROVIDERS)})"
+            )
 
     return result
