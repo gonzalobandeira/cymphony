@@ -52,6 +52,13 @@ transitions:
     dispatch: QA Review
     success: In Review
     failure: Todo
+    # Optional: override agent settings for review-mode runs.
+    # Omit entirely to inherit the main codex/agent settings.
+    # agent:
+    #   provider: claude
+    #   command: claude
+    #   turn_timeout_ms: 3600000
+    #   stall_timeout_ms: 300000
 ---
 You are a senior software engineer working on the **Cymphony** project.
 

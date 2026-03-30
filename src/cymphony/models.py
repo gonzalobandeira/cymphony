@@ -145,6 +145,7 @@ class QAReviewConfig:
     failure: str | None = "Todo"
     max_bounces: int = 2
     max_retries: int = 2
+    agent: CodingAgentConfig | None = None
 
 
 @dataclass

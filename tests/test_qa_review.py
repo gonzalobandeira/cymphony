@@ -39,6 +39,7 @@ from cymphony.models import (
     WorkflowDefinition,
     WorkspaceConfig,
 )
+from cymphony.runners import create_agent_runner
 from cymphony.orchestrator import Orchestrator
 from cymphony.review import REVIEW_RESULT_FILENAME
 from cymphony.workflow import render_review_prompt
@@ -54,6 +55,7 @@ def _build_config(
     *,
     max_bounces: int = 2,
     max_retries: int = 2,
+    qa_agent: CodingAgentConfig | None = None,
 ) -> ServiceConfig:
     if active_states is None:
         active_states = ["Todo", "In Progress", "QA Review"]
@@ -108,6 +110,7 @@ def _build_config(
                 failure="Todo",
                 max_bounces=max_bounces,
                 max_retries=max_retries,
+                agent=qa_agent,
             ),
         ),
     )
@@ -118,11 +121,13 @@ def _build_orchestrator(
     *,
     max_bounces: int = 2,
     max_retries: int = 2,
+    qa_agent: CodingAgentConfig | None = None,
 ) -> Orchestrator:
     config = _build_config(
         qa_enabled=qa_enabled,
         max_bounces=max_bounces,
         max_retries=max_retries,
+        qa_agent=qa_agent,
     )
     workflow = WorkflowDefinition(config={}, prompt_template="Build prompt for {{ issue.title }}")
     return Orchestrator(Path("WORKFLOW.md"), config, workflow)
@@ -782,3 +787,50 @@ class TestExecutionModeEnum:
             started_at=datetime.now(timezone.utc),
         )
         assert entry.mode == ExecutionMode.BUILD
+
+
+# ---------------------------------------------------------------------------
+# QA agent config wiring (BAP-199)
+# ---------------------------------------------------------------------------
+
+class TestQAAgentConfig:
+    def test_snapshot_includes_qa_agent_when_configured(self) -> None:
+        qa_agent = CodingAgentConfig(
+            command="review-agent",
+            turn_timeout_ms=500,
+            read_timeout_ms=500,
+            stall_timeout_ms=500,
+            dangerously_skip_permissions=True,
+            provider="codex",
+        )
+        orch = _build_orchestrator(qa_agent=qa_agent)
+        snapshot = orch.snapshot()
+        qa = snapshot["workflow_config"]["transitions"]["qa_review"]
+        assert qa["agent"] is not None
+        assert qa["agent"]["provider"] == "codex"
+        assert qa["agent"]["command"] == "review-agent"
+        assert qa["agent"]["turn_timeout_ms"] == 500
+        assert qa["agent"]["stall_timeout_ms"] == 500
+
+    def test_snapshot_qa_agent_is_none_when_not_configured(self) -> None:
+        orch = _build_orchestrator()
+        snapshot = orch.snapshot()
+        qa = snapshot["workflow_config"]["transitions"]["qa_review"]
+        assert qa["agent"] is None
+
+    def test_qa_review_config_defaults_agent_to_none(self) -> None:
+        qa = QAReviewConfig(enabled=True)
+        assert qa.agent is None
+
+    def test_qa_review_config_accepts_agent(self) -> None:
+        agent = CodingAgentConfig(
+            command="qa-cli",
+            turn_timeout_ms=100,
+            read_timeout_ms=100,
+            stall_timeout_ms=100,
+            dangerously_skip_permissions=False,
+            provider="claude",
+        )
+        qa = QAReviewConfig(enabled=True, agent=agent)
+        assert qa.agent is agent
+        assert qa.agent.command == "qa-cli"

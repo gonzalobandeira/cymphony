@@ -1336,9 +1336,14 @@ class Orchestrator:
     ) -> None:
         """Run one agent session for an issue (workspace + hooks + turns)."""
         wm = WorkspaceManager(self._config)
-        agent = create_agent_runner(
-            self._config.agent.provider, self._config.coding_agent
-        )
+        is_review_mode = entry.mode == ExecutionMode.REVIEW
+        qa_agent_cfg = self._config.transitions.qa_review.agent
+        if is_review_mode and qa_agent_cfg is not None:
+            agent = create_agent_runner(qa_agent_cfg.provider, qa_agent_cfg)
+        else:
+            agent = create_agent_runner(
+                self._config.agent.provider, self._config.coding_agent
+            )
 
         # Prepare workspace
         entry.status = RunStatus.PREPARING_WORKSPACE
@@ -2200,6 +2205,12 @@ class Orchestrator:
                         "failure": self._config.transitions.qa_review.failure,
                         "max_bounces": self._config.transitions.qa_review.max_bounces,
                         "max_retries": self._config.transitions.qa_review.max_retries,
+                        "agent": {
+                            "provider": qa_cfg.provider,
+                            "command": qa_cfg.command,
+                            "turn_timeout_ms": qa_cfg.turn_timeout_ms,
+                            "stall_timeout_ms": qa_cfg.stall_timeout_ms,
+                        } if (qa_cfg := self._config.transitions.qa_review.agent) is not None else None,
                     },
                 },
             },

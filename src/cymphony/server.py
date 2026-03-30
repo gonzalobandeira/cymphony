@@ -10,7 +10,7 @@ import math
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from aiohttp import web
 
@@ -51,6 +51,10 @@ _DEFAULT_SETUP_FORM = {
     "qa_review_dispatch": "QA Review",
     "qa_review_success": "In Review",
     "qa_review_failure": "Todo",
+    "qa_agent_provider": "",
+    "qa_agent_command": "",
+    "qa_agent_turn_timeout_ms": "",
+    "qa_agent_stall_timeout_ms": "",
     "review_prompt": "",
     "prompt_template": """You are a senior software engineer working on the project.\n\n## Issue\n\n**Title:** {{ issue.title }}\n**Identifier:** {{ issue.identifier }}\n**State:** {{ issue.state }}\n{% if issue.description %}\n**Description:**\n{{ issue.description }}\n{% endif %}\n\n## Instructions\n\n1. Read the issue carefully.\n2. Create and checkout a branch named `agent/{{ issue.identifier | lower }}`.\n3. Implement the requested change.\n4. Update tests as needed.\n5. Keep changes minimal and consistent with the codebase.\n""",
 }
@@ -293,6 +297,10 @@ def _workflow_form_data(
                 "qa_review_dispatch": str(qa_review.get("dispatch") or data["qa_review_dispatch"]),
                 "qa_review_success": str(qa_review.get("success") or data["qa_review_success"]),
                 "qa_review_failure": str(qa_review.get("failure") or data["qa_review_failure"]),
+                "qa_agent_provider": str((qa_review.get("agent") or {}).get("provider") or ""),
+                "qa_agent_command": str((qa_review.get("agent") or {}).get("command") or ""),
+                "qa_agent_turn_timeout_ms": str((qa_review.get("agent") or {}).get("turn_timeout_ms") or ""),
+                "qa_agent_stall_timeout_ms": str((qa_review.get("agent") or {}).get("stall_timeout_ms") or ""),
                 "review_prompt": str(raw.get("review_prompt") or ""),
                 "prompt_template": workflow.prompt_template or data["prompt_template"],
             }
@@ -358,15 +366,31 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
     qa_dispatch = str(form.get("qa_review_dispatch") or "").strip()
     qa_success = str(form.get("qa_review_success") or "").strip()
     qa_failure = str(form.get("qa_review_failure") or "").strip()
+    qa_agent_provider = str(form.get("qa_agent_provider") or "").strip()
+    qa_agent_command = str(form.get("qa_agent_command") or "").strip()
+    qa_agent_turn_timeout = str(form.get("qa_agent_turn_timeout_ms") or "").strip()
+    qa_agent_stall_timeout = str(form.get("qa_agent_stall_timeout_ms") or "").strip()
     if qa_enabled or qa_dispatch or qa_success or qa_failure:
-        config["transitions"] = {
-            "qa_review": {
-                "enabled": qa_enabled,
-                "dispatch": qa_dispatch or None,
-                "success": qa_success or None,
-                "failure": qa_failure or None,
-            }
+        qa_review_block: dict[str, Any] = {
+            "enabled": qa_enabled,
+            "dispatch": qa_dispatch or None,
+            "success": qa_success or None,
+            "failure": qa_failure or None,
         }
+        # Build QA agent override only when at least one field is set
+        qa_agent_block: dict[str, Any] = {}
+        if qa_agent_provider:
+            qa_agent_block["provider"] = qa_agent_provider
+        if qa_agent_command:
+            qa_agent_block["command"] = qa_agent_command
+        if qa_agent_turn_timeout:
+            qa_agent_block["turn_timeout_ms"] = int(qa_agent_turn_timeout)
+        if qa_agent_stall_timeout:
+            qa_agent_block["stall_timeout_ms"] = int(qa_agent_stall_timeout)
+        if qa_agent_block:
+            qa_review_block["agent"] = qa_agent_block
+
+        config["transitions"] = {"qa_review": qa_review_block}
 
     review_prompt = str(form.get("review_prompt") or "").strip()
     if review_prompt:
@@ -578,6 +602,24 @@ def _render_setup_page(
       <section class="card">
         <label for="qa_review_failure">QA review failure state</label>
         <input id="qa_review_failure" name="qa_review_failure" value="{field("qa_review_failure")}" />
+      </section>
+      <section class="card">
+        <label for="qa_agent_provider">QA agent provider (optional override)</label>
+        <input id="qa_agent_provider" name="qa_agent_provider" value="{field("qa_agent_provider")}" placeholder="inherit from main" />
+        <div class="muted">Leave blank to use the main agent provider.</div>
+      </section>
+      <section class="card">
+        <label for="qa_agent_command">QA agent command (optional override)</label>
+        <input id="qa_agent_command" name="qa_agent_command" value="{field("qa_agent_command")}" placeholder="inherit from main" />
+        <div class="muted">Leave blank to use the main agent command.</div>
+      </section>
+      <section class="card">
+        <label for="qa_agent_turn_timeout_ms">QA agent turn timeout (ms, optional)</label>
+        <input id="qa_agent_turn_timeout_ms" name="qa_agent_turn_timeout_ms" value="{field("qa_agent_turn_timeout_ms")}" placeholder="inherit from main" />
+      </section>
+      <section class="card">
+        <label for="qa_agent_stall_timeout_ms">QA agent stall timeout (ms, optional)</label>
+        <input id="qa_agent_stall_timeout_ms" name="qa_agent_stall_timeout_ms" value="{field("qa_agent_stall_timeout_ms")}" placeholder="inherit from main" />
       </section>
       <section class="card full">
         <label for="after_create">after_create hook</label>
@@ -1922,6 +1964,10 @@ async def _save_workflow_from_request(request: web.Request, *, setup_mode: bool)
         "qa_review_dispatch": submitted.get("qa_review_dispatch", ""),
         "qa_review_success": submitted.get("qa_review_success", ""),
         "qa_review_failure": submitted.get("qa_review_failure", ""),
+        "qa_agent_provider": submitted.get("qa_agent_provider", ""),
+        "qa_agent_command": submitted.get("qa_agent_command", ""),
+        "qa_agent_turn_timeout_ms": submitted.get("qa_agent_turn_timeout_ms", ""),
+        "qa_agent_stall_timeout_ms": submitted.get("qa_agent_stall_timeout_ms", ""),
         "after_create": submitted.get("after_create", ""),
         "before_run": submitted.get("before_run", ""),
         "after_run": submitted.get("after_run", ""),
