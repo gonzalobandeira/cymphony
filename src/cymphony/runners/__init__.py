@@ -8,7 +8,7 @@ Provider-agnostic runner interface:
 
 from __future__ import annotations
 
-from ..models import AgentError, RunnerConfig
+from ..models import AgentError, CodingAgentConfig, RunnerConfig
 from .base import BaseAgentRunner, OnAgentEvent
 from .claude import ClaudeAgentRunner, parse_claude_stream_event
 from .codex import CodexAgentRunner, parse_codex_stream_event
@@ -19,6 +19,7 @@ __all__ = [
     "CodexAgentRunner",
     "OnAgentEvent",
     "create_agent_runner",
+    "create_runner",
     "parse_claude_stream_event",
     "parse_codex_stream_event",
 ]
@@ -41,6 +42,11 @@ def create_agent_runner(provider: str, config: RunnerConfig) -> BaseAgentRunner:
     return runner_cls(config)
 
 
+def create_runner(config: RunnerConfig | CodingAgentConfig) -> BaseAgentRunner:
+    """Backward-compatible factory keyed off the config object."""
+    provider = getattr(config, "provider", "claude")
+    return create_agent_runner(provider, config)
+
+
 # Backward-compatible aliases
 AgentRunner = ClaudeAgentRunner
-CodingAgentConfig = RunnerConfig

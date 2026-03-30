@@ -111,8 +111,10 @@ class RunnerConfig:
     dangerously_skip_permissions: bool
 
 
-# Backward-compatible alias
-CodingAgentConfig = RunnerConfig
+@dataclass
+class CodingAgentConfig(RunnerConfig):
+    """Backward-compatible config shape for older Python callers."""
+    provider: str = "claude"
 
 
 @dataclass

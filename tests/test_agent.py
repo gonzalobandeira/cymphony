@@ -12,6 +12,7 @@ from cymphony.models import AgentError, CodingAgentConfig
 
 
 def _make_config(
+    provider: str = "claude",
     command: str = "claude",
 ) -> CodingAgentConfig:
     return CodingAgentConfig(
@@ -20,6 +21,7 @@ def _make_config(
         read_timeout_ms=1000,
         stall_timeout_ms=1000,
         dangerously_skip_permissions=True,
+        provider=provider,
     )
 
 
@@ -38,6 +40,27 @@ def test_base_runner_cannot_be_instantiated() -> None:
 # Factory
 # ---------------------------------------------------------------------------
 
+def test_create_runner_claude() -> None:
+    from cymphony.runners import ClaudeAgentRunner, create_runner
+
+    runner = create_runner(_make_config(provider="claude"))
+    assert isinstance(runner, ClaudeAgentRunner)
+
+
+def test_create_runner_codex() -> None:
+    from cymphony.runners import CodexAgentRunner, create_runner
+
+    runner = create_runner(_make_config(provider="codex", command="codex"))
+    assert isinstance(runner, CodexAgentRunner)
+
+
+def test_create_runner_unknown_raises() -> None:
+    from cymphony.runners import create_runner
+
+    with pytest.raises(AgentError, match="Unknown agent provider"):
+        create_runner(_make_config(provider="gemini"))
+
+
 def test_create_agent_runner_returns_claude() -> None:
     from cymphony.runners import ClaudeAgentRunner, create_agent_runner
 
@@ -48,7 +71,10 @@ def test_create_agent_runner_returns_claude() -> None:
 def test_create_agent_runner_returns_codex() -> None:
     from cymphony.runners import CodexAgentRunner, create_agent_runner
 
-    runner = create_agent_runner("codex", _make_config(command="codex"))
+    runner = create_agent_runner(
+        "codex",
+        _make_config(provider="codex", command="codex"),
+    )
     assert isinstance(runner, CodexAgentRunner)
 
 
@@ -84,11 +110,15 @@ def test_agent_module_reexports_codex_runner() -> None:
     assert CodexAgentRunner is DirectCodex
 
 
-def test_agent_module_reexports_factory() -> None:
-    from cymphony.agent import create_agent_runner
-    from cymphony.runners import create_agent_runner as direct_car
+def test_agent_module_reexports_factories() -> None:
+    from cymphony.agent import create_agent_runner, create_runner
+    from cymphony.runners import (
+        create_agent_runner as direct_car,
+        create_runner as direct_cr,
+    )
 
     assert create_agent_runner is direct_car
+    assert create_runner is direct_cr
 
 
 def test_agent_module_reexports_parse_function() -> None:
