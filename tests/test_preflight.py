@@ -367,7 +367,7 @@ async def test_orchestrator_tick_blocks_on_preflight_failure(monkeypatch: pytest
             max_concurrent_agents=1, max_turns=1,
             max_retry_backoff_ms=1000, max_concurrent_agents_by_state={},
         ),
-        coding_agent=CodingAgentConfig(
+        runner=CodingAgentConfig(
             command="codex", turn_timeout_ms=1000, read_timeout_ms=1000,
             stall_timeout_ms=1000, dangerously_skip_permissions=True,
         ),
@@ -441,7 +441,7 @@ async def test_orchestrator_tick_passes_preflight_when_disabled(monkeypatch: pyt
             max_concurrent_agents=1, max_turns=1,
             max_retry_backoff_ms=1000, max_concurrent_agents_by_state={},
         ),
-        coding_agent=CodingAgentConfig(
+        runner=CodingAgentConfig(
             command="codex", turn_timeout_ms=1000, read_timeout_ms=1000,
             stall_timeout_ms=1000, dangerously_skip_permissions=True,
         ),
@@ -512,7 +512,7 @@ async def test_snapshot_includes_preflight_errors(monkeypatch: pytest.MonkeyPatc
             max_concurrent_agents=1, max_turns=1,
             max_retry_backoff_ms=1000, max_concurrent_agents_by_state={},
         ),
-        coding_agent=CodingAgentConfig(
+        runner=CodingAgentConfig(
             command="codex", turn_timeout_ms=1000, read_timeout_ms=1000,
             stall_timeout_ms=1000, dangerously_skip_permissions=True,
         ),

@@ -15,7 +15,6 @@ import os
 from ..models import (
     AgentEvent,
     AgentEventType,
-    CodingAgentConfig,
 )
 from .base import BaseAgentRunner, _now
 

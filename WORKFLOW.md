@@ -21,8 +21,7 @@ agent:
   max_concurrent_agents: 2
   max_turns: 15
   max_retry_backoff_ms: 300000
-codex:
-  command: claude
+runner:
   turn_timeout_ms: 3600000
   stall_timeout_ms: 300000
   dangerously_skip_permissions: true

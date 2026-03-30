@@ -102,13 +102,18 @@ class AgentConfig:
 
 
 @dataclass
-class CodingAgentConfig:
-    """Config for the coding agent subprocess."""
+class RunnerConfig:
+    """Provider-neutral config for the agent subprocess."""
     command: str
     turn_timeout_ms: int
     read_timeout_ms: int
     stall_timeout_ms: int
     dangerously_skip_permissions: bool
+
+
+@dataclass
+class CodingAgentConfig(RunnerConfig):
+    """Backward-compatible config shape for older Python callers."""
     provider: str = "claude"
 
 
@@ -180,10 +185,22 @@ class ServiceConfig:
     workspace: WorkspaceConfig
     hooks: HooksConfig
     agent: AgentConfig
-    coding_agent: CodingAgentConfig
+    runner: RunnerConfig
     server: ServerConfig
     preflight: PreflightConfig
     transitions: TransitionsConfig = field(default_factory=TransitionsConfig)
+    coding_agent: CodingAgentConfig = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Populate the legacy coding_agent alias from the canonical runner config."""
+        self.coding_agent = CodingAgentConfig(
+            command=self.runner.command,
+            turn_timeout_ms=self.runner.turn_timeout_ms,
+            read_timeout_ms=self.runner.read_timeout_ms,
+            stall_timeout_ms=self.runner.stall_timeout_ms,
+            dangerously_skip_permissions=self.runner.dangerously_skip_permissions,
+            provider=self.agent.provider,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -37,7 +37,7 @@ _DEFAULT_SETUP_FORM = {
     "max_turns": "20",
     "max_retry_backoff_ms": "300000",
     "provider": "claude",
-    "command": "claude",
+    "command": "",
     "turn_timeout_ms": "3600000",
     "read_timeout_ms": "60000",
     "stall_timeout_ms": "300000",
@@ -267,7 +267,7 @@ def _workflow_form_data(
         polling = raw.get("polling") or {}
         workspace = raw.get("workspace") or {}
         agent = raw.get("agent") or {}
-        codex = raw.get("codex") or {}
+        runner = raw.get("runner") or raw.get("codex") or {}
         hooks = raw.get("hooks") or {}
         server = raw.get("server") or {}
         transitions = raw.get("transitions") or {}
@@ -288,11 +288,11 @@ def _workflow_form_data(
                 "max_turns": str(agent.get("max_turns") or data["max_turns"]),
                 "max_retry_backoff_ms": str(agent.get("max_retry_backoff_ms") or data["max_retry_backoff_ms"]),
                 "provider": str(agent.get("provider") or data["provider"]),
-                "command": str(codex.get("command") or data["command"]),
-                "turn_timeout_ms": str(codex.get("turn_timeout_ms") or data["turn_timeout_ms"]),
-                "read_timeout_ms": str(codex.get("read_timeout_ms") or data["read_timeout_ms"]),
-                "stall_timeout_ms": str(codex.get("stall_timeout_ms") or data["stall_timeout_ms"]),
-                "dangerously_skip_permissions": bool(codex.get("dangerously_skip_permissions", True)),
+                "command": str(runner.get("command") or data["command"]),
+                "turn_timeout_ms": str(runner.get("turn_timeout_ms") or data["turn_timeout_ms"]),
+                "read_timeout_ms": str(runner.get("read_timeout_ms") or data["read_timeout_ms"]),
+                "stall_timeout_ms": str(runner.get("stall_timeout_ms") or data["stall_timeout_ms"]),
+                "dangerously_skip_permissions": bool(runner.get("dangerously_skip_permissions", True)),
                 "after_create": str(hooks.get("after_create") or ""),
                 "before_run": str(hooks.get("before_run") or ""),
                 "after_run": str(hooks.get("after_run") or ""),
@@ -358,8 +358,8 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
             "max_retry_backoff_ms": int(str(form.get("max_retry_backoff_ms") or "300000")),
             "provider": str(form.get("provider") or "claude").strip().lower(),
         },
-        "codex": {
-            "command": str(form.get("command") or "claude").strip(),
+        "runner": {
+            "command": str(form.get("command") or "").strip(),
             "turn_timeout_ms": int(str(form.get("turn_timeout_ms") or "3600000")),
             "read_timeout_ms": int(str(form.get("read_timeout_ms") or "60000")),
             "stall_timeout_ms": int(str(form.get("stall_timeout_ms") or "300000")),
@@ -433,9 +433,6 @@ def _validate_workflow_form(form: dict[str, object]) -> list[str]:
         errors.append("tracker.project_slug is required.")
     if not workflow.config["workspace"].get("root"):
         errors.append("workspace.root is required.")
-    if not workflow.config["codex"].get("command"):
-        errors.append("codex.command is required.")
-
     from .models import SUPPORTED_PROVIDERS
     agent_provider = workflow.config.get("agent", {}).get("provider", "claude")
     if agent_provider not in SUPPORTED_PROVIDERS:
@@ -582,8 +579,8 @@ def _render_setup_page(
         </select>
       </section>
       <section class="card">
-        <label for="command">Agent command</label>
-        <input id="command" name="command" value="{field("command")}" required />
+        <label for="command">Agent command <small>(blank = auto from provider)</small></label>
+        <input id="command" name="command" value="{field("command")}" placeholder="auto" />
       </section>
       <section class="card">
         <label for="turn_timeout_ms">Turn timeout (ms)</label>

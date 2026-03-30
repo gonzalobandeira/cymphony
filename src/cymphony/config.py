@@ -15,6 +15,7 @@ from .models import (
     PollingConfig,
     PreflightConfig,
     QAReviewConfig,
+    RunnerConfig,
     ServerConfig,
     ServiceConfig,
     TrackerConfig,
@@ -36,7 +37,11 @@ _DEFAULT_HOOKS_TIMEOUT_MS = 60_000
 _DEFAULT_MAX_CONCURRENT_AGENTS = 10
 _DEFAULT_MAX_TURNS = 20
 _DEFAULT_MAX_RETRY_BACKOFF_MS = 300_000
-_DEFAULT_CLAUDE_COMMAND = "claude"
+_DEFAULT_COMMANDS: dict[str, str] = {
+    "claude": "claude",
+    "codex": "codex",
+}
+_DEFAULT_CLAUDE_COMMAND = "claude"  # fallback for unknown providers
 _DEFAULT_TURN_TIMEOUT_MS = 3_600_000
 _DEFAULT_READ_TIMEOUT_MS = 5_000
 _DEFAULT_STALL_TIMEOUT_MS = 300_000
@@ -115,7 +120,8 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
     workspace_raw: dict[str, Any] = raw.get("workspace") or {}
     hooks_raw: dict[str, Any] = raw.get("hooks") or {}
     agent_raw: dict[str, Any] = raw.get("agent") or {}
-    codex_raw: dict[str, Any] = raw.get("codex") or {}
+    # "runner:" is the canonical section; fall back to legacy "codex:" key
+    runner_raw: dict[str, Any] = raw.get("runner") or raw.get("codex") or {}
     server_raw: dict[str, Any] = raw.get("server") or {}
 
     # --- tracker ---
@@ -192,21 +198,27 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
         provider=provider,
     )
 
-    # --- coding agent (codex in spec) ---
-    command = _to_str(codex_raw.get("command"), _DEFAULT_CLAUDE_COMMAND)
+    # --- runner (subprocess settings, provider-neutral) ---
+    default_command = _DEFAULT_COMMANDS.get(provider, _DEFAULT_CLAUDE_COMMAND)
+    command = _to_str(runner_raw.get("command"), default_command)
     if not command:
-        command = _DEFAULT_CLAUDE_COMMAND
+        command = default_command
 
-    provider = _to_str(codex_raw.get("provider"), "claude")
-
-    coding_agent = CodingAgentConfig(
+    runner = RunnerConfig(
         command=command,
-        turn_timeout_ms=_to_int(codex_raw.get("turn_timeout_ms"), _DEFAULT_TURN_TIMEOUT_MS),
-        read_timeout_ms=_to_int(codex_raw.get("read_timeout_ms"), _DEFAULT_READ_TIMEOUT_MS),
-        stall_timeout_ms=_to_int(codex_raw.get("stall_timeout_ms"), _DEFAULT_STALL_TIMEOUT_MS),
+        turn_timeout_ms=_to_int(runner_raw.get("turn_timeout_ms"), _DEFAULT_TURN_TIMEOUT_MS),
+        read_timeout_ms=_to_int(runner_raw.get("read_timeout_ms"), _DEFAULT_READ_TIMEOUT_MS),
+        stall_timeout_ms=_to_int(runner_raw.get("stall_timeout_ms"), _DEFAULT_STALL_TIMEOUT_MS),
         dangerously_skip_permissions=bool(
-            codex_raw.get("dangerously_skip_permissions", True)
+            runner_raw.get("dangerously_skip_permissions", True)
         ),
+    )
+    coding_agent = CodingAgentConfig(
+        command=runner.command,
+        turn_timeout_ms=runner.turn_timeout_ms,
+        read_timeout_ms=runner.read_timeout_ms,
+        stall_timeout_ms=runner.stall_timeout_ms,
+        dangerously_skip_permissions=runner.dangerously_skip_permissions,
         provider=provider,
     )
 
@@ -317,7 +329,7 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
         workspace=workspace,
         hooks=hooks,
         agent=agent,
-        coding_agent=coding_agent,
+        runner=runner,
         server=server,
         preflight=preflight,
         transitions=transitions,
@@ -358,8 +370,8 @@ def validate_dispatch_config(config: ServiceConfig) -> ValidationResult:
     if config.tracker.kind == "linear" and not config.tracker.project_slug:
         result.fail("tracker.project_slug is required when tracker.kind=linear")
 
-    if not config.coding_agent.command:
-        result.fail("codex.command is missing or empty")
+    if not config.runner.command:
+        result.fail("runner.command is missing or empty")
 
     if config.agent.provider not in SUPPORTED_PROVIDERS:
         result.fail(

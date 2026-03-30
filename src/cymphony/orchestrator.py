@@ -854,7 +854,7 @@ class Orchestrator:
         stalled: list[tuple[str, int]] = []
         qa_agent_cfg = self._config.transitions.qa_review.agent
         for issue_id, entry in list(self._state.running.items()):
-            stall_timeout_ms = self._config.coding_agent.stall_timeout_ms
+            stall_timeout_ms = self._config.runner.stall_timeout_ms
             if entry.mode == ExecutionMode.REVIEW and qa_agent_cfg is not None:
                 stall_timeout_ms = qa_agent_cfg.stall_timeout_ms
             if stall_timeout_ms <= 0:

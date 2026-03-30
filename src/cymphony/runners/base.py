@@ -20,7 +20,7 @@ from ..models import (
     AgentError,
     AgentEvent,
     AgentEventType,
-    CodingAgentConfig,
+    RunnerConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ class BaseAgentRunner(abc.ABC):
       - _build_env: customize subprocess environment
     """
 
-    def __init__(self, config: CodingAgentConfig) -> None:
+    def __init__(self, config: RunnerConfig) -> None:
         self._config = config
 
     @abc.abstractmethod
