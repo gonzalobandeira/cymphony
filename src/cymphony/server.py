@@ -121,13 +121,14 @@ def _find_issue_snapshot(snapshot: dict, identifier: str) -> dict | None:
     return None
 
 
-def _render_key_value(label: str, value: str | None) -> str:
+def _render_key_value(label: str, value: str | None, *, escape_value: bool = True) -> str:
     if not value:
         return ""
+    rendered_value = escape(value) if escape_value else value
     return (
         f"<div class='kv'>"
         f"<span class='k'>{escape(label)}</span>"
-        f"<span class='v'>{escape(value)}</span>"
+        f"<span class='v'>{rendered_value}</span>"
         f"</div>"
     )
 
@@ -139,7 +140,7 @@ def _render_issue_comments(comments: list[dict]) -> str:
     items = []
     for comment in comments:
         author = escape(str(comment.get("author") or "Unknown"))
-        created_at = escape(str(comment.get("created_at") or ""))
+        created_at = _format_timestamp(str(comment.get("created_at") or ""))
         body = escape(str(comment.get("body") or ""))
         items.append(
             f"<li><strong>{author}</strong>"
@@ -156,7 +157,7 @@ def _render_recent_events(events: list[dict]) -> str:
     items = []
     for event in reversed(events):
         label = escape(str(event.get("event") or "unknown"))
-        timestamp = escape(str(event.get("timestamp") or ""))
+        timestamp = _format_timestamp(str(event.get("timestamp") or ""))
         message = escape(str(event.get("message") or ""))
         usage = event.get("usage") or {}
         usage_text = ""
@@ -205,8 +206,8 @@ def _render_issue_drilldown(entry: dict, retry_due: str | None = None) -> str:
         _render_key_value("Run status", entry.get("run_status") or entry.get("status")),
         _render_key_value("Session", entry.get("session_id")),
         _render_key_value("Workspace", entry.get("workspace_path")),
-        _render_key_value("Started", entry.get("started_at")),
-        _render_key_value("Last event at", entry.get("last_event_at")),
+        _render_key_value("Started", _format_timestamp(entry.get("started_at")), escape_value=False),
+        _render_key_value("Last event at", _format_timestamp(entry.get("last_event_at")), escape_value=False),
         _render_key_value("Retry attempt", str(entry.get("retry_attempt")) if entry.get("retry_attempt") is not None else None),
         _render_key_value("Queued retry", retry_due),
         _render_key_value("Plan comment", entry.get("plan_comment_id")),
@@ -1829,7 +1830,7 @@ document.addEventListener("DOMContentLoaded", function() {{
             <select id="tz-select" title="Display timestamps in this timezone" onchange="cym.setTimezone(this.value)">
               <option value="UTC">UTC</option>
               <option value="Europe/London">Europe/London</option>
-              <option value="Europe/Berlin">Europe/Berlin (CET)</option>
+              <option value="Europe/Berlin">Europe/Berlin</option>
               <option value="Europe/Paris">Europe/Paris</option>
               <option value="Europe/Madrid">Europe/Madrid</option>
               <option value="Europe/Rome">Europe/Rome</option>
@@ -1844,10 +1845,10 @@ document.addEventListener("DOMContentLoaded", function() {{
               <option value="Asia/Tokyo">Asia/Tokyo</option>
               <option value="Australia/Sydney">Australia/Sydney</option>
               <option value="Pacific/Auckland">Pacific/Auckland</option>
-              <option value="America/New_York">America/New_York (EST)</option>
-              <option value="America/Chicago">America/Chicago (CST)</option>
-              <option value="America/Denver">America/Denver (MST)</option>
-              <option value="America/Los_Angeles">America/Los_Angeles (PST)</option>
+              <option value="America/New_York">America/New_York</option>
+              <option value="America/Chicago">America/Chicago</option>
+              <option value="America/Denver">America/Denver</option>
+              <option value="America/Los_Angeles">America/Los_Angeles</option>
               <option value="America/Sao_Paulo">America/Sao_Paulo</option>
             </select>
           </div>

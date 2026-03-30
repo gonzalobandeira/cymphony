@@ -1123,6 +1123,8 @@ class TestDashboardTimezoneSelector:
         assert "Europe/Berlin" in html
         assert "America/New_York" in html
         assert "cym.setTimezone" in html
+        assert "Europe/Berlin (CET)" not in html
+        assert "America/New_York (EST)" not in html
 
     def test_timestamps_render_as_time_elements(self):
         html = _render_dashboard(
@@ -1157,3 +1159,45 @@ class TestDashboardTimezoneSelector:
             }
         )
         assert '<time class="cym-ts" data-utc=' in html
+
+
+class TestDashboardDrilldownTimestamps:
+    def test_issue_drilldown_renders_timestamps_as_time_elements(self):
+        html = server._render_issue_drilldown(
+            {
+                "issue_identifier": "BAP-203",
+                "started_at": "2026-03-28T14:30:00Z",
+                "last_event_at": "2026-03-28T15:00:00Z",
+            }
+        )
+
+        assert html.count('<time class="cym-ts" data-utc=') >= 2
+        assert "2026-03-28 14:30 UTC" in html
+        assert "2026-03-28 15:00 UTC" in html
+
+    def test_issue_comments_render_timestamp_as_time_element(self):
+        html = server._render_issue_comments(
+            [
+                {
+                    "author": "Gonzalo",
+                    "created_at": "2026-03-28T14:30:00Z",
+                    "body": "Looks good",
+                }
+            ]
+        )
+
+        assert '<time class="cym-ts" data-utc="2026-03-28T14:30:00+00:00">' in html
+
+    def test_recent_events_render_timestamp_as_time_element(self):
+        html = server._render_recent_events(
+            [
+                {
+                    "event": "turn.completed",
+                    "timestamp": "2026-03-28T14:30:00Z",
+                    "message": "Finished run",
+                    "usage": {"input_tokens": 1, "output_tokens": 2},
+                }
+            ]
+        )
+
+        assert '<time class="cym-ts" data-utc="2026-03-28T14:30:00+00:00">' in html
