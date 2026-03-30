@@ -1336,9 +1336,9 @@ class Orchestrator:
     ) -> None:
         """Run one agent session for an issue (workspace + hooks + turns)."""
         wm = WorkspaceManager(self._config)
-        is_review_mode = entry.mode == ExecutionMode.REVIEW
+        is_review = entry.mode == ExecutionMode.REVIEW
         qa_agent_cfg = self._config.transitions.qa_review.agent
-        if is_review_mode and qa_agent_cfg is not None:
+        if is_review and qa_agent_cfg is not None:
             agent = create_agent_runner(qa_agent_cfg.provider, qa_agent_cfg)
         else:
             agent = create_agent_runner(
@@ -1388,7 +1388,6 @@ class Orchestrator:
         max_turns = self._config.agent.max_turns
         session_id: str | None = None
         turn_number = 1
-        is_review = entry.mode == ExecutionMode.REVIEW
 
         async def on_event(event: AgentEvent) -> None:
             await self._handle_agent_event(issue.id, entry, event)
@@ -2088,6 +2087,8 @@ class Orchestrator:
             for e in self._state.running.values()
         )
         totals = self._state.codex_totals
+        qa_review = self._config.transitions.qa_review
+        qa_agent_cfg = qa_review.agent
         wm = WorkspaceManager(self._config)
 
         running_rows = []
@@ -2199,20 +2200,20 @@ class Orchestrator:
                     "blocked": self._config.transitions.blocked,
                     "cancelled": self._config.transitions.cancelled,
                     "qa_review": {
-                        "enabled": self._config.transitions.qa_review.enabled,
-                        "dispatch": self._config.transitions.qa_review.dispatch,
-                        "success": self._config.transitions.qa_review.success,
-                        "failure": self._config.transitions.qa_review.failure,
-                        "max_bounces": self._config.transitions.qa_review.max_bounces,
-                        "max_retries": self._config.transitions.qa_review.max_retries,
+                        "enabled": qa_review.enabled,
+                        "dispatch": qa_review.dispatch,
+                        "success": qa_review.success,
+                        "failure": qa_review.failure,
+                        "max_bounces": qa_review.max_bounces,
+                        "max_retries": qa_review.max_retries,
                         "agent": {
-                            "provider": qa_cfg.provider,
-                            "command": qa_cfg.command,
-                            "turn_timeout_ms": qa_cfg.turn_timeout_ms,
-                            "read_timeout_ms": qa_cfg.read_timeout_ms,
-                            "stall_timeout_ms": qa_cfg.stall_timeout_ms,
-                            "dangerously_skip_permissions": qa_cfg.dangerously_skip_permissions,
-                        } if (qa_cfg := self._config.transitions.qa_review.agent) is not None else None,
+                            "provider": qa_agent_cfg.provider,
+                            "command": qa_agent_cfg.command,
+                            "turn_timeout_ms": qa_agent_cfg.turn_timeout_ms,
+                            "read_timeout_ms": qa_agent_cfg.read_timeout_ms,
+                            "stall_timeout_ms": qa_agent_cfg.stall_timeout_ms,
+                            "dangerously_skip_permissions": qa_agent_cfg.dangerously_skip_permissions,
+                        } if qa_agent_cfg is not None else None,
                     },
                 },
             },

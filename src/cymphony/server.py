@@ -270,6 +270,7 @@ def _workflow_form_data(
         server = raw.get("server") or {}
         transitions = raw.get("transitions") or {}
         qa_review = transitions.get("qa_review") or {}
+        qa_agent = qa_review.get("agent") or {}
 
         data.update(
             {
@@ -299,12 +300,12 @@ def _workflow_form_data(
                 "qa_review_dispatch": str(qa_review.get("dispatch") or data["qa_review_dispatch"]),
                 "qa_review_success": str(qa_review.get("success") or data["qa_review_success"]),
                 "qa_review_failure": str(qa_review.get("failure") or data["qa_review_failure"]),
-                "qa_agent_provider": str((qa_review.get("agent") or {}).get("provider") or ""),
-                "qa_agent_command": str((qa_review.get("agent") or {}).get("command") or ""),
-                "qa_agent_turn_timeout_ms": str((qa_review.get("agent") or {}).get("turn_timeout_ms") or ""),
-                "qa_agent_read_timeout_ms": str((qa_review.get("agent") or {}).get("read_timeout_ms") or ""),
-                "qa_agent_stall_timeout_ms": str((qa_review.get("agent") or {}).get("stall_timeout_ms") or ""),
-                "qa_agent_dangerously_skip_permissions": bool((qa_review.get("agent") or {}).get("dangerously_skip_permissions", False)),
+                "qa_agent_provider": str(qa_agent.get("provider") or ""),
+                "qa_agent_command": str(qa_agent.get("command") or ""),
+                "qa_agent_turn_timeout_ms": str(qa_agent.get("turn_timeout_ms") or ""),
+                "qa_agent_read_timeout_ms": str(qa_agent.get("read_timeout_ms") or ""),
+                "qa_agent_stall_timeout_ms": str(qa_agent.get("stall_timeout_ms") or ""),
+                "qa_agent_dangerously_skip_permissions": bool(qa_agent.get("dangerously_skip_permissions", False)),
                 "review_prompt": str(raw.get("review_prompt") or ""),
                 "prompt_template": workflow.prompt_template or data["prompt_template"],
             }
