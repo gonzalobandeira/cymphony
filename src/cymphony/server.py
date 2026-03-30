@@ -17,7 +17,7 @@ from aiohttp import web
 from .config import build_config, validate_dispatch_config
 from .linear import LinearClient
 from .models import Issue, WorkflowDefinition
-from .workflow import load_workflow, save_workflow
+from .workflow import LOCAL_CONFIG_DIR, LOCAL_WORKFLOW_FILENAME, load_workflow, save_workflow
 
 if TYPE_CHECKING:
     from .orchestrator import Orchestrator
@@ -469,7 +469,7 @@ def _render_setup_page(
 ) -> str:
     title = "Set Up Cymphony" if setup_mode else "Workflow Settings"
     subtitle = (
-        "Create a WORKFLOW.md so the service can start."
+        f"Create a config in {LOCAL_CONFIG_DIR}/{LOCAL_WORKFLOW_FILENAME} so the service can start."
         if setup_mode
         else "Edit the current workflow. Running services will reload changes when the file updates."
     )

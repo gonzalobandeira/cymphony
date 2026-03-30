@@ -5,7 +5,9 @@ Orchestration service that polls Linear issues and runs Claude Code agents on th
 ## Architecture
 
 ```
-WORKFLOW.md          ← user config (YAML frontmatter + Jinja2 prompt template)
+WORKFLOW.example.md  ← committed template (sanitized, no operator secrets)
+.cymphony/
+  workflow.md        ← local config (gitignored, created by setup or migration)
 src/cymphony/
   __main__.py        ← CLI entry point (cymphony --port <port>)
   config.py          ← parses WORKFLOW.md YAML into typed ServiceConfig
@@ -33,15 +35,27 @@ src/cymphony/
 5. **Reconcile**: each tick checks running workers for stalls and refreshes issue states from Linear; terminal-state issues get their workers cancelled and workspaces removed
 6. **Retry**: workers that exit abnormally are retried with exponential backoff; clean exits get a 1-second continuation retry to re-evaluate the issue
 
-State transitions are configured declaratively through `WORKFLOW.md` frontmatter (`transitions.dispatch`, `success`, `failure`, `blocked`, `cancelled`, and `qa_review.*`).
+State transitions are configured declaratively through workflow config frontmatter (`transitions.dispatch`, `success`, `failure`, `blocked`, `cancelled`, and `qa_review.*`).
+
+## Config ownership model (BAP-187)
+
+Config resolution follows this precedence (highest to lowest):
+
+1. `--workflow-path <path>` (CLI override)
+2. `.cymphony/workflow.md` (local generated config, gitignored)
+3. `WORKFLOW.md` (legacy committed file — **deprecated**)
+4. Setup mode (no config found → launch setup screen)
+
+On first startup, `migrate_legacy_workflow()` auto-copies `WORKFLOW.md` → `.cymphony/workflow.md` if the local config doesn't exist yet. See `docs/design/config-ownership.md` for the full design.
 
 ## Running
 
 ```bash
 export LINEAR_API_KEY=...
+# First time: use setup screen
 cymphony --port 8081
-# or
-cymphony --workflow-path /path/to/WORKFLOW.md --port 8081 --log-level DEBUG
+# Or with explicit config:
+cymphony --workflow-path /path/to/workflow.md --port 8081 --log-level DEBUG
 ```
 
 ## Development
@@ -66,6 +80,7 @@ Dependencies: `pyyaml`, `jinja2`, `aiohttp`, `watchdog`. Python ≥ 3.11. Built 
 - **QA review lane is opt-in**: when `transitions.qa_review.enabled` is true, implementation success transitions to `qa_review.dispatch` (typically `QA Review`) instead of directly to `transitions.success`.
 - **QA agent override**: set `transitions.qa_review.agent` to run review-mode workers with a different provider, command, or timeout settings. Fields: `provider`, `command`, `turn_timeout_ms`, `read_timeout_ms`, `stall_timeout_ms`, `dangerously_skip_permissions`. Omit the block entirely to inherit the main `codex` settings.
 - **Required Linear states for QA review**: create `QA Review` in Linear before enabling the feature. The end-to-end workflow is `Todo -> In Progress -> QA Review -> (Todo | In Review)`.
+- **Config lives in `.cymphony/`**: local config is gitignored. `WORKFLOW.md` at repo root is a deprecated fallback. `WORKFLOW.example.md` is the committed template for new operators.
 
 ## HTTP API
 
