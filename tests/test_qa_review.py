@@ -921,7 +921,9 @@ class TestQAAgentConfig:
         assert qa["agent"]["provider"] == "codex"
         assert qa["agent"]["command"] == "review-agent"
         assert qa["agent"]["turn_timeout_ms"] == 500
+        assert qa["agent"]["read_timeout_ms"] == 500
         assert qa["agent"]["stall_timeout_ms"] == 500
+        assert qa["agent"]["dangerously_skip_permissions"] is True
 
     def test_snapshot_qa_agent_is_none_when_not_configured(self) -> None:
         orch = _build_orchestrator()

@@ -56,6 +56,7 @@ _DEFAULT_SETUP_FORM = {
     "qa_agent_turn_timeout_ms": "",
     "qa_agent_read_timeout_ms": "",
     "qa_agent_stall_timeout_ms": "",
+    "qa_agent_dangerously_skip_permissions": False,
     "review_prompt": "",
     "prompt_template": """You are a senior software engineer working on the project.\n\n## Issue\n\n**Title:** {{ issue.title }}\n**Identifier:** {{ issue.identifier }}\n**State:** {{ issue.state }}\n{% if issue.description %}\n**Description:**\n{{ issue.description }}\n{% endif %}\n\n## Instructions\n\n1. Read the issue carefully.\n2. Create and checkout a branch named `agent/{{ issue.identifier | lower }}`.\n3. Implement the requested change.\n4. Update tests as needed.\n5. Keep changes minimal and consistent with the codebase.\n""",
 }
@@ -303,6 +304,7 @@ def _workflow_form_data(
                 "qa_agent_turn_timeout_ms": str((qa_review.get("agent") or {}).get("turn_timeout_ms") or ""),
                 "qa_agent_read_timeout_ms": str((qa_review.get("agent") or {}).get("read_timeout_ms") or ""),
                 "qa_agent_stall_timeout_ms": str((qa_review.get("agent") or {}).get("stall_timeout_ms") or ""),
+                "qa_agent_dangerously_skip_permissions": bool((qa_review.get("agent") or {}).get("dangerously_skip_permissions", False)),
                 "review_prompt": str(raw.get("review_prompt") or ""),
                 "prompt_template": workflow.prompt_template or data["prompt_template"],
             }
@@ -373,6 +375,7 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
     qa_agent_turn_timeout = str(form.get("qa_agent_turn_timeout_ms") or "").strip()
     qa_agent_read_timeout = str(form.get("qa_agent_read_timeout_ms") or "").strip()
     qa_agent_stall_timeout = str(form.get("qa_agent_stall_timeout_ms") or "").strip()
+    qa_agent_skip_perms = bool(form.get("qa_agent_dangerously_skip_permissions"))
     if qa_enabled or qa_dispatch or qa_success or qa_failure:
         qa_review_block: dict[str, Any] = {
             "enabled": qa_enabled,
@@ -392,6 +395,8 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
             qa_agent_block["read_timeout_ms"] = int(qa_agent_read_timeout)
         if qa_agent_stall_timeout:
             qa_agent_block["stall_timeout_ms"] = int(qa_agent_stall_timeout)
+        if qa_agent_skip_perms:
+            qa_agent_block["dangerously_skip_permissions"] = True
         if qa_agent_block:
             qa_review_block["agent"] = qa_agent_block
 
@@ -629,6 +634,10 @@ def _render_setup_page(
       <section class="card">
         <label for="qa_agent_stall_timeout_ms">QA agent stall timeout (ms, optional)</label>
         <input id="qa_agent_stall_timeout_ms" name="qa_agent_stall_timeout_ms" value="{field("qa_agent_stall_timeout_ms")}" placeholder="inherit from main" />
+      </section>
+      <section class="card">
+        <label class="check"><input type="checkbox" name="qa_agent_dangerously_skip_permissions" value="1"{_checkbox_checked(values.get("qa_agent_dangerously_skip_permissions"))} />QA agent: dangerously skip permissions</label>
+        <div class="muted">Leave unchecked to inherit from main agent.</div>
       </section>
       <section class="card full">
         <label for="after_create">after_create hook</label>
@@ -1978,6 +1987,7 @@ async def _save_workflow_from_request(request: web.Request, *, setup_mode: bool)
         "qa_agent_turn_timeout_ms": submitted.get("qa_agent_turn_timeout_ms", ""),
         "qa_agent_read_timeout_ms": submitted.get("qa_agent_read_timeout_ms", ""),
         "qa_agent_stall_timeout_ms": submitted.get("qa_agent_stall_timeout_ms", ""),
+        "qa_agent_dangerously_skip_permissions": submitted.get("qa_agent_dangerously_skip_permissions") == "1",
         "after_create": submitted.get("after_create", ""),
         "before_run": submitted.get("before_run", ""),
         "after_run": submitted.get("after_run", ""),
