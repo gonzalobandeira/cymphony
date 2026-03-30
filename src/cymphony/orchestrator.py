@@ -297,6 +297,7 @@ class Orchestrator:
             self._state_manager.save(
                 retry_attempts=self._state.retry_attempts,
                 qa_review_bounces=self._state.qa_review_bounces,
+                qa_review_comment_ids=self._state.qa_review_comment_ids,
                 skipped=self._state.skipped,
                 dispatch_paused=self._state.dispatch_paused,
             )
@@ -305,14 +306,31 @@ class Orchestrator:
 
     async def _restore_persisted_state(self) -> None:
         """Restore persisted state and reconcile against current Linear state."""
-        retry_attempts, qa_review_bounces, skipped, dispatch_paused = self._state_manager.restore()
+        (
+            retry_attempts,
+            qa_review_bounces,
+            qa_review_comment_ids,
+            skipped,
+            dispatch_paused,
+        ) = self._state_manager.restore()
 
-        if not retry_attempts and not qa_review_bounces and not skipped and not dispatch_paused:
+        if (
+            not retry_attempts
+            and not qa_review_bounces
+            and not qa_review_comment_ids
+            and not skipped
+            and not dispatch_paused
+        ):
             return
 
         # Reconcile: fetch current issue states from Linear to drop stale entries
         all_issue_ids = list(
-            set(list(retry_attempts.keys()) + list(qa_review_bounces.keys()) + list(skipped.keys()))
+            set(
+                list(retry_attempts.keys())
+                + list(qa_review_bounces.keys())
+                + list(qa_review_comment_ids.keys())
+                + list(skipped.keys())
+            )
         )
         current_states: dict[str, str] | None = None
         try:
@@ -373,6 +391,18 @@ class Orchestrator:
                     continue
 
             self._state.qa_review_bounces[issue_id] = bounce_count
+
+        for issue_id, comment_id in list(qa_review_comment_ids.items()):
+            if current_states is not None:
+                issue_state = current_states.get(issue_id)
+
+                if issue_state is not None and issue_state.lower() in terminal_lower:
+                    continue
+
+                if issue_id not in current_states:
+                    continue
+
+            self._state.qa_review_comment_ids[issue_id] = comment_id
 
         # Reconcile skipped entries
         restored_skipped = 0
@@ -738,6 +768,7 @@ class Orchestrator:
         self._state.skipped.pop(issue_id, None)
         self._state.claimed.discard(issue_id)
         self._state.completed.discard(issue_id)
+        self._clear_qa_review_cycle_state(issue_id)
         self._persist_state()
         coalesced = self.request_immediate_poll()
         detail = "issue released for redispatch"
@@ -1021,19 +1052,43 @@ class Orchestrator:
         identifier: str,
         result: ReviewResult,
     ) -> None:
-        """Persist the QA review outcome to a Linear comment."""
+        """Persist the QA review outcome to a Linear comment.
+
+        Uses upsert semantics: if a review comment was already posted for this
+        issue during the current review cycle, the existing comment is updated
+        instead of creating a duplicate.  The comment ID is tracked in
+        ``_state.qa_review_comment_ids`` and cleared when the issue transitions
+        out of the QA review lane.
+        """
         body = self._render_review_result_comment(result)
+        existing_comment_id = self._state.qa_review_comment_ids.get(issue_id)
         try:
             client = LinearClient(self._config.tracker)
-            comment_id = await client.create_comment(issue_id, body)
-            issue_log(
-                logger,
-                logging.INFO,
-                "qa_review_comment_created",
-                issue_id,
-                identifier,
-                comment_id=comment_id,
-            )
+            if existing_comment_id:
+                success = await client.update_comment(existing_comment_id, body)
+                if success:
+                    issue_log(
+                        logger,
+                        logging.INFO,
+                        "qa_review_comment_updated",
+                        issue_id,
+                        identifier,
+                        comment_id=existing_comment_id,
+                    )
+                else:
+                    # Update failed (comment deleted?); fall through to create.
+                    existing_comment_id = None
+            if not existing_comment_id:
+                comment_id = await client.create_comment(issue_id, body)
+                self._state.qa_review_comment_ids[issue_id] = comment_id
+                issue_log(
+                    logger,
+                    logging.INFO,
+                    "qa_review_comment_created",
+                    issue_id,
+                    identifier,
+                    comment_id=comment_id,
+                )
         except Exception as exc:
             self._record_problem(
                 kind="qa_review_comment_failed",
@@ -1677,24 +1732,34 @@ class Orchestrator:
                     summary=review_result.summary,
                 )
                 if review_result.decision == ReviewDecision.PASS:
-                    self._clear_qa_review_bounces(issue_id)
                     target = qa.success if qa.enabled else None
                 else:
-                    bounce_count = self._increment_qa_review_bounces(issue_id)
-                    entry.qa_review_bounce_count = bounce_count
                     target = qa.failure if qa.enabled else None
             else:
                 target = qa.dispatch if qa.enabled else self._config.transitions.resolve("success")
+            transition_succeeded = False
             if target:
                 active_lower = [s.lower() for s in self._config.tracker.active_states]
                 if entry.issue.state.lower() in active_lower:
-                    await self._transition_issue_state(
+                    transition_succeeded = await self._transition_issue_state(
                         issue_id,
                         target,
                         trigger="success",
                         issue_identifier=identifier,
                         from_state=entry.issue.state,
                     )
+            if is_review and review_result and transition_succeeded:
+                if review_result.decision == ReviewDecision.PASS:
+                    self._clear_qa_review_bounces(issue_id)
+                elif (
+                    review_result.decision == ReviewDecision.CHANGES_REQUESTED
+                    and target
+                    and target.lower() != qa.dispatch.lower()
+                ):
+                    bounce_count = self._increment_qa_review_bounces(issue_id)
+                    entry.qa_review_bounce_count = bounce_count
+                    self._state.qa_review_comment_ids.pop(issue_id, None)
+                    self._persist_state()
             if is_review and review_result and review_result.decision == ReviewDecision.CHANGES_REQUESTED:
                 issue_log(
                     logger, logging.WARNING,
@@ -1813,7 +1878,6 @@ class Orchestrator:
                 error=result.error,
             )
         return result
-        return result
 
     async def _handle_review_retry_or_hold(
         self,
@@ -1861,8 +1925,12 @@ class Orchestrator:
             entry=entry,
         )
 
-    def _clear_qa_review_bounces(self, issue_id: str) -> None:
+    def _clear_qa_review_cycle_state(self, issue_id: str) -> None:
         self._state.qa_review_bounces.pop(issue_id, None)
+        self._state.qa_review_comment_ids.pop(issue_id, None)
+
+    def _clear_qa_review_bounces(self, issue_id: str) -> None:
+        self._clear_qa_review_cycle_state(issue_id)
         self._persist_state()
 
     def _increment_qa_review_bounces(self, issue_id: str) -> int:
@@ -1881,6 +1949,7 @@ class Orchestrator:
         self._state.retry_attempts.pop(issue_id, None)
         self._state.claimed.discard(issue_id)
         self._state.completed.discard(issue_id)
+        self._state.qa_review_comment_ids.pop(issue_id, None)
         self._state.skipped[issue_id] = SkippedEntry(
             issue_id=issue_id,
             identifier=identifier,
