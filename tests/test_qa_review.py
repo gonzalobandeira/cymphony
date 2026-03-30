@@ -327,7 +327,7 @@ class TestWorkerDoneTransitions:
         comments: list[tuple[str, str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
-            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+            AsyncMock(side_effect=lambda iid, state, **kwargs: (transitions.append((iid, state)) or True)),
         )
         monkeypatch.setattr(
             orch,
@@ -344,6 +344,8 @@ class TestWorkerDoneTransitions:
         # Should use qa_review.success = "In Review"
         assert transitions == [(issue.id, "In Review")]
         assert comments == [(issue.id, issue.identifier, "Looks good")]
+        assert issue.id not in orch._state.qa_review_bounces
+        assert issue.id not in orch._state.qa_review_comment_ids
 
     @pytest.mark.asyncio
     async def test_review_process_failure_retries_in_review_without_failure_transition(
@@ -412,7 +414,7 @@ class TestWorkerDoneTransitions:
         comments: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
-            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+            AsyncMock(side_effect=lambda iid, state, **kwargs: (transitions.append((iid, state)) or True)),
         )
         monkeypatch.setattr(
             orch,
@@ -423,11 +425,14 @@ class TestWorkerDoneTransitions:
             orch, "_schedule_retry",
             AsyncMock(),
         )
+        orch._state.qa_review_comment_ids[issue.id] = "old-comment"
 
         await orch._on_worker_done(issue.id, issue.identifier, entry, task)
 
         assert transitions == [(issue.id, "Todo")]
         assert comments == [(issue.id, "changes_requested")]
+        assert orch._state.qa_review_bounces[issue.id] == 1
+        assert issue.id not in orch._state.qa_review_comment_ids
 
     @pytest.mark.asyncio
     async def test_review_missing_result_file_skips_transition_and_posts_parse_failure(
@@ -508,7 +513,7 @@ class TestWorkerDoneTransitions:
         transitions: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
-            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+            AsyncMock(side_effect=lambda iid, state, **kwargs: (transitions.append((iid, state)) or True)),
         )
         monkeypatch.setattr(
             orch,
@@ -544,7 +549,7 @@ class TestWorkerDoneTransitions:
         transitions: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
-            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+            AsyncMock(side_effect=lambda iid, state, **kwargs: (transitions.append((iid, state)) or True)),
         )
         monkeypatch.setattr(
             orch, "_schedule_retry",
@@ -575,7 +580,7 @@ class TestWorkerDoneTransitions:
         transitions: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
-            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+            AsyncMock(side_effect=lambda iid, state, **kwargs: (transitions.append((iid, state)) or True)),
         )
         monkeypatch.setattr(
             orch, "_schedule_retry",
@@ -607,7 +612,7 @@ class TestWorkerDoneTransitions:
         transitions: list[tuple[str, str]] = []
         monkeypatch.setattr(
             orch, "_transition_issue_state",
-            AsyncMock(side_effect=lambda iid, state, **kwargs: transitions.append((iid, state))),
+            AsyncMock(side_effect=lambda iid, state, **kwargs: (transitions.append((iid, state)) or True)),
         )
         monkeypatch.setattr(orch, "_schedule_retry", AsyncMock())
 
@@ -618,6 +623,69 @@ class TestWorkerDoneTransitions:
         assert orch._state.skipped[issue.id].reason == "qa_review_bounce_limit"
         assert orch._state.qa_review_bounces[issue.id] == 2
         assert any(p.kind == "qa_review_bounce_limit_reached" for p in orch._state.recent_problems)
+
+    @pytest.mark.asyncio
+    async def test_review_changes_requested_preserves_cycle_state_when_transition_fails(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch = _build_orchestrator()
+        issue = _build_issue(state="QA Review", identifier="BAP-205")
+        entry = _build_running_entry(issue, mode=ExecutionMode.REVIEW)
+        orch._state.running[issue.id] = entry
+        orch._state.qa_review_bounces[issue.id] = 1
+        orch._state.qa_review_comment_ids[issue.id] = "comment-1"
+
+        async def noop() -> None:
+            pass
+
+        task = asyncio.ensure_future(noop())
+        await task
+        entry.task = task
+        _write_review_result(orch, issue.identifier, "changes_requested", "Still broken")
+
+        monkeypatch.setattr(
+            orch, "_transition_issue_state",
+            AsyncMock(return_value=False),
+        )
+        monkeypatch.setattr(orch, "_schedule_retry", AsyncMock())
+        monkeypatch.setattr(orch, "_post_review_result_comment", AsyncMock())
+
+        await orch._on_worker_done(issue.id, issue.identifier, entry, task)
+
+        assert orch._state.qa_review_bounces[issue.id] == 1
+        assert orch._state.qa_review_comment_ids[issue.id] == "comment-1"
+        assert entry.qa_review_bounce_count == 0
+
+    @pytest.mark.asyncio
+    async def test_review_pass_preserves_cycle_state_when_transition_fails(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch = _build_orchestrator()
+        issue = _build_issue(state="QA Review", identifier="BAP-206")
+        entry = _build_running_entry(issue, mode=ExecutionMode.REVIEW)
+        orch._state.running[issue.id] = entry
+        orch._state.qa_review_bounces[issue.id] = 2
+        orch._state.qa_review_comment_ids[issue.id] = "comment-2"
+
+        async def noop() -> None:
+            pass
+
+        task = asyncio.ensure_future(noop())
+        await task
+        entry.task = task
+        _write_review_result(orch, issue.identifier, "pass", "Looks good")
+
+        monkeypatch.setattr(
+            orch, "_transition_issue_state",
+            AsyncMock(return_value=False),
+        )
+        monkeypatch.setattr(orch, "_schedule_retry", AsyncMock())
+        monkeypatch.setattr(orch, "_post_review_result_comment", AsyncMock())
+
+        await orch._on_worker_done(issue.id, issue.identifier, entry, task)
+
+        assert orch._state.qa_review_bounces[issue.id] == 2
+        assert orch._state.qa_review_comment_ids[issue.id] == "comment-2"
 
     @pytest.mark.asyncio
     async def test_review_retry_limit_holds_issue_in_qa_review(
