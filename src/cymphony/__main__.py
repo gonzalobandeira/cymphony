@@ -10,7 +10,13 @@ import sys
 from pathlib import Path
 
 from .config import build_config, validate_dispatch_config
-from .workflow import load_workflow, resolve_workflow_path
+from .workflow import (
+    ConfigSource,
+    load_workflow,
+    migrate_legacy_workflow,
+    resolve_config_source,
+    resolve_workflow_path,
+)
 
 
 def _load_dotenv(workflow_path: Path) -> None:
@@ -114,7 +120,25 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     _configure_logging(args.log_level)
 
-    workflow_path = resolve_workflow_path(args.workflow_path)
+    log = logging.getLogger(__name__)
+
+    # Attempt legacy migration before resolving the config path.
+    if not args.workflow_path:
+        migrated = migrate_legacy_workflow()
+        if migrated:
+            log.info(f"action=legacy_migration target={migrated}")
+
+    workflow_path, source = resolve_config_source(args.workflow_path)
+
+    if source == ConfigSource.LEGACY_COMMITTED:
+        log.warning(
+            f"action=config_source_deprecated path={workflow_path} "
+            "hint='Using legacy WORKFLOW.md. Run the setup screen or move "
+            "your config to .cymphony/workflow.md.'"
+        )
+    else:
+        log.info(f"action=config_source source={source.value} path={workflow_path}")
+
     _load_dotenv(workflow_path)
 
     try:

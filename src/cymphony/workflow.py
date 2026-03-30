@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Awaitable
 
@@ -19,6 +21,17 @@ logger = logging.getLogger(__name__)
 
 # Default workflow path (spec §5.1)
 DEFAULT_WORKFLOW_FILENAME = "WORKFLOW.md"
+EXAMPLE_WORKFLOW_FILENAME = "WORKFLOW.example.md"
+LOCAL_CONFIG_DIR = ".cymphony"
+LOCAL_WORKFLOW_FILENAME = "workflow.md"
+
+
+class ConfigSource(str, Enum):
+    """Identifies which source provided the active workflow config."""
+    CLI_OVERRIDE = "cli_override"           # --workflow-path flag
+    LOCAL_CONFIG = "local_config"           # .cymphony/workflow.md
+    LEGACY_COMMITTED = "legacy_committed"   # WORKFLOW.md (deprecated)
+    SETUP_REQUIRED = "setup_required"       # no config found
 
 OnChangeCallback = Callable[[WorkflowDefinition], Awaitable[None]]
 
@@ -351,8 +364,86 @@ class _WorkflowFileHandler(FileSystemEventHandler):
 
 
 def resolve_workflow_path(explicit_path: str | None) -> Path:
-    """Resolve workflow file path with precedence rules (spec §5.1)."""
+    """Resolve workflow file path with precedence rules (spec §5.1).
+
+    Precedence (highest to lowest):
+    1. CLI ``--workflow-path`` (explicit override)
+    2. ``.cymphony/workflow.md`` (local generated config)
+    3. ``WORKFLOW.md`` (legacy committed file — deprecated)
+    4. ``.cymphony/workflow.md`` target path (for setup mode to create)
+    """
     if explicit_path:
         return Path(explicit_path).resolve()
-    cwd_path = Path.cwd() / DEFAULT_WORKFLOW_FILENAME
-    return cwd_path.resolve()
+
+    cwd = Path.cwd()
+
+    # Prefer local config directory
+    local_path = cwd / LOCAL_CONFIG_DIR / LOCAL_WORKFLOW_FILENAME
+    if local_path.exists():
+        return local_path.resolve()
+
+    # Fall back to legacy committed WORKFLOW.md
+    legacy_path = cwd / DEFAULT_WORKFLOW_FILENAME
+    if legacy_path.exists():
+        return legacy_path.resolve()
+
+    # No config found — return the local config target path so setup mode
+    # knows where to write the new config.
+    return local_path.resolve()
+
+
+def resolve_config_source(explicit_path: str | None) -> tuple[Path, ConfigSource]:
+    """Resolve the workflow path and identify which source it came from.
+
+    Returns ``(resolved_path, source)`` so callers can log the config
+    origin and emit deprecation warnings for legacy paths.
+    """
+    if explicit_path:
+        return Path(explicit_path).resolve(), ConfigSource.CLI_OVERRIDE
+
+    cwd = Path.cwd()
+
+    local_path = cwd / LOCAL_CONFIG_DIR / LOCAL_WORKFLOW_FILENAME
+    if local_path.exists():
+        return local_path.resolve(), ConfigSource.LOCAL_CONFIG
+
+    legacy_path = cwd / DEFAULT_WORKFLOW_FILENAME
+    if legacy_path.exists():
+        return legacy_path.resolve(), ConfigSource.LEGACY_COMMITTED
+
+    return local_path.resolve(), ConfigSource.SETUP_REQUIRED
+
+
+def local_config_path(base: Path | None = None) -> Path:
+    """Return the canonical local config path (``.cymphony/workflow.md``)."""
+    return (base or Path.cwd()) / LOCAL_CONFIG_DIR / LOCAL_WORKFLOW_FILENAME
+
+
+def migrate_legacy_workflow(base: Path | None = None) -> Path | None:
+    """Copy a legacy ``WORKFLOW.md`` into ``.cymphony/workflow.md`` if needed.
+
+    Returns the new path if migration occurred, or ``None`` if no migration
+    was needed (either the local config already exists or there is no legacy
+    file to migrate).
+    """
+    root = base or Path.cwd()
+    local = root / LOCAL_CONFIG_DIR / LOCAL_WORKFLOW_FILENAME
+    legacy = root / DEFAULT_WORKFLOW_FILENAME
+
+    if local.exists():
+        return None  # already migrated or created by setup
+
+    if not legacy.exists():
+        return None  # nothing to migrate
+
+    local.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(legacy), str(local))
+    logger.warning(
+        "action=migrate_legacy_workflow "
+        f"from={legacy} to={local} "
+        "hint='WORKFLOW.md is deprecated as the primary config source. "
+        "Your config has been copied to .cymphony/workflow.md. "
+        "Consider adding .cymphony/ to .gitignore and converting "
+        "WORKFLOW.md to WORKFLOW.example.md as a template for new operators.'"
+    )
+    return local
