@@ -922,6 +922,55 @@ def _render_operator_cards(
     )
 
 
+def _render_problems_panel(problems: list[dict[str, object]]) -> str:
+    """Render a high-priority panel for active operator problems."""
+    if not problems:
+        return ""
+
+    error_count = sum(1 for problem in problems if problem.get("severity") == "error")
+    warning_count = sum(1 for problem in problems if problem.get("severity") == "warning")
+
+    counts_parts: list[str] = []
+    if error_count:
+        counts_parts.append(f"{error_count} error{'s' if error_count != 1 else ''}")
+    if warning_count:
+        counts_parts.append(f"{warning_count} warning{'s' if warning_count != 1 else ''}")
+    subtitle = " · ".join(counts_parts) if counts_parts else f"{len(problems)} problem{'s' if len(problems) != 1 else ''}"
+
+    rows: list[str] = []
+    for problem in problems:
+        severity = escape(str(problem.get("severity") or "error"))
+        kind = escape(str(problem.get("kind") or ""))
+        summary = escape(str(problem.get("summary") or ""))
+        detail = escape(str(problem.get("detail") or ""))
+        observed_at = escape(_format_timestamp(problem.get("observed_at")))
+        issue_identifier = problem.get("issue_identifier")
+
+        issue_cell = "-"
+        if issue_identifier:
+            safe_identifier = escape(str(issue_identifier))
+            issue_cell = f"<a href='/api/v1/{escape(str(issue_identifier), quote=True)}'>{safe_identifier}</a>"
+
+        rows.append(
+            f"<tr class='problem-{severity}'>"
+            f"<td><span class='severity-badge severity-{severity}'>{severity.upper()}</span></td>"
+            f"<td>{issue_cell}</td>"
+            f"<td><strong>{summary}</strong><div class='muted small'>{detail}</div></td>"
+            f"<td class='muted'>{kind}</td>"
+            f"<td class='muted'>{observed_at}</td>"
+            "</tr>"
+        )
+
+    return (
+        "<section class='panel problems-panel'>"
+        f"<div class='panel-head'><h2>Problems ({len(problems)})</h2><p>{escape(subtitle)}</p></div>"
+        "<div class='table-wrap'>"
+        "<table><thead><tr><th>Severity</th><th>Issue</th><th>Problem</th><th>Kind</th><th>Observed</th></tr></thead><tbody>"
+        + "".join(rows)
+        + "</tbody></table></div></section>"
+    )
+
+
 def _render_dashboard(groups: dict[str, object]) -> str:
     summary = groups["summary"]
     totals = groups["totals"]
@@ -949,15 +998,6 @@ def _render_dashboard(groups: dict[str, object]) -> str:
             escape(_format_waiting_timing(row)),
         ]
         for row in groups.get("waiting_reasons", [])
-    ]
-    problem_rows = [
-        [
-            escape(str(row.get("issue_identifier") or "-")),
-            escape(str(row.get("summary") or "")),
-            escape(str(row.get("detail") or "")),
-            escape(_format_timestamp(row.get("observed_at"))),
-        ]
-        for row in groups.get("recent_problems", [])
     ]
     recent_control_rows = [
         [
@@ -1086,15 +1126,6 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     )
     queue_sections.append(
         _render_table(
-            f"Recent Problems ({len(problem_rows)})",
-            "Recent operator-visible orchestration issues for quick follow-up.",
-            ["Issue", "Problem", "Detail", "Observed"],
-            problem_rows,
-            "No recent orchestration problems captured.",
-        )
-    )
-    queue_sections.append(
-        _render_table(
             f"Skipped ({len(skipped_rows)})",
             "Issues manually skipped by an operator until they are requeued.",
             ["Issue", "Reason", "Skipped", "Actions"],
@@ -1204,6 +1235,45 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     font-size: 2rem;
     line-height: 1;
     margin-bottom: 8px;
+  }}
+  .problems-panel {{
+    margin-bottom: 20px;
+    border-left: 4px solid var(--danger);
+    background: linear-gradient(135deg, rgba(185, 28, 28, 0.06), var(--panel));
+  }}
+  .problems-panel .panel-head h2 {{
+    color: var(--danger);
+  }}
+  .severity-badge {{
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }}
+  .severity-error {{
+    background: rgba(185, 28, 28, 0.12);
+    color: var(--danger);
+  }}
+  .severity-warning {{
+    background: rgba(180, 83, 9, 0.12);
+    color: var(--warn);
+  }}
+  .severity-info {{
+    background: rgba(15, 118, 110, 0.12);
+    color: var(--accent);
+  }}
+  .problem-error {{
+    border-left: 3px solid var(--danger);
+  }}
+  .problem-warning {{
+    border-left: 3px solid var(--warn);
+  }}
+  .problem-info {{
+    border-left: 3px solid var(--accent);
   }}
   .stat span {{
     color: var(--muted);
@@ -1751,6 +1821,8 @@ document.addEventListener("DOMContentLoaded", function() {{
     <div class="stat attention"><strong>{summary["needs_attention"]}</strong><span>Needs attention</span></div>
     <div class="stat"><strong>{totals.get("total_tokens", 0):,}</strong><span>Total tokens</span></div>
   </section>
+
+  {_render_problems_panel(list(groups.get("recent_problems", [])))}
 
   <section class="layout">
     <div class="stack">

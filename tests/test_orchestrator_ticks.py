@@ -543,6 +543,7 @@ def test_snapshot_includes_waiting_reasons_and_recent_problems(
     orchestrator._state.recent_problems.append(
         ProblemRecord(
             kind="invalid_config",
+            severity="error",
             summary="Dispatch configuration is invalid",
             detail="tracker.project_slug is required",
             observed_at=datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc),

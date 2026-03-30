@@ -477,6 +477,8 @@ def test_render_dashboard_shows_waiting_reasons_and_recent_problems(
             "recent_problems": [
                 {
                     "issue_identifier": "BAP-173",
+                    "severity": "error",
+                    "kind": "invalid_config",
                     "summary": "Dispatch configuration is invalid",
                     "detail": "tracker.project_slug is required",
                     "observed_at": now.isoformat(),
@@ -505,7 +507,10 @@ def test_render_dashboard_shows_waiting_reasons_and_recent_problems(
     assert "Paused" in html
     assert "BAP-155" in html
     assert "Waiting Reasons (2)" in html
-    assert "Recent Problems (1)" in html
+    assert "Problems (1)" in html
+    assert "1 error" in html
+    assert "invalid_config" in html
+    assert "severity-error" in html
     assert "pause_dispatching" in html
 
 
@@ -1059,3 +1064,105 @@ def test_render_dashboard_handles_empty_workflow_config_gracefully() -> None:
 
     assert "Workflow Configuration" in html
     assert "No transitions recorded yet." in html
+
+
+def test_problems_panel_renders_severity_badges_and_issue_links() -> None:
+    now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)
+    html = _render_dashboard(
+        {
+            "generated_at": now.isoformat(),
+            "summary": {
+                "running": 0,
+                "retrying": 0,
+                "ready": 0,
+                "waiting": 0,
+                "needs_attention": 2,
+                "capacity_in_use": "0/5",
+            },
+            "totals": {},
+            "controls": {"dispatch_paused": False, "shutdown_requested": False, "recent_actions": []},
+            "running": [],
+            "retrying": [],
+            "ready": [],
+            "waiting": [],
+            "blocked": [],
+            "recently_completed": [],
+            "waiting_reasons": [],
+            "recent_problems": [
+                {
+                    "issue_identifier": "BAP-200",
+                    "severity": "error",
+                    "kind": "hook_failed",
+                    "summary": "Worker failed for BAP-200",
+                    "detail": "before_run hook exited with code 1",
+                    "observed_at": now.isoformat(),
+                },
+                {
+                    "issue_identifier": "BAP-201",
+                    "severity": "warning",
+                    "kind": "stall_detected",
+                    "summary": "Worker stalled for BAP-201",
+                    "detail": "No agent events received within 300s timeout.",
+                    "observed_at": now.isoformat(),
+                },
+                {
+                    "issue_identifier": None,
+                    "severity": "error",
+                    "kind": "fetch_candidates_failed",
+                    "summary": "Failed to refresh candidate issues",
+                    "detail": "Connection refused",
+                    "observed_at": now.isoformat(),
+                },
+            ],
+            "skipped": [],
+            "workflow_config": {},
+            "transition_history": [],
+        }
+    )
+
+    assert "Problems (3)" in html
+    assert "2 errors" in html
+    assert "1 warning" in html
+    assert "severity-error" in html
+    assert "severity-warning" in html
+    assert "ERROR" in html
+    assert "WARNING" in html
+    assert "BAP-200" in html
+    assert "BAP-201" in html
+    assert "/api/v1/BAP-200" in html
+    assert "hook_failed" in html
+    assert "stall_detected" in html
+    assert "fetch_candidates_failed" in html
+    assert "problems-panel" in html
+
+
+def test_problems_panel_hidden_when_no_problems() -> None:
+    now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)
+    html = _render_dashboard(
+        {
+            "generated_at": now.isoformat(),
+            "summary": {
+                "running": 0,
+                "retrying": 0,
+                "ready": 0,
+                "waiting": 0,
+                "needs_attention": 0,
+                "capacity_in_use": "0/5",
+            },
+            "totals": {},
+            "controls": {"dispatch_paused": False, "shutdown_requested": False, "recent_actions": []},
+            "running": [],
+            "retrying": [],
+            "ready": [],
+            "waiting": [],
+            "blocked": [],
+            "recently_completed": [],
+            "waiting_reasons": [],
+            "recent_problems": [],
+            "skipped": [],
+            "workflow_config": {},
+            "transition_history": [],
+        }
+    )
+
+    assert "class='panel problems-panel'" not in html
