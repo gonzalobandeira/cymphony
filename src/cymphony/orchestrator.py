@@ -127,6 +127,12 @@ class Orchestrator:
             self._state.max_concurrent_agents = new_config.agent.max_concurrent_agents
             logger.info("action=workflow_config_reapplied")
         except Exception as exc:
+            self._record_problem(
+                kind="workflow_reload_failed",
+                severity="error",
+                summary="Workflow reload failed",
+                detail=str(exc),
+            )
             logger.error(f"action=workflow_reapply_failed error={exc}")
 
     # ------------------------------------------------------------------
@@ -559,6 +565,14 @@ class Orchestrator:
                 entry = self._state.running.get(issue_id)
                 if entry:
                     entry.status = RunStatus.STALLED
+                    self._record_problem(
+                        kind="stall_detected",
+                        severity="warning",
+                        summary=f"Worker stalled for {entry.identifier}",
+                        detail=f"No agent events received within {stall_timeout_ms / 1000:.0f}s timeout.",
+                        issue_id=issue_id,
+                        issue_identifier=entry.identifier,
+                    )
                     issue_log(
                         logger, logging.WARNING,
                         "agent_stall_detected",
@@ -616,6 +630,7 @@ class Orchestrator:
                 if entry:
                     self._record_problem(
                         kind="inactive_state",
+                        severity="warning",
                         summary=f"Issue moved to inactive state {refreshed_issue.state!r}",
                         detail="Work was stopped by reconciliation because the issue is no longer in an active workflow state.",
                         issue_id=issue_id,
@@ -1141,6 +1156,21 @@ class Orchestrator:
             entry.status = RunStatus.FAILED
             next_attempt = _next_attempt(entry.retry_attempt)
             error_str = str(exc)[:200]
+            error_code = getattr(exc, "code", "unknown")
+            severity = "error"
+            kind = "worker_failed"
+            if error_code in ("before_run_hook_error",):
+                kind = "hook_failed"
+            elif error_code in ("workspace_error",):
+                kind = "workspace_error"
+            self._record_problem(
+                kind=kind,
+                severity=severity,
+                summary=f"Worker failed for {identifier}",
+                detail=error_str,
+                issue_id=issue_id,
+                issue_identifier=identifier,
+            )
             issue_log(
                 logger, logging.WARNING,
                 "worker_exited_abnormal",
@@ -1170,6 +1200,17 @@ class Orchestrator:
     ) -> None:
         """Schedule a retry for an issue (spec §8.4)."""
         is_continuation = error is None
+
+        # Detect retry storms: warn when repeated error retries accumulate
+        if not is_continuation and attempt >= 3:
+            self._record_problem(
+                kind="retry_storm",
+                severity="warning",
+                summary=f"Retry storm for {identifier} (attempt {attempt})",
+                detail=f"Issue has failed {attempt} times: {error or 'unknown error'}",
+                issue_id=issue_id,
+                issue_identifier=identifier,
+            )
 
         # Cancel existing retry timer
         existing = self._state.retry_attempts.pop(issue_id, None)
@@ -1413,6 +1454,7 @@ class Orchestrator:
         problem_rows = [
             {
                 "kind": problem.kind,
+                "severity": problem.severity,
                 "summary": problem.summary,
                 "detail": problem.detail,
                 "issue_id": problem.issue_id,
@@ -1476,6 +1518,7 @@ class Orchestrator:
         kind: str,
         summary: str,
         detail: str,
+        severity: str = "error",
         issue_id: str | None = None,
         issue_identifier: str | None = None,
     ) -> None:
@@ -1492,6 +1535,7 @@ class Orchestrator:
             0,
             ProblemRecord(
                 kind=kind,
+                severity=severity,
                 summary=summary,
                 detail=detail,
                 observed_at=_now_utc(),
