@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -921,3 +921,48 @@ class TestQAAgentConfig:
         qa = QAReviewConfig(enabled=True, agent=agent)
         assert qa.agent is agent
         assert qa.agent.command == "qa-cli"
+
+    @pytest.mark.asyncio
+    async def test_reconcile_uses_qa_agent_stall_timeout_in_review_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        qa_agent = CodingAgentConfig(
+            command="review-cli",
+            turn_timeout_ms=111,
+            read_timeout_ms=111,
+            stall_timeout_ms=50,
+            dangerously_skip_permissions=False,
+            provider="codex",
+        )
+        orch = _build_orchestrator(qa_agent=qa_agent)
+        issue = _build_issue(state="QA Review")
+        entry = _build_running_entry(issue, mode=ExecutionMode.REVIEW)
+        entry.started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        orch._state.running[issue.id] = entry
+
+        retries: list[tuple[str, str, int | None, str | None]] = []
+
+        async def fake_terminate(issue_id: str, cleanup_workspace: bool = False) -> None:
+            return None
+
+        async def fake_schedule_retry(
+            issue_id: str,
+            identifier: str,
+            attempt: int | None,
+            *,
+            error: str | None = None,
+            retry_delay_ms: int | None = None,
+        ) -> None:
+            retries.append((issue_id, identifier, attempt, error))
+
+        monkeypatch.setattr(orch, "_terminate_running_issue", fake_terminate)
+        monkeypatch.setattr(orch, "_schedule_retry", fake_schedule_retry)
+        monkeypatch.setattr(
+            "cymphony.orchestrator._now_utc",
+            lambda: entry.started_at + timedelta(milliseconds=100),
+        )
+
+        await orch._reconcile_running_issues()
+
+        assert entry.status == RunStatus.STALLED
+        assert retries == [(issue.id, issue.identifier, 1, "stall_timeout")]

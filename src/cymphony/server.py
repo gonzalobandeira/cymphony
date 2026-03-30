@@ -39,6 +39,7 @@ _DEFAULT_SETUP_FORM = {
     "provider": "claude",
     "command": "claude",
     "turn_timeout_ms": "3600000",
+    "read_timeout_ms": "60000",
     "stall_timeout_ms": "300000",
     "dangerously_skip_permissions": True,
     "after_create": "",
@@ -288,6 +289,7 @@ def _workflow_form_data(
                 "provider": str(agent.get("provider") or data["provider"]),
                 "command": str(codex.get("command") or data["command"]),
                 "turn_timeout_ms": str(codex.get("turn_timeout_ms") or data["turn_timeout_ms"]),
+                "read_timeout_ms": str(codex.get("read_timeout_ms") or data["read_timeout_ms"]),
                 "stall_timeout_ms": str(codex.get("stall_timeout_ms") or data["stall_timeout_ms"]),
                 "dangerously_skip_permissions": bool(codex.get("dangerously_skip_permissions", True)),
                 "after_create": str(hooks.get("after_create") or ""),
@@ -358,6 +360,7 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
         "codex": {
             "command": str(form.get("command") or "claude").strip(),
             "turn_timeout_ms": int(str(form.get("turn_timeout_ms") or "3600000")),
+            "read_timeout_ms": int(str(form.get("read_timeout_ms") or "60000")),
             "stall_timeout_ms": int(str(form.get("stall_timeout_ms") or "300000")),
             "dangerously_skip_permissions": bool(form.get("dangerously_skip_permissions")),
         },
@@ -584,6 +587,10 @@ def _render_setup_page(
       <section class="card">
         <label for="turn_timeout_ms">Turn timeout (ms)</label>
         <input id="turn_timeout_ms" name="turn_timeout_ms" value="{field("turn_timeout_ms")}" required />
+      </section>
+      <section class="card">
+        <label for="read_timeout_ms">Read timeout (ms)</label>
+        <input id="read_timeout_ms" name="read_timeout_ms" value="{field("read_timeout_ms")}" required />
       </section>
       <section class="card">
         <label for="stall_timeout_ms">Stall timeout (ms)</label>
@@ -1977,6 +1984,7 @@ async def _save_workflow_from_request(request: web.Request, *, setup_mode: bool)
         "max_retry_backoff_ms": submitted.get("max_retry_backoff_ms", ""),
         "command": submitted.get("command", ""),
         "turn_timeout_ms": submitted.get("turn_timeout_ms", ""),
+        "read_timeout_ms": submitted.get("read_timeout_ms", ""),
         "stall_timeout_ms": submitted.get("stall_timeout_ms", ""),
         "dangerously_skip_permissions": submitted.get("dangerously_skip_permissions") == "1",
         "qa_review_enabled": submitted.get("qa_review_enabled") == "1",

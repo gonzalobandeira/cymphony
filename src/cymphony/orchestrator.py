@@ -813,35 +813,40 @@ class Orchestrator:
     async def _reconcile_running_issues(self) -> None:
         """Stall detection + tracker state refresh (spec §8.5, §16.3)."""
         # Part A: stall detection
-        stall_timeout_ms = self._config.coding_agent.stall_timeout_ms
-        if stall_timeout_ms > 0:
-            now_utc = _now_utc()
-            stalled: list[str] = []
-            for issue_id, entry in list(self._state.running.items()):
-                last_event_ts = entry.session.last_event_timestamp
-                ref = last_event_ts if last_event_ts else entry.started_at
-                elapsed_ms = (now_utc - ref).total_seconds() * 1000.0
+        now_utc = _now_utc()
+        stalled: list[tuple[str, int]] = []
+        qa_agent_cfg = self._config.transitions.qa_review.agent
+        for issue_id, entry in list(self._state.running.items()):
+            stall_timeout_ms = self._config.coding_agent.stall_timeout_ms
+            if entry.mode == ExecutionMode.REVIEW and qa_agent_cfg is not None:
+                stall_timeout_ms = qa_agent_cfg.stall_timeout_ms
+            if stall_timeout_ms <= 0:
+                continue
 
-                if elapsed_ms > stall_timeout_ms:
-                    stalled.append(issue_id)
+            last_event_ts = entry.session.last_event_timestamp
+            ref = last_event_ts if last_event_ts else entry.started_at
+            elapsed_ms = (now_utc - ref).total_seconds() * 1000.0
 
-            for issue_id in stalled:
-                entry = self._state.running.get(issue_id)
-                if entry:
-                    entry.status = RunStatus.STALLED
-                    issue_log(
-                        logger, logging.WARNING,
-                        "agent_stall_detected",
-                        issue_id, entry.identifier,
-                        stall_timeout_ms=stall_timeout_ms,
-                    )
-                    await self._terminate_running_issue(issue_id, cleanup_workspace=False)
-                    await self._schedule_retry(
-                        issue_id,
-                        entry.identifier,
-                        _next_attempt(entry.retry_attempt),
-                        error="stall_timeout",
-                    )
+            if elapsed_ms > stall_timeout_ms:
+                stalled.append((issue_id, stall_timeout_ms))
+
+        for issue_id, stall_timeout_ms in stalled:
+            entry = self._state.running.get(issue_id)
+            if entry:
+                entry.status = RunStatus.STALLED
+                issue_log(
+                    logger, logging.WARNING,
+                    "agent_stall_detected",
+                    issue_id, entry.identifier,
+                    stall_timeout_ms=stall_timeout_ms,
+                )
+                await self._terminate_running_issue(issue_id, cleanup_workspace=False)
+                await self._schedule_retry(
+                    issue_id,
+                    entry.identifier,
+                    _next_attempt(entry.retry_attempt),
+                    error="stall_timeout",
+                )
 
         # Part B: tracker state refresh
         running_ids = list(self._state.running.keys())
