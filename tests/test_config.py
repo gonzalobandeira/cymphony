@@ -111,6 +111,20 @@ def test_legacy_codex_yaml_key_still_parsed() -> None:
     assert config.runner.turn_timeout_ms == 999
 
 
+def test_runner_command_blank_string_resolves_to_provider_default() -> None:
+    """An explicit empty-string command should resolve to the provider default."""
+    wf = WorkflowDefinition(
+        config={
+            "tracker": {"kind": "linear", "api_key": "k", "project_slug": "p"},
+            "agent": {"max_concurrent_agents": 1, "max_turns": 1, "provider": "codex"},
+            "runner": {"command": ""},
+        },
+        prompt_template="test",
+    )
+    config = build_config(wf)
+    assert config.runner.command == "codex"
+
+
 def test_runner_config_has_no_provider_field() -> None:
     """RunnerConfig should not carry a provider field — provider lives on AgentConfig."""
     from cymphony.models import RunnerConfig

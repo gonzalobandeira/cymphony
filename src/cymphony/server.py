@@ -394,9 +394,6 @@ def _validate_workflow_form(form: dict[str, object]) -> list[str]:
         errors.append("tracker.project_slug is required.")
     if not workflow.config["workspace"].get("root"):
         errors.append("workspace.root is required.")
-    if not workflow.config["runner"].get("command"):
-        errors.append("runner.command is required.")
-
     from .models import SUPPORTED_PROVIDERS
     agent_provider = workflow.config.get("agent", {}).get("provider", "claude")
     if agent_provider not in SUPPORTED_PROVIDERS:
