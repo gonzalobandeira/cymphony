@@ -252,7 +252,7 @@ def _build_orchestrator(tmp_path: Path) -> Orchestrator:
             max_retry_backoff_ms=1000,
             max_concurrent_agents_by_state={},
         ),
-        coding_agent=CodingAgentConfig(
+        runner=CodingAgentConfig(
             command="codex",
             turn_timeout_ms=1000,
             read_timeout_ms=1000,

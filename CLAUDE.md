@@ -1,6 +1,6 @@
 # Cymphony — Developer Guide
 
-Orchestration service that polls Linear issues and runs Claude Code agents on them autonomously. See `README.md` for user-facing docs.
+Orchestration service that polls Linear issues and runs coding agents (Claude Code or Codex) on them autonomously. See `README.md` for user-facing docs.
 
 ## Architecture
 
@@ -13,16 +13,22 @@ src/cymphony/
   orchestrator.py    ← poll loop, dispatch, reconciliation, retry scheduling
   agent.py           ← backward-compat re-exports from runners/
   runners/
-    __init__.py      ← provider registry, create_runner() factory
+    __init__.py      ← provider registry, create_agent_runner() factory
     base.py          ← BaseAgentRunner ABC (subprocess lifecycle, timeouts, streaming)
     claude.py        ← ClaudeAgentRunner + stream-json parser
-    codex.py         ← CodexAgentRunner (stub, reuses Claude parser for now)
+    codex.py         ← CodexAgentRunner + JSONL event parser
   linear.py          ← async Linear GraphQL client
   workspace.py       ← per-issue directory lifecycle and hook execution
   server.py          ← optional aiohttp HTTP server (dashboard + API)
   models.py          ← all domain dataclasses and enums
   logging_.py        ← structured logging helpers
 ```
+
+### Config model
+
+Provider selection uses one authoritative field: `agent.provider` (`"claude"` or `"codex"`).
+Subprocess runtime settings live in a provider-neutral `runner:` YAML block (parsed into `RunnerConfig`).
+The legacy `codex:` YAML key is still accepted as a fallback for backward compatibility.
 
 ## Data flow
 

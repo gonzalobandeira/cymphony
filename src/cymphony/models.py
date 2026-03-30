@@ -102,14 +102,17 @@ class AgentConfig:
 
 
 @dataclass
-class CodingAgentConfig:
-    """Config for the coding agent subprocess."""
+class RunnerConfig:
+    """Provider-neutral config for the agent subprocess."""
     command: str
     turn_timeout_ms: int
     read_timeout_ms: int
     stall_timeout_ms: int
     dangerously_skip_permissions: bool
-    provider: str = "claude"
+
+
+# Backward-compatible alias
+CodingAgentConfig = RunnerConfig
 
 
 @dataclass
@@ -179,7 +182,7 @@ class ServiceConfig:
     workspace: WorkspaceConfig
     hooks: HooksConfig
     agent: AgentConfig
-    coding_agent: CodingAgentConfig
+    runner: RunnerConfig
     server: ServerConfig
     preflight: PreflightConfig
     transitions: TransitionsConfig = field(default_factory=TransitionsConfig)

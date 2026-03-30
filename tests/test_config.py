@@ -21,7 +21,7 @@ def _workflow(agent_overrides: dict | None = None) -> WorkflowDefinition:
                 "project_slug": "test-project",
             },
             "agent": agent,
-            "codex": {"command": "claude"},
+            "runner": {"command": "claude"},
         },
         prompt_template="Hello {{ issue.title }}",
     )
@@ -62,6 +62,64 @@ def test_validate_dispatch_config_rejects_invalid_provider() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Provider-aware runner command defaults
+# ---------------------------------------------------------------------------
+
+def test_runner_command_defaults_to_claude_for_claude_provider() -> None:
+    config = build_config(_workflow({"provider": "claude"}))
+    assert config.runner.command == "claude"
+
+
+def test_runner_command_defaults_to_codex_for_codex_provider() -> None:
+    wf = WorkflowDefinition(
+        config={
+            "tracker": {"kind": "linear", "api_key": "k", "project_slug": "p"},
+            "agent": {"max_concurrent_agents": 1, "max_turns": 1, "provider": "codex"},
+            "runner": {},
+        },
+        prompt_template="test",
+    )
+    config = build_config(wf)
+    assert config.runner.command == "codex"
+
+
+def test_runner_command_explicit_override_respected() -> None:
+    wf = WorkflowDefinition(
+        config={
+            "tracker": {"kind": "linear", "api_key": "k", "project_slug": "p"},
+            "agent": {"max_concurrent_agents": 1, "max_turns": 1, "provider": "codex"},
+            "runner": {"command": "/usr/local/bin/my-codex"},
+        },
+        prompt_template="test",
+    )
+    config = build_config(wf)
+    assert config.runner.command == "/usr/local/bin/my-codex"
+
+
+def test_legacy_codex_yaml_key_still_parsed() -> None:
+    """Backward compat: the old 'codex:' YAML key is accepted as 'runner:'."""
+    wf = WorkflowDefinition(
+        config={
+            "tracker": {"kind": "linear", "api_key": "k", "project_slug": "p"},
+            "agent": {"max_concurrent_agents": 1, "max_turns": 1},
+            "codex": {"command": "claude", "turn_timeout_ms": 999},
+        },
+        prompt_template="test",
+    )
+    config = build_config(wf)
+    assert config.runner.command == "claude"
+    assert config.runner.turn_timeout_ms == 999
+
+
+def test_runner_config_has_no_provider_field() -> None:
+    """RunnerConfig should not carry a provider field — provider lives on AgentConfig."""
+    from cymphony.models import RunnerConfig
+    import dataclasses
+    field_names = {f.name for f in dataclasses.fields(RunnerConfig)}
+    assert "provider" not in field_names
+
+
+# ---------------------------------------------------------------------------
 # Transition config tests
 # ---------------------------------------------------------------------------
 
@@ -74,7 +132,7 @@ def _workflow_with_transitions(transitions: dict | None = None) -> WorkflowDefin
             "project_slug": "test-project",
         },
         "agent": {"max_concurrent_agents": 2, "max_turns": 5},
-        "codex": {"command": "claude"},
+        "runner": {"command": "claude"},
     }
     if transitions is not None:
         cfg["transitions"] = transitions

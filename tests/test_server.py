@@ -820,7 +820,7 @@ async def test_setup_post_writes_workflow_file(tmp_path: Path) -> None:
     saved = load_workflow(workflow_path)
     assert saved.config["tracker"]["project_slug"] == "cymphony-b2a8d0064141"
     assert saved.config["tracker"]["assignee"] == "gonzalobandeira"
-    assert saved.config["codex"]["command"] == "claude"
+    assert saved.config["runner"]["command"] == "claude"
     assert saved.config["transitions"]["qa_review"] == {
         "enabled": True,
         "dispatch": "QA Review",

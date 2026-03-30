@@ -41,9 +41,9 @@ Linear Issue (Todo)
 ## Prerequisites
 
 - Python ≥ 3.11
-- [Claude Code CLI](https://claude.ai/code) installed (`claude`)
+- [Claude Code CLI](https://claude.ai/code) (`claude`) or [Codex CLI](https://github.com/openai/codex) (`codex`)
 - A Linear account with an API key
-- An Anthropic API key (recommended over OAuth for background services)
+- An Anthropic API key (for Claude) or OpenAI API key (for Codex)
 - `gh` CLI (optional, for auto-creating PRs in hooks)
 
 ## Installation
@@ -60,12 +60,15 @@ pip install -e ".[dev]"
 
 ```bash
 LINEAR_API_KEY=lin_api_...
+# For Claude provider:
 ANTHROPIC_API_KEY=sk-ant-...
+# For Codex provider:
+# OPENAI_API_KEY=sk-...
 ```
 
 Cymphony loads this file automatically on startup. You can also export these as shell environment variables instead.
 
-> **Why `ANTHROPIC_API_KEY`?** The Claude Code CLI supports both OAuth (interactive login) and API key authentication. OAuth tokens expire, which silently breaks background agents. An API key never expires and is the recommended approach for automated workflows. Cymphony passes Claude auth environment variables such as `ANTHROPIC_API_KEY` through to the Claude subprocess unchanged; it only removes the internal `CLAUDECODE` sentinel so nested CLI runs behave correctly.
+> **Auth notes:** The Claude Code CLI supports both OAuth (interactive login) and API key authentication. OAuth tokens expire, which silently breaks background agents. An API key never expires and is the recommended approach for automated workflows. Cymphony passes auth environment variables (`ANTHROPIC_API_KEY` for Claude, `OPENAI_API_KEY` for Codex) through to the subprocess unchanged.
 
 **2. Create a `WORKFLOW.md`** in your project directory (see [Configuration](#configuration) below).
 
@@ -112,8 +115,8 @@ agent:
   max_concurrent_agents_by_state:  # optional per-state concurrency caps
     todo: 3
 
-codex:
-  command: claude              # the Claude Code CLI binary
+runner:
+  command: ""                  # blank = auto from provider ("claude" or "codex")
   turn_timeout_ms: 3600000    # 1 hour per turn
   stall_timeout_ms: 300000    # 5 min with no output = stall
   dangerously_skip_permissions: true

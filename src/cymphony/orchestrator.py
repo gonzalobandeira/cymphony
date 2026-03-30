@@ -813,7 +813,7 @@ class Orchestrator:
     async def _reconcile_running_issues(self) -> None:
         """Stall detection + tracker state refresh (spec §8.5, §16.3)."""
         # Part A: stall detection
-        stall_timeout_ms = self._config.coding_agent.stall_timeout_ms
+        stall_timeout_ms = self._config.runner.stall_timeout_ms
         if stall_timeout_ms > 0:
             now_utc = _now_utc()
             stalled: list[str] = []
@@ -1337,7 +1337,7 @@ class Orchestrator:
         """Run one agent session for an issue (workspace + hooks + turns)."""
         wm = WorkspaceManager(self._config)
         agent = create_agent_runner(
-            self._config.agent.provider, self._config.coding_agent
+            self._config.agent.provider, self._config.runner
         )
 
         # Prepare workspace

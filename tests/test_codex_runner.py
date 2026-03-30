@@ -13,7 +13,6 @@ def _make_config() -> CodingAgentConfig:
         read_timeout_ms=1000,
         stall_timeout_ms=1000,
         dangerously_skip_permissions=True,
-        provider="codex",
     )
 
 
