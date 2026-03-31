@@ -18,7 +18,13 @@ from aiohttp import web
 from .config import _DEFAULT_LINEAR_ENDPOINT, build_config, validate_dispatch_config
 from .linear import LinearClient
 from .models import Issue, TrackerConfig, WorkflowDefinition
-from .workflow import LOCAL_CONFIG_DIR, LOCAL_WORKFLOW_FILENAME, load_workflow, save_workflow
+from .workflow import (
+    LOCAL_CONFIG_DIR,
+    LOCAL_WORKFLOW_FILENAME,
+    load_example_workflow,
+    load_workflow,
+    save_workflow,
+)
 
 if TYPE_CHECKING:
     from .orchestrator import Orchestrator
@@ -254,66 +260,88 @@ def _render_issue_drilldown(entry: dict, retry_due: str | None = None) -> str:
 </details>"""
 
 
+def _extract_workflow_fields(
+    data: dict[str, object],
+    workflow: WorkflowDefinition,
+) -> None:
+    """Extract workflow config fields into the flat form-data dict *in place*."""
+    raw = workflow.config
+    tracker = raw.get("tracker") or {}
+    polling = raw.get("polling") or {}
+    workspace = raw.get("workspace") or {}
+    agent = raw.get("agent") or {}
+    runner = raw.get("runner") or raw.get("codex") or {}
+    hooks = raw.get("hooks") or {}
+    server = raw.get("server") or {}
+    transitions = raw.get("transitions") or {}
+    qa_review = transitions.get("qa_review") or {}
+    qa_agent = qa_review.get("agent") or {}
+
+    data.update(
+        {
+            "tracker_kind": str(tracker.get("kind") or "linear"),
+            "tracker_api_key": str(tracker.get("api_key") or "$LINEAR_API_KEY"),
+            "project_slug": str(tracker.get("project_slug") or ""),
+            "assignee": str(tracker.get("assignee") or ""),
+            "active_states": ", ".join(str(v) for v in (tracker.get("active_states") or [])) or data["active_states"],
+            "terminal_states": ", ".join(str(v) for v in (tracker.get("terminal_states") or [])) or data["terminal_states"],
+            "poll_interval_ms": str(polling.get("interval_ms") or data["poll_interval_ms"]),
+            "workspace_root": str(workspace.get("root") or data["workspace_root"]),
+            "max_concurrent_agents": str(agent.get("max_concurrent_agents") or data["max_concurrent_agents"]),
+            "max_turns": str(agent.get("max_turns") or data["max_turns"]),
+            "max_retry_backoff_ms": str(agent.get("max_retry_backoff_ms") or data["max_retry_backoff_ms"]),
+            "provider": str(agent.get("provider") or data["provider"]),
+            "command": str(runner.get("command") or data["command"]),
+            "turn_timeout_ms": str(runner.get("turn_timeout_ms") or data["turn_timeout_ms"]),
+            "read_timeout_ms": str(runner.get("read_timeout_ms") or data["read_timeout_ms"]),
+            "stall_timeout_ms": str(runner.get("stall_timeout_ms") or data["stall_timeout_ms"]),
+            "dangerously_skip_permissions": bool(runner.get("dangerously_skip_permissions", True)),
+            "after_create": str(hooks.get("after_create") or ""),
+            "before_run": str(hooks.get("before_run") or ""),
+            "after_run": str(hooks.get("after_run") or ""),
+            "before_remove": str(hooks.get("before_remove") or ""),
+            "hooks_timeout_ms": str(hooks.get("timeout_ms") or data["hooks_timeout_ms"]),
+            "server_port": str(server.get("port") or data["server_port"]),
+            "qa_review_enabled": bool(qa_review.get("enabled", False)),
+            "qa_review_dispatch": str(qa_review.get("dispatch") or data["qa_review_dispatch"]),
+            "qa_review_success": str(qa_review.get("success") or data["qa_review_success"]),
+            "qa_review_failure": str(qa_review.get("failure") or data["qa_review_failure"]),
+            "qa_agent_provider": str(qa_agent.get("provider") or ""),
+            "qa_agent_command": str(qa_agent.get("command") or ""),
+            "qa_agent_turn_timeout_ms": str(qa_agent.get("turn_timeout_ms") or ""),
+            "qa_agent_read_timeout_ms": str(qa_agent.get("read_timeout_ms") or ""),
+            "qa_agent_stall_timeout_ms": str(qa_agent.get("stall_timeout_ms") or ""),
+            "qa_agent_dangerously_skip_permissions": bool(qa_agent.get("dangerously_skip_permissions", False)),
+            "review_prompt": str(raw.get("review_prompt") or ""),
+            "prompt_template": workflow.prompt_template or data["prompt_template"],
+        }
+    )
+
+
 def _workflow_form_data(
     workflow_path: Path,
     workflow: WorkflowDefinition | None = None,
+    example_workflow: WorkflowDefinition | None = None,
     form_overrides: dict[str, object] | None = None,
 ) -> dict[str, object]:
+    """Build the flat dict used to populate the setup/settings form.
+
+    Precedence (highest wins):
+      1. ``form_overrides`` — user-submitted values (on validation error re-render)
+      2. ``workflow`` — the current local config
+      3. ``example_workflow`` — repo-level ``WORKFLOW.example.md``
+      4. ``_DEFAULT_SETUP_FORM`` — hardcoded safe defaults
+    """
     data: dict[str, object] = dict(_DEFAULT_SETUP_FORM)
     data["workflow_path"] = str(workflow_path)
 
-    if workflow is not None:
-        raw = workflow.config
-        tracker = raw.get("tracker") or {}
-        polling = raw.get("polling") or {}
-        workspace = raw.get("workspace") or {}
-        agent = raw.get("agent") or {}
-        runner = raw.get("runner") or raw.get("codex") or {}
-        hooks = raw.get("hooks") or {}
-        server = raw.get("server") or {}
-        transitions = raw.get("transitions") or {}
-        qa_review = transitions.get("qa_review") or {}
-        qa_agent = qa_review.get("agent") or {}
+    # Layer: example template (lower priority than local config)
+    if example_workflow is not None:
+        _extract_workflow_fields(data, example_workflow)
 
-        data.update(
-            {
-                "tracker_kind": str(tracker.get("kind") or "linear"),
-                "tracker_api_key": str(tracker.get("api_key") or "$LINEAR_API_KEY"),
-                "project_slug": str(tracker.get("project_slug") or ""),
-                "assignee": str(tracker.get("assignee") or ""),
-                "active_states": ", ".join(str(v) for v in (tracker.get("active_states") or [])) or data["active_states"],
-                "terminal_states": ", ".join(str(v) for v in (tracker.get("terminal_states") or [])) or data["terminal_states"],
-                "poll_interval_ms": str(polling.get("interval_ms") or data["poll_interval_ms"]),
-                "workspace_root": str(workspace.get("root") or data["workspace_root"]),
-                "max_concurrent_agents": str(agent.get("max_concurrent_agents") or data["max_concurrent_agents"]),
-                "max_turns": str(agent.get("max_turns") or data["max_turns"]),
-                "max_retry_backoff_ms": str(agent.get("max_retry_backoff_ms") or data["max_retry_backoff_ms"]),
-                "provider": str(agent.get("provider") or data["provider"]),
-                "command": str(runner.get("command") or data["command"]),
-                "turn_timeout_ms": str(runner.get("turn_timeout_ms") or data["turn_timeout_ms"]),
-                "read_timeout_ms": str(runner.get("read_timeout_ms") or data["read_timeout_ms"]),
-                "stall_timeout_ms": str(runner.get("stall_timeout_ms") or data["stall_timeout_ms"]),
-                "dangerously_skip_permissions": bool(runner.get("dangerously_skip_permissions", True)),
-                "after_create": str(hooks.get("after_create") or ""),
-                "before_run": str(hooks.get("before_run") or ""),
-                "after_run": str(hooks.get("after_run") or ""),
-                "before_remove": str(hooks.get("before_remove") or ""),
-                "hooks_timeout_ms": str(hooks.get("timeout_ms") or data["hooks_timeout_ms"]),
-                "server_port": str(server.get("port") or data["server_port"]),
-                "qa_review_enabled": bool(qa_review.get("enabled", False)),
-                "qa_review_dispatch": str(qa_review.get("dispatch") or data["qa_review_dispatch"]),
-                "qa_review_success": str(qa_review.get("success") or data["qa_review_success"]),
-                "qa_review_failure": str(qa_review.get("failure") or data["qa_review_failure"]),
-                "qa_agent_provider": str(qa_agent.get("provider") or ""),
-                "qa_agent_command": str(qa_agent.get("command") or ""),
-                "qa_agent_turn_timeout_ms": str(qa_agent.get("turn_timeout_ms") or ""),
-                "qa_agent_read_timeout_ms": str(qa_agent.get("read_timeout_ms") or ""),
-                "qa_agent_stall_timeout_ms": str(qa_agent.get("stall_timeout_ms") or ""),
-                "qa_agent_dangerously_skip_permissions": bool(qa_agent.get("dangerously_skip_permissions", False)),
-                "review_prompt": str(raw.get("review_prompt") or ""),
-                "prompt_template": workflow.prompt_template or data["prompt_template"],
-            }
-        )
+    # Layer: local config (higher priority than example)
+    if workflow is not None:
+        _extract_workflow_fields(data, workflow)
 
     if form_overrides:
         data.update(form_overrides)
@@ -2307,7 +2335,8 @@ def _load_current_workflow_or_none(workflow_path: Path) -> WorkflowDefinition | 
 async def _handle_setup_get(request: web.Request) -> web.Response:
     workflow_path = Path(request.app["workflow_path"])
     workflow = _load_current_workflow_or_none(workflow_path)
-    values = _workflow_form_data(workflow_path, workflow)
+    example = load_example_workflow(workflow_path) if workflow is None else None
+    values = _workflow_form_data(workflow_path, workflow, example_workflow=example)
     errors: list[str] = []
     setup_error = request.app.get("setup_error")
     if setup_error:
@@ -2354,6 +2383,7 @@ async def _save_workflow_from_request(request: web.Request, *, setup_mode: bool)
         "max_concurrent_agents": submitted.get("max_concurrent_agents", ""),
         "max_turns": submitted.get("max_turns", ""),
         "max_retry_backoff_ms": submitted.get("max_retry_backoff_ms", ""),
+        "provider": submitted.get("provider", "claude"),
         "command": submitted.get("command", ""),
         "turn_timeout_ms": submitted.get("turn_timeout_ms", ""),
         "read_timeout_ms": submitted.get("read_timeout_ms", ""),
@@ -2380,7 +2410,11 @@ async def _save_workflow_from_request(request: web.Request, *, setup_mode: bool)
     }
 
     errors = _validate_workflow_form(form)
-    values = _workflow_form_data(workflow_path, form_overrides=form)
+    workflow = _load_current_workflow_or_none(workflow_path)
+    example = load_example_workflow(workflow_path) if workflow is None else None
+    values = _workflow_form_data(
+        workflow_path, workflow, example_workflow=example, form_overrides=form,
+    )
     if errors:
         return _html_response(
             _render_setup_page(

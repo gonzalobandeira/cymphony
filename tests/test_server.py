@@ -1338,6 +1338,7 @@ def test_problems_panel_hidden_when_no_problems() -> None:
 # Setup discovery endpoint tests (BAP-189)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_setup_projects_returns_json(tmp_path: Path) -> None:
     from unittest.mock import AsyncMock, patch
@@ -1510,6 +1511,7 @@ async def test_setup_page_marks_required_and_optional_fields(tmp_path: Path) -> 
             "setup_error": None,
         }
     )
+
     response = await server._handle_setup_get(request)
     assert "field-required" in response.text
     assert "field-optional" in response.text
@@ -1535,3 +1537,478 @@ async def test_setup_page_selector_script_preserves_values_and_resets_assignees(
     assert 'sel.innerHTML = \'<option value="">No filter (all assignees)</option>\';' in response.text
     assert 'var currentProject = qs("#project_slug_select").value || qs("#project_slug").value;' in response.text
     assert 'var currentAssignee = qs("#assignee_select").value || qs("#assignee").value;' in response.text
+
+
+# ---------------------------------------------------------------------------
+# BAP-188: Setup prefill tests
+# ---------------------------------------------------------------------------
+
+_EXAMPLE_WORKFLOW_YAML = """\
+---
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: ""
+  active_states: [Todo, In Progress]
+  terminal_states: [Done, Cancelled]
+  assignee: ""
+agent:
+  max_concurrent_agents: 2
+  max_turns: 15
+  max_retry_backoff_ms: 300000
+codex:
+  command: claude
+  turn_timeout_ms: 3600000
+  stall_timeout_ms: 300000
+  dangerously_skip_permissions: true
+workspace:
+  root: ~/cymphony-workspaces
+hooks:
+  timeout_ms: 120000
+  after_create: git clone git@github.com:org/repo.git .
+server:
+  port: 8080
+---
+Example prompt template for {{ issue.identifier }}.
+"""
+
+_LOCAL_WORKFLOW_YAML = """\
+---
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: my-project
+  active_states: [Todo, In Progress]
+  terminal_states: [Done, Cancelled]
+  assignee: alice
+agent:
+  max_concurrent_agents: 4
+  max_turns: 25
+  max_retry_backoff_ms: 600000
+  provider: codex
+runner:
+  command: codex
+  turn_timeout_ms: 1800000
+  read_timeout_ms: 30000
+  stall_timeout_ms: 120000
+  dangerously_skip_permissions: true
+workspace:
+  root: ~/my-workspaces
+hooks:
+  timeout_ms: 60000
+  after_create: git clone git@github.com:team/repo.git .
+  before_run: git fetch
+  after_run: git push
+server:
+  port: 9090
+---
+Local prompt for {{ issue.identifier }}.
+"""
+
+
+def test_workflow_form_data_uses_defaults_when_no_config() -> None:
+    """With no workflow and no example, form data should equal _DEFAULT_SETUP_FORM."""
+    from cymphony.server import _workflow_form_data, _DEFAULT_SETUP_FORM
+
+    path = Path("/tmp/test/.cymphony/workflow.md")
+    data = _workflow_form_data(path)
+    for key, default_val in _DEFAULT_SETUP_FORM.items():
+        assert data[key] == default_val, f"field {key!r} mismatch"
+
+
+def test_workflow_form_data_seeds_from_example(tmp_path: Path) -> None:
+    """When no local config exists, example workflow seeds the form."""
+    from cymphony.server import _workflow_form_data
+    from cymphony.workflow import load_workflow
+
+    example_path = tmp_path / "WORKFLOW.example.md"
+    example_path.write_text(_EXAMPLE_WORKFLOW_YAML, encoding="utf-8")
+    example = load_workflow(example_path)
+
+    workflow_path = tmp_path / ".cymphony" / "workflow.md"
+    data = _workflow_form_data(workflow_path, example_workflow=example)
+
+    assert data["max_concurrent_agents"] == "2"
+    assert data["max_turns"] == "15"
+    assert data["command"] == "claude"
+    assert data["workspace_root"] == "~/cymphony-workspaces"
+    assert data["after_create"] == "git clone git@github.com:org/repo.git ."
+    assert data["prompt_template"] == "Example prompt template for {{ issue.identifier }}."
+
+
+def test_workflow_form_data_local_config_overrides_example(tmp_path: Path) -> None:
+    """Local config values take precedence over example template values."""
+    from cymphony.server import _workflow_form_data
+    from cymphony.workflow import load_workflow
+
+    example_path = tmp_path / "WORKFLOW.example.md"
+    example_path.write_text(_EXAMPLE_WORKFLOW_YAML, encoding="utf-8")
+    example = load_workflow(example_path)
+
+    local_path = tmp_path / ".cymphony" / "workflow.md"
+    local_path.parent.mkdir(parents=True)
+    local_path.write_text(_LOCAL_WORKFLOW_YAML, encoding="utf-8")
+    local = load_workflow(local_path)
+
+    data = _workflow_form_data(local_path, workflow=local, example_workflow=example)
+
+    assert data["project_slug"] == "my-project"
+    assert data["assignee"] == "alice"
+    assert data["max_concurrent_agents"] == "4"
+    assert data["max_turns"] == "25"
+    assert data["provider"] == "codex"
+    assert data["command"] == "codex"
+    assert data["workspace_root"] == "~/my-workspaces"
+    assert data["server_port"] == "9090"
+    assert data["after_create"] == "git clone git@github.com:team/repo.git ."
+    assert data["before_run"] == "git fetch"
+    assert data["after_run"] == "git push"
+    assert data["prompt_template"] == "Local prompt for {{ issue.identifier }}."
+
+
+def test_workflow_form_data_form_overrides_win(tmp_path: Path) -> None:
+    """User-submitted form values take highest precedence."""
+    from cymphony.server import _workflow_form_data
+    from cymphony.workflow import load_workflow
+
+    local_path = tmp_path / ".cymphony" / "workflow.md"
+    local_path.parent.mkdir(parents=True)
+    local_path.write_text(_LOCAL_WORKFLOW_YAML, encoding="utf-8")
+    local = load_workflow(local_path)
+
+    overrides = {"project_slug": "overridden-slug", "max_turns": "99"}
+    data = _workflow_form_data(local_path, workflow=local, form_overrides=overrides)
+
+    assert data["project_slug"] == "overridden-slug"
+    assert data["max_turns"] == "99"
+    assert data["assignee"] == "alice"
+    assert data["provider"] == "codex"
+
+
+@pytest.mark.asyncio
+async def test_setup_get_prefills_from_existing_local_config(tmp_path: Path) -> None:
+    """GET /setup should prefill from existing .cymphony/workflow.md."""
+    workflow_path = tmp_path / ".cymphony" / "workflow.md"
+    workflow_path.parent.mkdir(parents=True)
+    workflow_path.write_text(_LOCAL_WORKFLOW_YAML, encoding="utf-8")
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": workflow_path,
+            "setup_mode": True,
+            "setup_error": None,
+        }
+    )
+
+    response = await server._handle_setup_get(request)
+
+    assert response.status == 200
+    assert 'value="my-project"' in response.text
+    assert 'value="alice"' in response.text
+    assert 'value="4"' in response.text
+    assert 'value="9090"' in response.text
+
+
+@pytest.mark.asyncio
+async def test_setup_get_seeds_from_example_when_no_local_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /setup seeds defaults from WORKFLOW.example.md when no local config exists."""
+    example_path = tmp_path / "WORKFLOW.example.md"
+    example_path.write_text(_EXAMPLE_WORKFLOW_YAML, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    workflow_path = tmp_path / ".cymphony" / "workflow.md"
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": workflow_path,
+            "setup_mode": True,
+            "setup_error": None,
+        }
+    )
+
+    response = await server._handle_setup_get(request)
+
+    assert response.status == 200
+    assert 'value="2"' in response.text
+    assert 'value="15"' in response.text
+    assert "Example prompt template" in response.text
+
+
+@pytest.mark.asyncio
+async def test_setup_post_preserves_provider_on_validation_failure(tmp_path: Path) -> None:
+    """POST /setup should preserve the provider field when validation fails."""
+    workflow_path = tmp_path / "WORKFLOW.md"
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": workflow_path,
+            "setup_mode": True,
+            "setup_error": None,
+        },
+        post_data={
+            "tracker_api_key": "$LINEAR_API_KEY",
+            "project_slug": "",
+            "assignee": "",
+            "active_states": "Todo, In Progress",
+            "terminal_states": "Done",
+            "poll_interval_ms": "30000",
+            "workspace_root": "~/ws",
+            "max_concurrent_agents": "3",
+            "max_turns": "20",
+            "max_retry_backoff_ms": "300000",
+            "provider": "codex",
+            "command": "codex",
+            "turn_timeout_ms": "3600000",
+            "read_timeout_ms": "60000",
+            "stall_timeout_ms": "300000",
+            "dangerously_skip_permissions": "1",
+            "qa_review_enabled": "",
+            "qa_review_dispatch": "",
+            "qa_review_success": "",
+            "qa_review_failure": "",
+            "qa_agent_provider": "",
+            "qa_agent_command": "",
+            "qa_agent_turn_timeout_ms": "",
+            "qa_agent_read_timeout_ms": "",
+            "qa_agent_stall_timeout_ms": "",
+            "qa_agent_dangerously_skip_permissions": "",
+            "after_create": "git clone .",
+            "before_run": "",
+            "after_run": "",
+            "before_remove": "",
+            "hooks_timeout_ms": "120000",
+            "server_port": "8080",
+            "review_prompt": "",
+            "prompt_template": "Custom prompt.",
+        },
+    )
+
+    response = await server._handle_setup_post(request)
+
+    assert response.status == 200
+    assert "project_slug" in response.text.lower()
+    assert 'value="codex" selected' in response.text
+    assert "git clone ." in response.text
+    assert "Custom prompt." in response.text
+
+
+@pytest.mark.asyncio
+async def test_setup_post_saves_provider_field(tmp_path: Path) -> None:
+    """POST /setup should persist the provider selection to the config file."""
+    workflow_path = tmp_path / ".cymphony" / "workflow.md"
+    workflow_path.parent.mkdir(parents=True)
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": workflow_path,
+            "setup_mode": True,
+            "setup_error": None,
+        },
+        post_data={
+            "tracker_api_key": "$LINEAR_API_KEY",
+            "project_slug": "my-proj",
+            "assignee": "",
+            "active_states": "Todo, In Progress",
+            "terminal_states": "Done",
+            "poll_interval_ms": "30000",
+            "workspace_root": "~/ws",
+            "max_concurrent_agents": "3",
+            "max_turns": "20",
+            "max_retry_backoff_ms": "300000",
+            "provider": "codex",
+            "command": "codex",
+            "turn_timeout_ms": "3600000",
+            "read_timeout_ms": "60000",
+            "stall_timeout_ms": "300000",
+            "dangerously_skip_permissions": "1",
+            "qa_review_enabled": "",
+            "qa_review_dispatch": "",
+            "qa_review_success": "",
+            "qa_review_failure": "",
+            "qa_agent_provider": "",
+            "qa_agent_command": "",
+            "qa_agent_turn_timeout_ms": "",
+            "qa_agent_read_timeout_ms": "",
+            "qa_agent_stall_timeout_ms": "",
+            "qa_agent_dangerously_skip_permissions": "",
+            "after_create": "",
+            "before_run": "",
+            "after_run": "",
+            "before_remove": "",
+            "hooks_timeout_ms": "120000",
+            "server_port": "8080",
+            "review_prompt": "",
+            "prompt_template": "Work on {{ issue.identifier }}.",
+        },
+    )
+
+    with pytest.raises(web.HTTPFound) as exc_info:
+        await server._handle_setup_post(request)
+
+    assert exc_info.value.location == "/setup?saved=1"
+    saved = load_workflow(workflow_path)
+    assert saved.config["agent"]["provider"] == "codex"
+
+
+@pytest.mark.asyncio
+async def test_settings_post_validation_failure_preserves_existing_config_context(
+    tmp_path: Path,
+) -> None:
+    """POST /settings validation failure should layer user values on top of existing config."""
+    workflow_path = tmp_path / ".cymphony" / "workflow.md"
+    workflow_path.parent.mkdir(parents=True)
+    workflow_path.write_text(_LOCAL_WORKFLOW_YAML, encoding="utf-8")
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": workflow_path,
+            "setup_mode": False,
+            "setup_error": None,
+        },
+        post_data={
+            "tracker_api_key": "$LINEAR_API_KEY",
+            "project_slug": "",
+            "assignee": "bob",
+            "active_states": "Todo, In Progress",
+            "terminal_states": "Done",
+            "poll_interval_ms": "30000",
+            "workspace_root": "~/ws",
+            "max_concurrent_agents": "3",
+            "max_turns": "20",
+            "max_retry_backoff_ms": "300000",
+            "provider": "codex",
+            "command": "codex",
+            "turn_timeout_ms": "3600000",
+            "read_timeout_ms": "60000",
+            "stall_timeout_ms": "300000",
+            "dangerously_skip_permissions": "1",
+            "qa_review_enabled": "",
+            "qa_review_dispatch": "",
+            "qa_review_success": "",
+            "qa_review_failure": "",
+            "qa_agent_provider": "",
+            "qa_agent_command": "",
+            "qa_agent_turn_timeout_ms": "",
+            "qa_agent_read_timeout_ms": "",
+            "qa_agent_stall_timeout_ms": "",
+            "qa_agent_dangerously_skip_permissions": "",
+            "after_create": "",
+            "before_run": "",
+            "after_run": "",
+            "before_remove": "",
+            "hooks_timeout_ms": "120000",
+            "server_port": "8080",
+            "review_prompt": "",
+            "prompt_template": "Custom prompt.",
+        },
+    )
+
+    response = await server._handle_settings_post(request)
+
+    assert response.status == 200
+    assert 'value="bob"' in response.text
+    assert 'value="codex" selected' in response.text
+
+
+@pytest.mark.asyncio
+async def test_setup_post_validation_failure_seeds_from_example(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /setup validation failure with no local config should seed from example."""
+    example_path = tmp_path / "WORKFLOW.example.md"
+    example_path.write_text(_EXAMPLE_WORKFLOW_YAML, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    workflow_path = tmp_path / ".cymphony" / "workflow.md"
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": workflow_path,
+            "setup_mode": True,
+            "setup_error": None,
+        },
+        post_data={
+            "tracker_api_key": "$LINEAR_API_KEY",
+            "project_slug": "",
+            "assignee": "",
+            "active_states": "Todo, In Progress",
+            "terminal_states": "Done",
+            "poll_interval_ms": "30000",
+            "workspace_root": "~/ws",
+            "max_concurrent_agents": "2",
+            "max_turns": "15",
+            "max_retry_backoff_ms": "300000",
+            "provider": "claude",
+            "command": "claude",
+            "turn_timeout_ms": "3600000",
+            "read_timeout_ms": "60000",
+            "stall_timeout_ms": "300000",
+            "dangerously_skip_permissions": "1",
+            "qa_review_enabled": "",
+            "qa_review_dispatch": "",
+            "qa_review_success": "",
+            "qa_review_failure": "",
+            "qa_agent_provider": "",
+            "qa_agent_command": "",
+            "qa_agent_turn_timeout_ms": "",
+            "qa_agent_read_timeout_ms": "",
+            "qa_agent_stall_timeout_ms": "",
+            "qa_agent_dangerously_skip_permissions": "",
+            "after_create": "",
+            "before_run": "",
+            "after_run": "",
+            "before_remove": "",
+            "hooks_timeout_ms": "120000",
+            "server_port": "8080",
+            "review_prompt": "",
+            "prompt_template": "Custom prompt.",
+        },
+    )
+
+    response = await server._handle_setup_post(request)
+
+    assert response.status == 200
+    assert "project_slug" in response.text.lower()
+    assert "Custom prompt." in response.text
+
+
+def test_load_example_workflow_returns_none_when_missing(tmp_path: Path) -> None:
+    """load_example_workflow returns None when no example file exists."""
+    from cymphony.workflow import load_example_workflow
+
+    result = load_example_workflow(base=tmp_path)
+    assert result is None
+
+
+def test_load_example_workflow_loads_valid_file(tmp_path: Path) -> None:
+    """load_example_workflow parses WORKFLOW.example.md correctly."""
+    from cymphony.workflow import load_example_workflow
+
+    example = tmp_path / "WORKFLOW.example.md"
+    example.write_text(_EXAMPLE_WORKFLOW_YAML, encoding="utf-8")
+
+    result = load_example_workflow(base=tmp_path)
+    assert result is not None
+    assert result.config["agent"]["max_turns"] == 15
+    assert "Example prompt template" in result.prompt_template
+
+
+def test_load_example_workflow_accepts_local_config_path(tmp_path: Path) -> None:
+    """load_example_workflow should resolve the repo root from .cymphony/workflow.md."""
+    from cymphony.workflow import load_example_workflow
+
+    example = tmp_path / "WORKFLOW.example.md"
+    example.write_text(_EXAMPLE_WORKFLOW_YAML, encoding="utf-8")
+    workflow_path = tmp_path / ".cymphony" / "workflow.md"
+    workflow_path.parent.mkdir(parents=True)
+
+    result = load_example_workflow(base=workflow_path)
+    assert result is not None
+    assert result.config["agent"]["max_turns"] == 15
