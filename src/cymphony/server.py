@@ -7,6 +7,7 @@ import html
 import json
 import logging
 import math
+import os
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -14,9 +15,9 @@ from typing import Any, TYPE_CHECKING
 
 from aiohttp import web
 
-from .config import build_config, validate_dispatch_config
+from .config import _DEFAULT_LINEAR_ENDPOINT, build_config, validate_dispatch_config
 from .linear import LinearClient
-from .models import Issue, WorkflowDefinition
+from .models import Issue, TrackerConfig, WorkflowDefinition
 from .workflow import LOCAL_CONFIG_DIR, LOCAL_WORKFLOW_FILENAME, load_workflow, save_workflow
 
 if TYPE_CHECKING:
@@ -515,6 +516,16 @@ def _render_setup_page(
     .check {{ display: flex; align-items: center; gap: 10px; }}
     .check input {{ width: auto; }}
     code {{ background: #e5e7eb; border-radius: 4px; padding: 1px 4px; }}
+    .field-required label::after {{ content: " *"; color: #dc2626; }}
+    .field-optional label::after {{ content: " (optional)"; color: #6b7280; font-weight: 400; font-size: 12px; }}
+    .loading-indicator {{ color: #6b7280; font-size: 13px; font-style: italic; margin-top: 4px; }}
+    .fetch-error {{ color: #dc2626; font-size: 13px; margin-top: 4px; }}
+    .state-checkboxes {{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }}
+    .state-checkboxes label {{ display: inline-flex; align-items: center; gap: 4px; font-weight: 400; font-size: 13px;
+      padding: 4px 10px; border: 1px solid #cbd5e1; border-radius: 6px; cursor: pointer; background: #fff; }}
+    .state-checkboxes label:has(input:checked) {{ background: #ecfdf5; border-color: #a7f3d0; }}
+    .state-checkboxes input {{ width: auto; margin: 0; }}
+    .toggle-manual {{ font-size: 12px; color: #6b7280; cursor: pointer; text-decoration: underline; margin-top: 4px; display: inline-block; }}
   </style>
 </head>
 <body>
@@ -526,48 +537,60 @@ def _render_setup_page(
   {error_html}
   <form method="post" action="{action}">
     <div class="grid">
-      <section class="card">
-        <label for="project_slug">Linear project slug</label>
-        <input id="project_slug" name="project_slug" value="{field("project_slug")}" required />
-      </section>
-      <section class="card">
-        <label for="assignee">Assignee filter</label>
-        <input id="assignee" name="assignee" value="{field("assignee")}" placeholder="optional display name" />
-      </section>
-      <section class="card">
+      <section class="card field-required">
         <label for="tracker_api_key">Tracker API key value</label>
         <input id="tracker_api_key" name="tracker_api_key" value="{field("tracker_api_key")}" required />
         <div class="muted">Use <code>$LINEAR_API_KEY</code> to load from the environment.</div>
+        <button type="button" id="load-linear-data" style="margin-top:8px;background:#4b5563;font-size:13px;padding:6px 12px;">Load Linear data</button>
+        <div id="load-linear-status" class="loading-indicator" style="display:none;"></div>
       </section>
-      <section class="card">
+      <section class="card field-required">
+        <label for="project_slug">Linear project</label>
+        <select id="project_slug_select" style="display:none;" aria-label="Select a project"></select>
+        <input id="project_slug" name="project_slug" value="{field("project_slug")}" required />
+        <span class="toggle-manual" id="project_slug_toggle" style="display:none;"></span>
+      </section>
+      <section class="card field-optional">
+        <label for="assignee">Assignee filter</label>
+        <select id="assignee_select" style="display:none;" aria-label="Select an assignee">
+          <option value="">No filter (all assignees)</option>
+        </select>
+        <input id="assignee" name="assignee" value="{field("assignee")}" placeholder="optional display name" />
+        <span class="toggle-manual" id="assignee_toggle" style="display:none;"></span>
+      </section>
+      <section class="card field-required">
         <label for="workspace_root">Workspace root</label>
         <input id="workspace_root" name="workspace_root" value="{field("workspace_root")}" required />
       </section>
-      <section class="card">
+      <section class="card field-required">
         <label for="active_states">Active states</label>
+        <div id="active_states_checkboxes" class="state-checkboxes" style="display:none;"></div>
         <input id="active_states" name="active_states" value="{field("active_states")}" required />
+        <span class="toggle-manual" id="active_states_toggle" style="display:none;"></span>
       </section>
-      <section class="card">
+      <section class="card field-required">
         <label for="terminal_states">Terminal states</label>
+        <div id="terminal_states_checkboxes" class="state-checkboxes" style="display:none;"></div>
         <input id="terminal_states" name="terminal_states" value="{field("terminal_states")}" required />
+        <span class="toggle-manual" id="terminal_states_toggle" style="display:none;"></span>
       </section>
-      <section class="card">
+      <section class="card field-required">
         <label for="poll_interval_ms">Poll interval (ms)</label>
         <input id="poll_interval_ms" name="poll_interval_ms" value="{field("poll_interval_ms")}" required />
       </section>
-      <section class="card">
+      <section class="card field-required">
         <label for="server_port">HTTP port</label>
         <input id="server_port" name="server_port" value="{field("server_port")}" required />
       </section>
-      <section class="card">
+      <section class="card field-required">
         <label for="max_concurrent_agents">Max concurrent agents</label>
         <input id="max_concurrent_agents" name="max_concurrent_agents" value="{field("max_concurrent_agents")}" required />
       </section>
-      <section class="card">
+      <section class="card field-required">
         <label for="max_turns">Max turns</label>
         <input id="max_turns" name="max_turns" value="{field("max_turns")}" required />
       </section>
-      <section class="card">
+      <section class="card field-required">
         <label for="max_retry_backoff_ms">Max retry backoff (ms)</label>
         <input id="max_retry_backoff_ms" name="max_retry_backoff_ms" value="{field("max_retry_backoff_ms")}" required />
       </section>
@@ -677,6 +700,198 @@ def _render_setup_page(
     </div>
   </form>
 </main>
+<script>
+(function() {{
+  var apiKey = document.getElementById("tracker_api_key");
+  var loadBtn = document.getElementById("load-linear-data");
+  var loadStatus = document.getElementById("load-linear-status");
+
+  function qs(sel) {{ return document.querySelector(sel); }}
+  function show(el) {{ el.style.display = ""; }}
+  function hide(el) {{ el.style.display = "none"; }}
+
+  /* ---- toggle between select and manual input ---- */
+  function setupToggle(name, selectEl, inputEl, toggleEl) {{
+    var useManual = false;
+    toggleEl.textContent = "Switch to manual entry";
+    toggleEl.onclick = function() {{
+      useManual = !useManual;
+      if (useManual) {{
+        inputEl.value = selectEl.value;
+        hide(selectEl);
+        show(inputEl);
+        inputEl.name = name;
+        selectEl.name = "";
+        toggleEl.textContent = "Switch to selector";
+      }} else {{
+        if (inputEl.value) {{
+          selectEl.value = inputEl.value;
+        }}
+        show(selectEl);
+        hide(inputEl);
+        selectEl.name = name;
+        inputEl.name = "";
+        toggleEl.textContent = "Switch to manual entry";
+      }}
+    }};
+  }}
+
+  /* ---- state checkboxes ---- */
+  function setupStateCheckboxes(containerId, inputEl, toggleEl, states, currentValues) {{
+    var container = document.getElementById(containerId);
+    if (!container) return;
+    container.innerHTML = "";
+    var currentSet = {{}};
+    currentValues.forEach(function(v) {{ currentSet[v.trim().toLowerCase()] = v.trim(); }});
+
+    states.forEach(function(state) {{
+      var lbl = document.createElement("label");
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = state;
+      if (currentSet[state.toLowerCase()]) cb.checked = true;
+      cb.addEventListener("change", syncStateInput.bind(null, containerId, inputEl));
+      lbl.appendChild(cb);
+      lbl.appendChild(document.createTextNode(" " + state));
+      container.appendChild(lbl);
+    }});
+    show(container);
+    show(toggleEl);
+
+    var useManual = false;
+    toggleEl.textContent = "Switch to manual entry";
+    toggleEl.onclick = function() {{
+      useManual = !useManual;
+      if (useManual) {{
+        hide(container);
+        show(inputEl);
+        toggleEl.textContent = "Switch to selector";
+      }} else {{
+        show(container);
+        hide(inputEl);
+        syncStateInput(containerId, inputEl);
+        toggleEl.textContent = "Switch to manual entry";
+      }}
+    }};
+    // Start with checkboxes visible, text hidden
+    hide(inputEl);
+    syncStateInput(containerId, inputEl);
+  }}
+
+  function syncStateInput(containerId, inputEl) {{
+    var container = document.getElementById(containerId);
+    var checked = container.querySelectorAll("input:checked");
+    var vals = [];
+    checked.forEach(function(cb) {{ vals.push(cb.value); }});
+    inputEl.value = vals.join(", ");
+  }}
+
+  /* ---- populate selects ---- */
+  function populateProjectSelect(projects, currentSlug) {{
+    var sel = qs("#project_slug_select");
+    var inp = qs("#project_slug");
+    var toggle = qs("#project_slug_toggle");
+    if (!sel || !projects.length) return;
+
+    sel.innerHTML = '<option value="">Select a project\u2026</option>';
+    projects.forEach(function(p) {{
+      var opt = document.createElement("option");
+      opt.value = p.slugId;
+      opt.textContent = p.name + " (" + p.slugId + ")";
+      if (p.slugId === currentSlug) opt.selected = true;
+      sel.appendChild(opt);
+    }});
+    show(sel);
+    show(toggle);
+    hide(inp);
+    sel.name = "project_slug";
+    inp.name = "";
+    setupToggle("project_slug", sel, inp, toggle);
+  }}
+
+  function populateAssigneeSelect(members, currentAssignee) {{
+    var sel = qs("#assignee_select");
+    var inp = qs("#assignee");
+    var toggle = qs("#assignee_toggle");
+    if (!sel || !members.length) return;
+
+    sel.innerHTML = '<option value="">No filter (all assignees)</option>';
+    members.forEach(function(m) {{
+      var opt = document.createElement("option");
+      opt.value = m.displayName;
+      opt.textContent = m.displayName;
+      if (m.displayName.toLowerCase() === (currentAssignee || "").toLowerCase()) opt.selected = true;
+      sel.appendChild(opt);
+    }});
+    show(sel);
+    show(toggle);
+    hide(inp);
+    sel.name = "assignee";
+    inp.name = "";
+    setupToggle("assignee", sel, inp, toggle);
+  }}
+
+  /* ---- fetch all data ---- */
+  function loadLinearData() {{
+    show(loadStatus);
+    loadStatus.textContent = "Loading Linear data\u2026";
+    loadStatus.className = "loading-indicator";
+
+    var key = encodeURIComponent(apiKey.value || "");
+    var base = "/api/v1/setup/";
+
+    Promise.all([
+      fetch(base + "projects?api_key=" + key).then(function(r) {{ return r.json(); }}),
+      fetch(base + "members?api_key=" + key).then(function(r) {{ return r.json(); }}),
+      fetch(base + "states?api_key=" + key).then(function(r) {{ return r.json(); }})
+    ]).then(function(results) {{
+      var projData = results[0];
+      var membData = results[1];
+      var stateData = results[2];
+      var currentProject = qs("#project_slug_select").value || qs("#project_slug").value;
+      var currentAssignee = qs("#assignee_select").value || qs("#assignee").value;
+
+      var errors = [];
+      if (projData.ok && projData.projects.length) {{
+        populateProjectSelect(projData.projects, currentProject);
+      }} else if (!projData.ok) {{
+        errors.push("Projects: " + (projData.error || "unknown error"));
+      }}
+
+      if (membData.ok && membData.members.length) {{
+        populateAssigneeSelect(membData.members, currentAssignee);
+      }} else if (!membData.ok) {{
+        errors.push("Members: " + (membData.error || "unknown error"));
+      }}
+
+      if (stateData.ok && stateData.states.length) {{
+        var activeInput = qs("#active_states");
+        var terminalInput = qs("#terminal_states");
+        var activeCurrent = (activeInput.value || "").split(",").filter(function(s) {{ return s.trim(); }});
+        var terminalCurrent = (terminalInput.value || "").split(",").filter(function(s) {{ return s.trim(); }});
+
+        setupStateCheckboxes("active_states_checkboxes", activeInput, qs("#active_states_toggle"), stateData.states, activeCurrent);
+        setupStateCheckboxes("terminal_states_checkboxes", terminalInput, qs("#terminal_states_toggle"), stateData.states, terminalCurrent);
+      }} else if (!stateData.ok) {{
+        errors.push("States: " + (stateData.error || "unknown error"));
+      }}
+
+      if (errors.length) {{
+        loadStatus.textContent = "Some data could not be loaded: " + errors.join("; ") + ". You can still enter values manually.";
+        loadStatus.className = "fetch-error";
+      }} else {{
+        loadStatus.textContent = "Linear data loaded.";
+        setTimeout(function() {{ hide(loadStatus); }}, 3000);
+      }}
+    }}).catch(function(err) {{
+      loadStatus.textContent = "Failed to connect: " + err.message + ". Enter values manually.";
+      loadStatus.className = "fetch-error";
+    }});
+  }}
+
+  loadBtn.addEventListener("click", loadLinearData);
+}})();
+</script>
 </body>
 </html>"""
 
@@ -2037,6 +2252,10 @@ def build_app(
     app.router.add_post("/setup", _handle_setup_post)
     app.router.add_get("/settings", _handle_settings_get)
     app.router.add_post("/settings", _handle_settings_post)
+    # Setup discovery endpoints (BAP-189) — available in all modes
+    app.router.add_get("/api/v1/setup/projects", _handle_setup_projects)
+    app.router.add_get("/api/v1/setup/members", _handle_setup_members)
+    app.router.add_get("/api/v1/setup/states", _handle_setup_states)
     if orchestrator is not None:
         app.router.add_get("/api/v1/state", _handle_state)
         app.router.add_post("/api/v1/refresh", _handle_refresh)
@@ -2185,6 +2404,71 @@ async def _handle_settings_post(request: web.Request) -> web.Response:
     if request.app.get("setup_mode"):
         return _redirect("/setup")
     return await _save_workflow_from_request(request, setup_mode=False)
+
+
+# ---------------------------------------------------------------------------
+# Setup discovery endpoints (BAP-189)
+# ---------------------------------------------------------------------------
+
+def _setup_linear_client(request: web.Request) -> LinearClient:
+    """Build a minimal LinearClient from the api_key query param or current workflow."""
+    api_key = request.query.get("api_key", "").strip()
+    if not api_key:
+        # Try to pull from current workflow file
+        workflow_path = Path(request.app["workflow_path"])
+        wf = _load_current_workflow_or_none(workflow_path)
+        if wf:
+            api_key = (wf.config.get("tracker") or {}).get("api_key") or ""
+    if not api_key:
+        api_key = "$LINEAR_API_KEY"
+
+    # Resolve env-var references like $LINEAR_API_KEY
+    if api_key.startswith("$"):
+        api_key = os.environ.get(api_key[1:], "")
+
+    config = TrackerConfig(
+        kind="linear",
+        endpoint=_DEFAULT_LINEAR_ENDPOINT,
+        api_key=api_key,
+        project_slug="",
+        active_states=[],
+        terminal_states=[],
+        assignee=None,
+    )
+    return LinearClient(config)
+
+
+async def _handle_setup_projects(request: web.Request) -> web.Response:
+    """GET /api/v1/setup/projects — list Linear projects."""
+    try:
+        client = _setup_linear_client(request)
+        projects = await client.fetch_projects()
+        return _json_response({"ok": True, "projects": projects})
+    except Exception as exc:
+        logger.warning(f"action=setup_projects_failed error={exc}")
+        return _json_response({"ok": False, "error": str(exc), "projects": []})
+
+
+async def _handle_setup_members(request: web.Request) -> web.Response:
+    """GET /api/v1/setup/members — list Linear organisation members."""
+    try:
+        client = _setup_linear_client(request)
+        members = await client.fetch_members()
+        return _json_response({"ok": True, "members": members})
+    except Exception as exc:
+        logger.warning(f"action=setup_members_failed error={exc}")
+        return _json_response({"ok": False, "error": str(exc), "members": []})
+
+
+async def _handle_setup_states(request: web.Request) -> web.Response:
+    """GET /api/v1/setup/states — list Linear workflow state names."""
+    try:
+        client = _setup_linear_client(request)
+        states = await client.fetch_all_workflow_state_names()
+        return _json_response({"ok": True, "states": states})
+    except Exception as exc:
+        logger.warning(f"action=setup_states_failed error={exc}")
+        return _json_response({"ok": False, "error": str(exc), "states": []})
 
 
 async def _handle_state(request: web.Request) -> web.Response:

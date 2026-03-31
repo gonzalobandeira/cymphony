@@ -1332,3 +1332,206 @@ def test_problems_panel_hidden_when_no_problems() -> None:
     )
 
     assert "class='panel problems-panel'" not in html
+
+
+# ---------------------------------------------------------------------------
+# Setup discovery endpoint tests (BAP-189)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_setup_projects_returns_json(tmp_path: Path) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        },
+        query={"api_key": "test-key"},
+    )
+
+    mock_projects = [
+        {"id": "p1", "name": "Alpha", "slugId": "alpha-1"},
+        {"id": "p2", "name": "Beta", "slugId": "beta-2"},
+    ]
+    with patch("cymphony.server.LinearClient") as MockClient:
+        instance = MockClient.return_value
+        instance.fetch_projects = AsyncMock(return_value=mock_projects)
+        response = await server._handle_setup_projects(request)
+
+    import json
+    body = json.loads(response.text)
+    assert body["ok"] is True
+    assert len(body["projects"]) == 2
+    assert body["projects"][0]["slugId"] == "alpha-1"
+
+
+@pytest.mark.asyncio
+async def test_setup_projects_returns_error_on_failure(tmp_path: Path) -> None:
+    from unittest.mock import AsyncMock, patch
+    from cymphony.models import TrackerError
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        },
+        query={"api_key": "bad-key"},
+    )
+
+    with patch("cymphony.server.LinearClient") as MockClient:
+        instance = MockClient.return_value
+        instance.fetch_projects = AsyncMock(
+            side_effect=TrackerError("auth", "Unauthorized")
+        )
+        response = await server._handle_setup_projects(request)
+
+    import json
+    body = json.loads(response.text)
+    assert body["ok"] is False
+    assert "Unauthorized" in body["error"]
+    assert body["projects"] == []
+
+
+@pytest.mark.asyncio
+async def test_setup_members_returns_json(tmp_path: Path) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        },
+        query={"api_key": "test-key"},
+    )
+
+    mock_members = [
+        {"id": "u1", "displayName": "Alice"},
+        {"id": "u2", "displayName": "Bob"},
+    ]
+    with patch("cymphony.server.LinearClient") as MockClient:
+        instance = MockClient.return_value
+        instance.fetch_members = AsyncMock(return_value=mock_members)
+        response = await server._handle_setup_members(request)
+
+    import json
+    body = json.loads(response.text)
+    assert body["ok"] is True
+    assert len(body["members"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_setup_states_returns_json(tmp_path: Path) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        },
+        query={"api_key": "test-key"},
+    )
+
+    mock_states = ["Backlog", "Done", "In Progress", "Todo"]
+    with patch("cymphony.server.LinearClient") as MockClient:
+        instance = MockClient.return_value
+        instance.fetch_all_workflow_state_names = AsyncMock(return_value=mock_states)
+        response = await server._handle_setup_states(request)
+
+    import json
+    body = json.loads(response.text)
+    assert body["ok"] is True
+    assert body["states"] == ["Backlog", "Done", "In Progress", "Todo"]
+
+
+@pytest.mark.asyncio
+async def test_setup_states_returns_error_on_failure(tmp_path: Path) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        },
+        query={"api_key": "bad-key"},
+    )
+
+    with patch("cymphony.server.LinearClient") as MockClient:
+        instance = MockClient.return_value
+        instance.fetch_all_workflow_state_names = AsyncMock(
+            side_effect=Exception("Connection failed")
+        )
+        response = await server._handle_setup_states(request)
+
+    import json
+    body = json.loads(response.text)
+    assert body["ok"] is False
+    assert body["states"] == []
+
+
+@pytest.mark.asyncio
+async def test_setup_page_contains_load_button(tmp_path: Path) -> None:
+    """The setup page should include the 'Load Linear data' button."""
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        }
+    )
+    response = await server._handle_setup_get(request)
+    assert response.status == 200
+    assert "Load Linear data" in response.text
+    assert "project_slug_select" in response.text
+    assert "assignee_select" in response.text
+    assert "active_states_checkboxes" in response.text
+    assert "terminal_states_checkboxes" in response.text
+
+
+@pytest.mark.asyncio
+async def test_setup_page_marks_required_and_optional_fields(tmp_path: Path) -> None:
+    """Required and optional fields should be clearly distinguished."""
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        }
+    )
+    response = await server._handle_setup_get(request)
+    assert "field-required" in response.text
+    assert "field-optional" in response.text
+
+
+@pytest.mark.asyncio
+async def test_setup_page_selector_script_preserves_values_and_resets_assignees(
+    tmp_path: Path,
+) -> None:
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        }
+    )
+
+    response = await server._handle_setup_get(request)
+
+    assert 'inputEl.value = selectEl.value;' in response.text
+    assert 'selectEl.value = inputEl.value;' in response.text
+    assert 'sel.innerHTML = \'<option value="">No filter (all assignees)</option>\';' in response.text
+    assert 'var currentProject = qs("#project_slug_select").value || qs("#project_slug").value;' in response.text
+    assert 'var currentAssignee = qs("#assignee_select").value || qs("#assignee").value;' in response.text
