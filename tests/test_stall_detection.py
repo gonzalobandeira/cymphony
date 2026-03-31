@@ -26,7 +26,6 @@ def _make_config(
     return CodingAgentConfig(
         command=sys.executable,
         turn_timeout_ms=turn_timeout_ms,
-        read_timeout_ms=1000,
         stall_timeout_ms=stall_timeout_ms,
         dangerously_skip_permissions=False,
     )

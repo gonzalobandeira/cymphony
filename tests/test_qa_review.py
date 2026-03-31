@@ -87,7 +87,6 @@ def _build_config(
         runner=CodingAgentConfig(
             command="claude",
             turn_timeout_ms=1000,
-            read_timeout_ms=1000,
             stall_timeout_ms=1000,
             dangerously_skip_permissions=True,
         ),
@@ -1054,7 +1053,6 @@ class TestQAAgentConfig:
         return CodingAgentConfig(
             command="review-cli",
             turn_timeout_ms=111,
-            read_timeout_ms=111,
             stall_timeout_ms=111,
             dangerously_skip_permissions=False,
             provider="codex",
@@ -1137,7 +1135,6 @@ class TestQAAgentConfig:
         qa_agent = CodingAgentConfig(
             command="review-agent",
             turn_timeout_ms=500,
-            read_timeout_ms=500,
             stall_timeout_ms=500,
             dangerously_skip_permissions=True,
             provider="codex",
@@ -1149,7 +1146,6 @@ class TestQAAgentConfig:
         assert qa["agent"]["provider"] == "codex"
         assert qa["agent"]["command"] == "review-agent"
         assert qa["agent"]["turn_timeout_ms"] == 500
-        assert qa["agent"]["read_timeout_ms"] == 500
         assert qa["agent"]["stall_timeout_ms"] == 500
         assert qa["agent"]["dangerously_skip_permissions"] is True
 
@@ -1167,7 +1163,6 @@ class TestQAAgentConfig:
         agent = CodingAgentConfig(
             command="qa-cli",
             turn_timeout_ms=100,
-            read_timeout_ms=100,
             stall_timeout_ms=100,
             dangerously_skip_permissions=False,
             provider="claude",
@@ -1183,7 +1178,6 @@ class TestQAAgentConfig:
         qa_agent = CodingAgentConfig(
             command="review-cli",
             turn_timeout_ms=111,
-            read_timeout_ms=111,
             stall_timeout_ms=50,
             dangerously_skip_permissions=False,
             provider="codex",

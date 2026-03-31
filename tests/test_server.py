@@ -801,7 +801,6 @@ async def test_setup_post_writes_workflow_file(tmp_path: Path) -> None:
             "max_retry_backoff_ms": "300000",
             "command": "claude",
             "turn_timeout_ms": "3600000",
-            "read_timeout_ms": "60000",
             "stall_timeout_ms": "300000",
             "dangerously_skip_permissions": "1",
             "qa_review_enabled": "1",
@@ -811,7 +810,6 @@ async def test_setup_post_writes_workflow_file(tmp_path: Path) -> None:
             "qa_agent_provider": "codex",
             "qa_agent_command": "review-cli",
             "qa_agent_turn_timeout_ms": "120000",
-            "qa_agent_read_timeout_ms": "45000",
             "qa_agent_stall_timeout_ms": "15000",
             "qa_agent_dangerously_skip_permissions": "1",
             "after_create": "git clone git@github.com:org/repo.git .",
@@ -833,7 +831,6 @@ async def test_setup_post_writes_workflow_file(tmp_path: Path) -> None:
     assert saved.config["tracker"]["project_slug"] == "cymphony-b2a8d0064141"
     assert saved.config["tracker"]["assignee"] == "gonzalobandeira"
     assert saved.config["runner"]["command"] == "claude"
-    assert saved.config["runner"]["read_timeout_ms"] == 60000
     assert saved.config["transitions"]["qa_review"] == {
         "enabled": True,
         "dispatch": "QA Review",
@@ -843,7 +840,6 @@ async def test_setup_post_writes_workflow_file(tmp_path: Path) -> None:
             "provider": "codex",
             "command": "review-cli",
             "turn_timeout_ms": 120000,
-            "read_timeout_ms": 45000,
             "stall_timeout_ms": 15000,
             "dangerously_skip_permissions": True,
         },
@@ -946,7 +942,6 @@ agent:
 codex:
   command: claude
   turn_timeout_ms: 1000
-  read_timeout_ms: 2222
   stall_timeout_ms: 1000
   dangerously_skip_permissions: true
 hooks:
@@ -963,7 +958,6 @@ transitions:
       provider: codex
       command: review-cli
       turn_timeout_ms: 500
-      read_timeout_ms: 600
       stall_timeout_ms: 700
       dangerously_skip_permissions: true
 review_prompt: Review {{ issue.identifier }} carefully.
@@ -986,11 +980,9 @@ Implement {{ issue.identifier }}.
     assert response.status == 200
     assert 'name="qa_review_enabled"' in response.text
     assert 'name="qa_review_enabled" value="1" checked' in response.text
-    assert 'name="read_timeout_ms" value="2222"' in response.text
     assert 'name="qa_review_dispatch" value="QA Review"' in response.text
     assert 'name="qa_review_failure" value="Todo"' in response.text
     assert 'name="qa_agent_provider" value="codex"' in response.text
-    assert 'name="qa_agent_read_timeout_ms" value="600"' in response.text
     assert "Review {{ issue.identifier }} carefully." in response.text
 
 

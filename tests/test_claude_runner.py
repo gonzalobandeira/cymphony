@@ -12,7 +12,6 @@ def _make_config() -> CodingAgentConfig:
     return CodingAgentConfig(
         command="claude",
         turn_timeout_ms=1000,
-        read_timeout_ms=1000,
         stall_timeout_ms=1000,
         dangerously_skip_permissions=True,
     )

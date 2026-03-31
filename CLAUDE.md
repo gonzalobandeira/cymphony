@@ -84,7 +84,7 @@ Dependencies: `pyyaml`, `jinja2`, `aiohttp`, `watchdog`. Python ≥ 3.11. Built 
 - **PR title**: use `git log --format="%s" origin/main..HEAD | tail -1` in the `after_run` hook to get the agent's original commit as the PR title (not the hook's own commit).
 - **Configurable issue transitions**: dispatch and worker completion transitions are no longer hardcoded. Defaults remain `dispatch -> "In Progress"` and `success -> "In Review"`, with optional `failure`, `blocked`, and `cancelled` transitions.
 - **QA review lane is opt-in**: when `transitions.qa_review.enabled` is true, implementation success transitions to `qa_review.dispatch` (typically `QA Review`) instead of directly to `transitions.success`.
-- **QA agent override**: set `transitions.qa_review.agent` to run review-mode workers with a different provider, command, or timeout settings. Fields: `provider`, `command`, `turn_timeout_ms`, `read_timeout_ms`, `stall_timeout_ms`, `dangerously_skip_permissions`. Omit the block entirely to inherit the main `codex` settings.
+- **QA agent override**: set `transitions.qa_review.agent` to run review-mode workers with a different provider, command, or timeout settings. Fields: `provider`, `command`, `turn_timeout_ms`, `stall_timeout_ms`, `dangerously_skip_permissions`. Omit the block entirely to inherit the main `codex` settings.
 - **Required Linear states for QA review**: create `QA Review` in Linear before enabling the feature. The end-to-end workflow is `Todo -> In Progress -> QA Review -> (Todo | In Review)`.
 - **Config lives in `.cymphony/`**: local config is gitignored. `WORKFLOW.md` at repo root is a deprecated fallback. `WORKFLOW.example.md` is the committed template for new operators.
 

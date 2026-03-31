@@ -39,7 +39,6 @@ _DEFAULT_SETUP_FORM = {
     "provider": "claude",
     "command": "",
     "turn_timeout_ms": "3600000",
-    "read_timeout_ms": "60000",
     "stall_timeout_ms": "300000",
     "dangerously_skip_permissions": True,
     "after_create": "",
@@ -55,7 +54,6 @@ _DEFAULT_SETUP_FORM = {
     "qa_agent_provider": "",
     "qa_agent_command": "",
     "qa_agent_turn_timeout_ms": "",
-    "qa_agent_read_timeout_ms": "",
     "qa_agent_stall_timeout_ms": "",
     "qa_agent_dangerously_skip_permissions": False,
     "review_prompt": "",
@@ -290,7 +288,6 @@ def _workflow_form_data(
                 "provider": str(agent.get("provider") or data["provider"]),
                 "command": str(runner.get("command") or data["command"]),
                 "turn_timeout_ms": str(runner.get("turn_timeout_ms") or data["turn_timeout_ms"]),
-                "read_timeout_ms": str(runner.get("read_timeout_ms") or data["read_timeout_ms"]),
                 "stall_timeout_ms": str(runner.get("stall_timeout_ms") or data["stall_timeout_ms"]),
                 "dangerously_skip_permissions": bool(runner.get("dangerously_skip_permissions", True)),
                 "after_create": str(hooks.get("after_create") or ""),
@@ -306,7 +303,6 @@ def _workflow_form_data(
                 "qa_agent_provider": str(qa_agent.get("provider") or ""),
                 "qa_agent_command": str(qa_agent.get("command") or ""),
                 "qa_agent_turn_timeout_ms": str(qa_agent.get("turn_timeout_ms") or ""),
-                "qa_agent_read_timeout_ms": str(qa_agent.get("read_timeout_ms") or ""),
                 "qa_agent_stall_timeout_ms": str(qa_agent.get("stall_timeout_ms") or ""),
                 "qa_agent_dangerously_skip_permissions": bool(qa_agent.get("dangerously_skip_permissions", False)),
                 "review_prompt": str(raw.get("review_prompt") or ""),
@@ -361,7 +357,6 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
         "runner": {
             "command": str(form.get("command") or "").strip(),
             "turn_timeout_ms": int(str(form.get("turn_timeout_ms") or "3600000")),
-            "read_timeout_ms": int(str(form.get("read_timeout_ms") or "60000")),
             "stall_timeout_ms": int(str(form.get("stall_timeout_ms") or "300000")),
             "dangerously_skip_permissions": bool(form.get("dangerously_skip_permissions")),
         },
@@ -378,7 +373,6 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
     qa_agent_provider = str(form.get("qa_agent_provider") or "").strip()
     qa_agent_command = str(form.get("qa_agent_command") or "").strip()
     qa_agent_turn_timeout = str(form.get("qa_agent_turn_timeout_ms") or "").strip()
-    qa_agent_read_timeout = str(form.get("qa_agent_read_timeout_ms") or "").strip()
     qa_agent_stall_timeout = str(form.get("qa_agent_stall_timeout_ms") or "").strip()
     qa_agent_skip_perms = bool(form.get("qa_agent_dangerously_skip_permissions"))
     if qa_enabled or qa_dispatch or qa_success or qa_failure:
@@ -396,8 +390,6 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
             qa_agent_block["command"] = qa_agent_command
         if qa_agent_turn_timeout:
             qa_agent_block["turn_timeout_ms"] = int(qa_agent_turn_timeout)
-        if qa_agent_read_timeout:
-            qa_agent_block["read_timeout_ms"] = int(qa_agent_read_timeout)
         if qa_agent_stall_timeout:
             qa_agent_block["stall_timeout_ms"] = int(qa_agent_stall_timeout)
         if qa_agent_skip_perms:
@@ -587,10 +579,6 @@ def _render_setup_page(
         <input id="turn_timeout_ms" name="turn_timeout_ms" value="{field("turn_timeout_ms")}" required />
       </section>
       <section class="card">
-        <label for="read_timeout_ms">Read timeout (ms)</label>
-        <input id="read_timeout_ms" name="read_timeout_ms" value="{field("read_timeout_ms")}" required />
-      </section>
-      <section class="card">
         <label for="stall_timeout_ms">Stall timeout (ms)</label>
         <input id="stall_timeout_ms" name="stall_timeout_ms" value="{field("stall_timeout_ms")}" required />
       </section>
@@ -632,10 +620,6 @@ def _render_setup_page(
       <section class="card">
         <label for="qa_agent_turn_timeout_ms">QA agent turn timeout (ms, optional)</label>
         <input id="qa_agent_turn_timeout_ms" name="qa_agent_turn_timeout_ms" value="{field("qa_agent_turn_timeout_ms")}" placeholder="inherit from main" />
-      </section>
-      <section class="card">
-        <label for="qa_agent_read_timeout_ms">QA agent read timeout (ms, optional)</label>
-        <input id="qa_agent_read_timeout_ms" name="qa_agent_read_timeout_ms" value="{field("qa_agent_read_timeout_ms")}" placeholder="inherit from main" />
       </section>
       <section class="card">
         <label for="qa_agent_stall_timeout_ms">QA agent stall timeout (ms, optional)</label>
@@ -2137,7 +2121,6 @@ async def _save_workflow_from_request(request: web.Request, *, setup_mode: bool)
         "max_retry_backoff_ms": submitted.get("max_retry_backoff_ms", ""),
         "command": submitted.get("command", ""),
         "turn_timeout_ms": submitted.get("turn_timeout_ms", ""),
-        "read_timeout_ms": submitted.get("read_timeout_ms", ""),
         "stall_timeout_ms": submitted.get("stall_timeout_ms", ""),
         "dangerously_skip_permissions": submitted.get("dangerously_skip_permissions") == "1",
         "qa_review_enabled": submitted.get("qa_review_enabled") == "1",
@@ -2147,7 +2130,6 @@ async def _save_workflow_from_request(request: web.Request, *, setup_mode: bool)
         "qa_agent_provider": submitted.get("qa_agent_provider", ""),
         "qa_agent_command": submitted.get("qa_agent_command", ""),
         "qa_agent_turn_timeout_ms": submitted.get("qa_agent_turn_timeout_ms", ""),
-        "qa_agent_read_timeout_ms": submitted.get("qa_agent_read_timeout_ms", ""),
         "qa_agent_stall_timeout_ms": submitted.get("qa_agent_stall_timeout_ms", ""),
         "qa_agent_dangerously_skip_permissions": submitted.get("qa_agent_dangerously_skip_permissions") == "1",
         "after_create": submitted.get("after_create", ""),

@@ -57,7 +57,6 @@ transitions:
     #   provider: claude
     #   command: claude
     #   turn_timeout_ms: 3600000
-    #   read_timeout_ms: 60000
     #   stall_timeout_ms: 300000
     #   dangerously_skip_permissions: false
 ---

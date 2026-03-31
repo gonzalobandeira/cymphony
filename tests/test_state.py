@@ -282,7 +282,6 @@ def _build_orchestrator(tmp_path: Path) -> Orchestrator:
         runner=CodingAgentConfig(
             command="codex",
             turn_timeout_ms=1000,
-            read_timeout_ms=1000,
             stall_timeout_ms=1000,
             dangerously_skip_permissions=True,
         ),

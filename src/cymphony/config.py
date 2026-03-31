@@ -43,7 +43,6 @@ _DEFAULT_COMMANDS: dict[str, str] = {
 }
 _DEFAULT_CLAUDE_COMMAND = "claude"  # fallback for unknown providers
 _DEFAULT_TURN_TIMEOUT_MS = 3_600_000
-_DEFAULT_READ_TIMEOUT_MS = 5_000
 _DEFAULT_STALL_TIMEOUT_MS = 300_000
 _MISSING = object()
 
@@ -207,7 +206,6 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
     runner = RunnerConfig(
         command=command,
         turn_timeout_ms=_to_int(runner_raw.get("turn_timeout_ms"), _DEFAULT_TURN_TIMEOUT_MS),
-        read_timeout_ms=_to_int(runner_raw.get("read_timeout_ms"), _DEFAULT_READ_TIMEOUT_MS),
         stall_timeout_ms=_to_int(runner_raw.get("stall_timeout_ms"), _DEFAULT_STALL_TIMEOUT_MS),
         dangerously_skip_permissions=bool(
             runner_raw.get("dangerously_skip_permissions", True)
@@ -216,7 +214,6 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
     coding_agent = CodingAgentConfig(
         command=runner.command,
         turn_timeout_ms=runner.turn_timeout_ms,
-        read_timeout_ms=runner.read_timeout_ms,
         stall_timeout_ms=runner.stall_timeout_ms,
         dangerously_skip_permissions=runner.dangerously_skip_permissions,
         provider=provider,
@@ -265,7 +262,6 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
             qa_agent = CodingAgentConfig(
                 command=_to_str(qa_agent_raw.get("command"), coding_agent.command) or coding_agent.command,
                 turn_timeout_ms=_to_int(qa_agent_raw.get("turn_timeout_ms"), coding_agent.turn_timeout_ms),
-                read_timeout_ms=_to_int(qa_agent_raw.get("read_timeout_ms"), coding_agent.read_timeout_ms),
                 stall_timeout_ms=_to_int(qa_agent_raw.get("stall_timeout_ms"), coding_agent.stall_timeout_ms),
                 dangerously_skip_permissions=bool(
                     qa_agent_raw.get("dangerously_skip_permissions", coding_agent.dangerously_skip_permissions)

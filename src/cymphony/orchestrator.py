@@ -2328,7 +2328,6 @@ class Orchestrator:
                             "provider": qa_agent_cfg.provider,
                             "command": qa_agent_cfg.command,
                             "turn_timeout_ms": qa_agent_cfg.turn_timeout_ms,
-                            "read_timeout_ms": qa_agent_cfg.read_timeout_ms,
                             "stall_timeout_ms": qa_agent_cfg.stall_timeout_ms,
                             "dangerously_skip_permissions": qa_agent_cfg.dangerously_skip_permissions,
                         } if qa_agent_cfg is not None else None,
