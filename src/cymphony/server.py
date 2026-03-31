@@ -7,6 +7,7 @@ import html
 import json
 import logging
 import math
+import os
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -14,9 +15,9 @@ from typing import Any, TYPE_CHECKING
 
 from aiohttp import web
 
-from .config import build_config, validate_dispatch_config
+from .config import _DEFAULT_LINEAR_ENDPOINT, build_config, validate_dispatch_config
 from .linear import LinearClient
-from .models import Issue, WorkflowDefinition
+from .models import Issue, TrackerConfig, WorkflowDefinition
 from .workflow import LOCAL_CONFIG_DIR, LOCAL_WORKFLOW_FILENAME, load_workflow, save_workflow
 
 if TYPE_CHECKING:
@@ -2405,8 +2406,6 @@ async def _handle_settings_post(request: web.Request) -> web.Response:
 
 def _setup_linear_client(request: web.Request) -> LinearClient:
     """Build a minimal LinearClient from the api_key query param or current workflow."""
-    from .config import _DEFAULT_LINEAR_ENDPOINT  # noqa: PLC0415
-
     api_key = request.query.get("api_key", "").strip()
     if not api_key:
         # Try to pull from current workflow file
@@ -2418,12 +2417,8 @@ def _setup_linear_client(request: web.Request) -> LinearClient:
         api_key = "$LINEAR_API_KEY"
 
     # Resolve env-var references like $LINEAR_API_KEY
-    import os  # noqa: PLC0415
-
     if api_key.startswith("$"):
         api_key = os.environ.get(api_key[1:], "")
-
-    from .models import TrackerConfig  # noqa: PLC0415
 
     config = TrackerConfig(
         kind="linear",
