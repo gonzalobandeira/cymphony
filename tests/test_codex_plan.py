@@ -5,6 +5,7 @@ Covers:
   - Codex event → todos extraction (extract_plan_todos_from_codex_event)
   - Orchestrator plan sync for Codex events (create + update)
   - Plan prompt rendering for both providers
+  - Worker continuation after planning turn (Codex)
   - Regression: Claude planning still works unchanged
 """
 
@@ -21,12 +22,16 @@ from cymphony.models import (
     AgentConfig,
     AgentEvent,
     AgentEventType,
+    BlockerRef,
     CodingAgentConfig,
+    Comment,
+    ExecutionMode,
     Issue,
     LiveSession,
     PollingConfig,
     PreflightConfig,
     RunningEntry,
+    RunStatus,
     ServerConfig,
     ServiceConfig,
     TrackerConfig,
@@ -35,6 +40,7 @@ from cymphony.models import (
     HooksConfig,
 )
 from cymphony.orchestrator import Orchestrator
+from cymphony.runners import create_agent_runner
 from cymphony.runners.codex import (
     extract_plan_todos_from_codex_event,
     _parse_markdown_checklist,
@@ -286,6 +292,32 @@ class TestRenderPlanPrompt:
             prompt = render_plan_prompt(workflow, issue, provider=provider)
             assert "Test Codex issue" in prompt
             assert "Make planning provider-agnostic" in prompt
+            assert "BAP-201" in prompt
+            assert "In Progress" in prompt
+
+    def test_labels_rendered(self) -> None:
+        workflow = WorkflowDefinition(config={}, prompt_template="")
+        issue = _build_issue()
+        issue.labels = ["improvement", "backend"]
+        prompt = render_plan_prompt(workflow, issue, provider="codex")
+        assert "improvement" in prompt
+        assert "backend" in prompt
+
+    def test_blocked_by_rendered(self) -> None:
+        workflow = WorkflowDefinition(config={}, prompt_template="")
+        issue = _build_issue()
+        issue.blocked_by = [BlockerRef(id="b1", identifier="BAP-100", state="Done")]
+        prompt = render_plan_prompt(workflow, issue, provider="codex")
+        assert "BAP-100" in prompt
+        assert "Done" in prompt
+
+    def test_comments_rendered(self) -> None:
+        workflow = WorkflowDefinition(config={}, prompt_template="")
+        issue = _build_issue()
+        issue.comments = [Comment(author="Alice", body="Check the API first", created_at="2026-03-31")]
+        prompt = render_plan_prompt(workflow, issue, provider="codex")
+        assert "Alice" in prompt
+        assert "Check the API first" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -446,3 +478,125 @@ class TestClaudePlanSyncRegression:
         body = instance.create_comment.call_args[0][1]
         assert "Claude step" in body
         assert entry.session.plan_comment_id == "comment-claude"
+
+
+# ---------------------------------------------------------------------------
+# Worker continuation: planning turn → execution turns (Codex)
+# ---------------------------------------------------------------------------
+
+class TestCodexWorkerContinuation:
+    """Verify that a Codex worker runs a planning turn followed by execution turns."""
+
+    @staticmethod
+    def _patch_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Stub workspace creation and hooks."""
+        from cymphony.models import Workspace
+
+        async def fake_create_for_issue(self, identifier):
+            return Workspace(path="/tmp/fake-codex", workspace_key="fake", created_now=True)
+
+        async def fake_hook(self, workspace):
+            pass
+
+        monkeypatch.setattr(
+            "cymphony.workspace.WorkspaceManager.create_for_issue",
+            fake_create_for_issue,
+        )
+        monkeypatch.setattr(
+            "cymphony.workspace.WorkspaceManager.run_before_run_hook",
+            fake_hook,
+        )
+        monkeypatch.setattr(
+            "cymphony.workspace.WorkspaceManager.run_after_run_hook",
+            fake_hook,
+        )
+
+    @staticmethod
+    def _patch_linear_terminal(monkeypatch: pytest.MonkeyPatch, issue: Issue) -> None:
+        """After the execution turn, report the issue as terminal so the loop exits."""
+        async def fake_fetch_issue_states(self, ids):
+            return [Issue(
+                id=issue.id, identifier=issue.identifier,
+                title=issue.title, project_name=None,
+                description=issue.description, priority=None,
+                state="Done",
+                branch_name=None, url=None,
+                labels=[], blocked_by=[], comments=[],
+                created_at=None, updated_at=None,
+            )]
+
+        monkeypatch.setattr(
+            "cymphony.linear.LinearClient.fetch_issue_states_by_ids",
+            fake_fetch_issue_states,
+        )
+
+    @pytest.mark.asyncio
+    async def test_codex_worker_runs_plan_then_execution(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The worker should call run_turn twice: once for planning, once for execution."""
+        orch = _build_orchestrator(provider="codex")
+        orch._config.agent.max_turns = 3  # planning + at least one execution
+        issue = _build_issue()
+
+        prompts_received: list[str] = []
+        call_count = 0
+
+        original_run_turn = AsyncMock(return_value="session-1")
+
+        async def tracking_run_turn(**kwargs) -> str:
+            nonlocal call_count
+            call_count += 1
+            prompts_received.append(kwargs.get("prompt", ""))
+            return f"session-{call_count}"
+
+        mock_runner = AsyncMock()
+        mock_runner.run_turn = tracking_run_turn
+
+        monkeypatch.setattr("cymphony.orchestrator.create_agent_runner", lambda p, c: mock_runner)
+
+        self._patch_workspace(monkeypatch)
+        self._patch_linear_terminal(monkeypatch, issue)
+
+        entry = _build_entry()
+        try:
+            await orch._worker(issue, attempt=None, entry=entry)
+        except Exception:
+            pass
+
+        # Planning turn + at least one execution turn
+        assert call_count >= 2, f"Expected ≥2 run_turn calls, got {call_count}"
+
+        # First call should be the planning prompt (Codex-style)
+        assert "markdown checklist" in prompts_received[0].lower()
+        assert "TodoWrite" not in prompts_received[0]
+
+        # Second call should be the execution prompt (not the plan prompt)
+        assert "markdown checklist" not in prompts_received[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_codex_planning_turn_sets_status(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The entry status should transition through PLANNING during the plan turn."""
+        orch = _build_orchestrator(provider="codex")
+        orch._config.agent.max_turns = 3
+        issue = _build_issue()
+        statuses_seen: list[RunStatus] = []
+
+        entry = _build_entry()
+
+        async def tracking_run_turn(**kwargs) -> str:
+            statuses_seen.append(entry.status)
+            return "session-1"
+
+        mock_runner = AsyncMock()
+        mock_runner.run_turn = tracking_run_turn
+        monkeypatch.setattr("cymphony.orchestrator.create_agent_runner", lambda p, c: mock_runner)
+
+        self._patch_workspace(monkeypatch)
+        self._patch_linear_terminal(monkeypatch, issue)
+
+        try:
+            await orch._worker(issue, attempt=None, entry=entry)
+        except Exception:
+            pass
+
+        # First run_turn call should have PLANNING status
+        assert RunStatus.PLANNING in statuses_seen

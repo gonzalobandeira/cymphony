@@ -166,16 +166,38 @@ def render_prompt(
         ) from exc
 
 
-_PLAN_PROMPT_TEMPLATE_CLAUDE = """\
+_PLAN_ISSUE_BLOCK = """\
 You are about to work on the following Linear issue:
 
 **Title**: {{ issue.title }}
-
+**Identifier**: {{ issue.identifier }}
+{% if issue.priority %}**Priority**: {{ issue.priority }}{% endif %}
+**State**: {{ issue.state }}
 {% if issue.description %}
+
 **Description**:
 {{ issue.description }}
 {% endif %}
+{% if issue.labels %}
+**Labels**: {{ issue.labels | join(', ') }}
+{% endif %}
+{% if issue.blocked_by %}
 
+**Blocked by:**
+{% for b in issue.blocked_by %}
+- {{ b.identifier }} ({{ b.state }})
+{% endfor %}
+{% endif %}
+{% if issue.comments %}
+
+**Comments:**
+{% for c in issue.comments %}
+- **{{ c.author }}** ({{ c.created_at }}): {{ c.body }}
+{% endfor %}
+{% endif %}
+"""
+
+_PLAN_PROMPT_TEMPLATE_CLAUDE = _PLAN_ISSUE_BLOCK + """
 Your task right now is PLANNING ONLY. Do not read any files, write any code, or make any changes.
 
 Use the TodoWrite tool to create a step-by-step checklist of everything you will need to do to complete this issue. Each item should be a concrete, actionable step.
@@ -183,16 +205,7 @@ Use the TodoWrite tool to create a step-by-step checklist of everything you will
 Once you have written the plan with TodoWrite, you are done — stop immediately.
 """
 
-_PLAN_PROMPT_TEMPLATE_CODEX = """\
-You are about to work on the following Linear issue:
-
-**Title**: {{ issue.title }}
-
-{% if issue.description %}
-**Description**:
-{{ issue.description }}
-{% endif %}
-
+_PLAN_PROMPT_TEMPLATE_CODEX = _PLAN_ISSUE_BLOCK + """
 Your task right now is PLANNING ONLY. Do not read any files, write any code, or make any changes.
 
 Output your plan as a markdown checklist using this exact format:
