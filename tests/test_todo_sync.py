@@ -269,6 +269,48 @@ class TestTodoWriteSync:
         assert entry.session.plan_comment_id == "comment-existing"
 
     @pytest.mark.asyncio
+    async def test_concurrent_todowrite_events_do_not_create_duplicate_comments(self) -> None:
+        orch = _build_orchestrator()
+        entry = _build_entry()
+
+        first_event = _make_todowrite_event(
+            [{"content": "Step 1", "status": "pending"}]
+        )
+        second_event = _make_todowrite_event(
+            [{"content": "Step 1", "status": "completed"}]
+        )
+
+        create_started = asyncio.Event()
+        allow_create_to_finish = asyncio.Event()
+
+        async def _create_comment(issue_id: str, body: str) -> str:
+            assert issue_id == "issue-1"
+            assert "Step 1" in body
+            create_started.set()
+            await allow_create_to_finish.wait()
+            return "comment-abc"
+
+        mock_update = AsyncMock(return_value=True)
+
+        with patch("cymphony.orchestrator.LinearClient") as MockClient:
+            instance = MockClient.return_value
+            instance.create_comment = AsyncMock(side_effect=_create_comment)
+            instance.update_comment = mock_update
+
+            await orch._handle_agent_event("issue-1", entry, first_event)
+            await create_started.wait()
+
+            await orch._handle_agent_event("issue-1", entry, second_event)
+            allow_create_to_finish.set()
+            await asyncio.sleep(0.05)
+
+        instance.create_comment.assert_awaited_once()
+        mock_update.assert_awaited_once()
+        assert mock_update.call_args[0][0] == "comment-abc"
+        assert "- [x] Step 1" in mock_update.call_args[0][1]
+        assert entry.session.plan_comment_id == "comment-abc"
+
+    @pytest.mark.asyncio
     async def test_no_comment_without_todowrite(self) -> None:
         orch = _build_orchestrator()
         entry = _build_entry()
