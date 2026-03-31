@@ -414,6 +414,24 @@ def resolve_config_source(explicit_path: str | None) -> tuple[Path, ConfigSource
     return local_path.resolve(), ConfigSource.SETUP_REQUIRED
 
 
+def load_example_workflow(base: Path | None = None) -> WorkflowDefinition | None:
+    """Load ``WORKFLOW.example.md`` from the repo root if it exists.
+
+    Returns the parsed workflow or ``None`` if the file doesn't exist or
+    cannot be parsed.  Used by the setup screen to seed form defaults from
+    the repo maintainer's example template instead of hardcoded values.
+    """
+    root = base or Path.cwd()
+    example = root / EXAMPLE_WORKFLOW_FILENAME
+    if not example.exists():
+        return None
+    try:
+        return load_workflow(example)
+    except WorkflowError:
+        logger.debug("action=load_example_workflow_failed path=%s", example)
+        return None
+
+
 def local_config_path(base: Path | None = None) -> Path:
     """Return the canonical local config path (``.cymphony/workflow.md``)."""
     return (base or Path.cwd()) / LOCAL_CONFIG_DIR / LOCAL_WORKFLOW_FILENAME
