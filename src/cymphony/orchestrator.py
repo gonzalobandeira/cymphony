@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,9 +38,14 @@ from .models import (
 )
 from .preflight import PreflightResult, run_preflight_checks
 from .review import is_review_result_missing, parse_review_result
+from .services import LinearService, PRService, WorkspaceService
+from .state_machine import IssueStateMachine
 from .state import StateManager
-from .workflow import WorkflowWatcher, load_workflow, render_plan_prompt, render_prompt, render_review_prompt
+from .workflow import WorkflowWatcher, load_workflow
 from .workspace import WorkspaceManager
+from .workflows import ExecutionWorkflow, QAReviewWorkflow
+from .workflows.execution import ExecutionFailureOutcome, ExecutionRetryOutcome
+from .workflows.qa_review import QAReviewCompletionOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -90,10 +96,33 @@ class Orchestrator:
         self._tick_due_at_ms: float | None = None
         self._tick_rerun_requested: bool = False
         self._plan_comment_locks: dict[str, asyncio.Lock] = {}
+        self._state_machine = self._build_state_machine(config)
+        self._linear_service = LinearService(
+            config.tracker,
+            client_factory=lambda: LinearClient(config.tracker),
+        )
+        self._workspace_service = WorkspaceService(config.workspace)
+        self._execution_workflow = ExecutionWorkflow(
+            linear=self._linear_service,
+            workspaces=self._workspace_service,
+            prs=PRService(),
+        )
+        self._qa_review_workflow = QAReviewWorkflow(
+            linear=self._linear_service,
+            workspaces=self._workspace_service,
+        )
 
     # ------------------------------------------------------------------
     # Startup
     # ------------------------------------------------------------------
+
+    def _build_state_machine(self, config: ServiceConfig) -> IssueStateMachine:
+        """Create the issue state machine from current configuration."""
+        qa_state = config.transitions.qa_review.dispatch or "QA Review"
+        return IssueStateMachine(
+            execution_state="To Do",
+            qa_review_state=qa_state,
+        )
 
     async def run(self) -> None:
         """Start the orchestrator event loop (spec §16.1)."""
@@ -160,6 +189,21 @@ class Orchestrator:
             self._workflow = new_workflow
             self._state.poll_interval_ms = new_config.polling.interval_ms
             self._state.max_concurrent_agents = new_config.agent.max_concurrent_agents
+            self._state_machine = self._build_state_machine(new_config)
+            self._linear_service = LinearService(
+                new_config.tracker,
+                client_factory=lambda: LinearClient(new_config.tracker),
+            )
+            self._workspace_service = WorkspaceService(new_config.workspace)
+            self._execution_workflow = ExecutionWorkflow(
+                linear=self._linear_service,
+                workspaces=self._workspace_service,
+                prs=PRService(),
+            )
+            self._qa_review_workflow = QAReviewWorkflow(
+                linear=self._linear_service,
+                workspaces=self._workspace_service,
+            )
             logger.info("action=workflow_config_reapplied")
         except Exception as exc:
             self._record_problem(
@@ -199,9 +243,8 @@ class Orchestrator:
             logger.info("action=validate_transitions result=skip reason=no_targets_configured")
             return True
 
-        client = LinearClient(self._config.tracker)
         try:
-            team_ids = await client.fetch_project_team_ids()
+            team_ids = await self._linear_service.fetch_project_team_ids()
         except Exception as exc:
             msg = f"Failed to fetch project teams for transition validation: {exc}"
             if fail_hard:
@@ -219,7 +262,7 @@ class Orchestrator:
         all_valid = True
         for team_id in team_ids:
             try:
-                state_names = await client.fetch_team_workflow_state_names(team_id)
+                state_names = await self._linear_service.fetch_team_workflow_state_names(team_id)
             except Exception as exc:
                 msg = f"Failed to fetch workflow states for team {team_id}: {exc}"
                 if fail_hard:
@@ -246,7 +289,7 @@ class Orchestrator:
             for field, target in targets.items():
                 if target.lower() in available_lower:
                     # Resolve the actual state ID and cache it
-                    state_id = await client.fetch_team_workflow_state_id(team_id, target)
+                    state_id = await self._linear_service.fetch_team_workflow_state_id(team_id, target)
                     if state_id:
                         cache_key = (team_id, target.lower())
                         self._state_id_cache[cache_key] = state_id
@@ -266,8 +309,7 @@ class Orchestrator:
     async def _startup_terminal_cleanup(self) -> None:
         """Remove workspaces for terminal-state issues on startup (spec §8.6)."""
         try:
-            client = LinearClient(self._config.tracker)
-            terminal_issues = await client.fetch_issues_by_states(
+            terminal_issues = await self._linear_service.fetch_issues_by_states(
                 self._config.tracker.terminal_states
             )
             wm = WorkspaceManager(self._config)
@@ -337,8 +379,7 @@ class Orchestrator:
         )
         current_states: dict[str, str] | None = None
         try:
-            client = LinearClient(self._config.tracker)
-            issues = await client.fetch_issue_states_by_ids(all_issue_ids)
+            issues = await self._linear_service.fetch_issue_states_by_ids(all_issue_ids)
             current_states = {i.id: i.state for i in issues}
         except Exception as exc:
             logger.warning(
@@ -517,8 +558,7 @@ class Orchestrator:
 
             # 3. Fetch candidate issues
             try:
-                client = LinearClient(self._config.tracker)
-                issues = await client.fetch_candidate_issues()
+                issues = await self._linear_service.fetch_candidate_issues()
             except Exception as exc:
                 self._state.last_candidates = []
                 self._record_problem(
@@ -902,8 +942,7 @@ class Orchestrator:
             return
 
         try:
-            client = LinearClient(self._config.tracker)
-            refreshed = await client.fetch_issue_states_by_ids(running_ids)
+            refreshed = await self._linear_service.fetch_issue_states_by_ids(running_ids)
         except Exception as exc:
             logger.debug(
                 f"action=reconcile_state_refresh_failed error={exc} "
@@ -971,32 +1010,48 @@ class Orchestrator:
         self._state.codex_totals.seconds_running += elapsed
 
         if cleanup_workspace:
-            wm = WorkspaceManager(self._config)
             try:
-                await wm.remove_workspace(entry.identifier)
+                await self._cleanup_entry_workspace(entry)
             except Exception as exc:
                 logger.warning(
                     f"action=workspace_cleanup_failed "
                     f"identifier={entry.identifier} error={exc}"
                 )
 
-    def _render_todo_checklist(self, todos: list[dict]) -> str:
-        """Render a TodoWrite todos array as a markdown checklist."""
-        lines = ["**Agent Plan**\n"]
-        for todo in todos:
-            content = todo.get("content", "")
-            status = todo.get("status", "pending")
-            if status == "completed":
-                lines.append(f"- [x] {content}")
-            elif status == "in_progress":
-                lines.append(f"- [ ] 🔄 {content} *(in progress)*")
-            else:
-                lines.append(f"- [ ] {content}")
-        return "\n".join(lines)
+    async def _cleanup_entry_workspace(self, entry: RunningEntry) -> None:
+        """Clean up a running entry workspace using recorded workspace metadata."""
+        if entry.workspace_root and entry.workspace_key:
+            if (
+                entry.mode == ExecutionMode.BUILD
+                and entry.workspace_root == self._config.workspace.root
+            ):
+                wm = WorkspaceManager(self._config)
+                await wm.remove_workspace(entry.workspace_key)
+                return
+
+            qa_manager = self._qa_review_workflow.create_workspace_manager(
+                self._config,
+                entry.issue,
+            )
+            await qa_manager.remove_workspace(entry.workspace_key)
+            return
+
+        if entry.workspace_path:
+            shutil.rmtree(entry.workspace_path, ignore_errors=True)
+            logger.info(
+                "action=workspace_removed "
+                f"identifier={entry.identifier} path={entry.workspace_path}"
+            )
+
+    async def _cleanup_review_workspace(self, entry: RunningEntry) -> None:
+        """Clean up the ephemeral QA workspace for a review run."""
+        if entry.mode != ExecutionMode.REVIEW:
+            return
+        await self._cleanup_entry_workspace(entry)
 
     def _sync_todo_comment(self, issue_id: str, entry: RunningEntry, todos: list[dict]) -> None:
         """Fire-and-forget: sync TodoWrite todos to a Linear comment; never raises."""
-        body = self._render_todo_checklist(todos)
+        body = self._execution_workflow.render_plan_comment(todos)
         entry.session.latest_plan = body
 
         async def _do() -> None:
@@ -1004,7 +1059,7 @@ class Orchestrator:
             try:
                 async with lock:
                     comment_id = entry.session.plan_comment_id
-                    client = LinearClient(self._config.tracker)
+                    client = self._linear_service
                     if comment_id is None:
                         new_id = await client.create_comment(issue_id, body)
                         entry.session.plan_comment_id = new_id
@@ -1023,40 +1078,6 @@ class Orchestrator:
 
         asyncio.create_task(_do())
 
-    def _render_review_result_comment(self, result: ReviewResult) -> str:
-        """Render a QA review verdict into a Linear comment body."""
-        if result.decision == ReviewDecision.PASS:
-            heading = "QA review passed"
-        elif result.decision == ReviewDecision.CHANGES_REQUESTED:
-            heading = "QA review requested changes"
-        else:
-            heading = "QA review result could not be applied"
-
-        lines = [f"**{heading}**"]
-        if result.decision is not None:
-            lines.append(f"Decision: `{result.decision.value}`")
-
-        summary = (result.summary or "").strip()
-        error = (result.error or "").strip()
-        raw_output = (result.raw_output or "").strip()
-
-        if summary:
-            lines.extend(["", summary])
-
-        if error:
-            lines.extend(
-                [
-                    "",
-                    "Cymphony did not apply a QA transition because the review decision was invalid.",
-                    f"Parse error: {error}",
-                ]
-            )
-
-        if raw_output and result.decision is None:
-            lines.extend(["", "Raw review output:", "```json", raw_output, "```"])
-
-        return "\n".join(lines)
-
     async def _post_review_result_comment(
         self,
         issue_id: str,
@@ -1071,35 +1092,22 @@ class Orchestrator:
         ``_state.qa_review_comment_ids`` and cleared when the issue transitions
         out of the QA review lane.
         """
-        body = self._render_review_result_comment(result)
         existing_comment_id = self._state.qa_review_comment_ids.get(issue_id)
         try:
-            client = LinearClient(self._config.tracker)
-            if existing_comment_id:
-                success = await client.update_comment(existing_comment_id, body)
-                if success:
-                    issue_log(
-                        logger,
-                        logging.INFO,
-                        "qa_review_comment_updated",
-                        issue_id,
-                        identifier,
-                        comment_id=existing_comment_id,
-                    )
-                else:
-                    # Update failed (comment deleted?); fall through to create.
-                    existing_comment_id = None
-            if not existing_comment_id:
-                comment_id = await client.create_comment(issue_id, body)
-                self._state.qa_review_comment_ids[issue_id] = comment_id
-                issue_log(
-                    logger,
-                    logging.INFO,
-                    "qa_review_comment_created",
-                    issue_id,
-                    identifier,
-                    comment_id=comment_id,
-                )
+            comment_id, created = await self._qa_review_workflow.publish_review_result_comment(
+                issue_id,
+                result,
+                existing_comment_id=existing_comment_id,
+            )
+            self._state.qa_review_comment_ids[issue_id] = comment_id
+            issue_log(
+                logger,
+                logging.INFO,
+                "qa_review_comment_created" if created else "qa_review_comment_updated",
+                issue_id,
+                identifier,
+                comment_id=comment_id,
+            )
         except Exception as exc:
             self._record_problem(
                 kind="qa_review_comment_failed",
@@ -1125,7 +1133,7 @@ class Orchestrator:
         trigger: str = "unknown",
         issue_identifier: str | None = None,
         from_state: str | None = None,
-    ) -> bool:
+        ) -> bool:
         """Move an issue to the named workflow state. Returns True on success."""
         identifier = issue_identifier or self._resolve_identifier(issue_id)
         current_state = (
@@ -1133,8 +1141,11 @@ class Orchestrator:
             else self._resolve_current_state(issue_id)
         )
         try:
-            client = LinearClient(self._config.tracker)
-            team_id = await client.fetch_issue_team_id(issue_id)
+            team_id, state_id = await self._linear_service.resolve_issue_state_id(
+                issue_id,
+                state_name,
+                state_id_cache=self._state_id_cache,
+            )
             if not team_id:
                 logger.warning(
                     f"action=state_transition_skipped issue_id={issue_id} "
@@ -1145,10 +1156,6 @@ class Orchestrator:
                 )
                 return False
 
-            cache_key = (team_id, state_name.lower())
-            state_id = self._state_id_cache.get(cache_key)
-            if not state_id:
-                state_id = await client.fetch_team_workflow_state_id(team_id, state_name)
             if not state_id:
                 logger.warning(
                     f"action=state_transition_skipped issue_id={issue_id} "
@@ -1159,9 +1166,7 @@ class Orchestrator:
                 )
                 return False
 
-            if cache_key not in self._state_id_cache:
-                self._state_id_cache[cache_key] = state_id
-            await client.set_issue_state(issue_id, state_id)
+            await self._linear_service.client.set_issue_state(issue_id, state_id)
             logger.info(
                 f"action=issue_state_set issue_id={issue_id} state={state_name!r} "
                 f"team_id={team_id}"
@@ -1331,11 +1336,21 @@ class Orchestrator:
 
     def _resolve_execution_mode(self, issue: Issue) -> ExecutionMode:
         """Determine whether an issue should run in build or review mode."""
-        qa = self._config.transitions.qa_review
-        if qa.enabled and qa.dispatch:
-            if issue.state.lower() == qa.dispatch.lower():
-                return ExecutionMode.REVIEW
+        if not self._config.transitions.qa_review.enabled:
+            return ExecutionMode.BUILD
+        route = self._state_machine.route(issue)
+        if route and route.workflow == "qa_review":
+            return ExecutionMode.REVIEW
         return ExecutionMode.BUILD
+
+    def _workflow_for_mode(
+        self,
+        mode: ExecutionMode,
+    ) -> ExecutionWorkflow | QAReviewWorkflow:
+        """Return the workflow boundary object for a runtime mode."""
+        if mode == ExecutionMode.REVIEW:
+            return self._qa_review_workflow
+        return self._execution_workflow
 
     async def _dispatch_issue(self, issue: Issue, attempt: int | None) -> None:
         """Claim and spawn worker for issue (spec §16.4)."""
@@ -1395,7 +1410,8 @@ class Orchestrator:
         # Review-mode issues are already in the QA dispatch state; skip the
         # normal dispatch transition to avoid fighting with the review lane.
         if mode == ExecutionMode.BUILD:
-            target = self._config.transitions.resolve("dispatch")
+            route = self._state_machine.route(issue)
+            target = route.target_state if route and route.workflow == "execution" else self._config.transitions.resolve("dispatch")
             if target:
                 self._transition_issue_state_background(
                     issue.id,
@@ -1416,30 +1432,30 @@ class Orchestrator:
         entry: RunningEntry,
     ) -> None:
         """Run one agent session for an issue (workspace + hooks + turns)."""
-        wm = WorkspaceManager(self._config)
-        is_review = entry.mode == ExecutionMode.REVIEW
-        qa_agent_cfg = self._config.transitions.qa_review.agent
-        if is_review and qa_agent_cfg is not None:
-            agent = create_agent_runner(qa_agent_cfg.provider, qa_agent_cfg)
-        else:
-            agent = create_agent_runner(
-                self._config.agent.provider, self._config.coding_agent
-            )
+        workflow_runtime = self._workflow_for_mode(entry.mode)
+        provider, runner_config = workflow_runtime.resolve_agent_runner(self._config)
+        agent = create_agent_runner(provider, runner_config)
 
         # Prepare workspace
         entry.status = RunStatus.PREPARING_WORKSPACE
         try:
-            workspace = await wm.create_for_issue(issue.identifier)
+            active_wm, workspace = await workflow_runtime.prepare_workspace_run(
+                self._config,
+                issue,
+            )
         except Exception as exc:
             entry.status = RunStatus.FAILED
             raise AgentError("workspace_error", f"Workspace creation failed: {exc}") from exc
+        entry.workspace_path = workspace.path
+        entry.workspace_root = getattr(active_wm, "_root", None)
+        entry.workspace_key = workspace.workspace_key
 
         # before_run hook
         try:
-            await wm.run_before_run_hook(workspace)
+            await workflow_runtime.prepare_run(active_wm, workspace)
         except Exception as exc:
             entry.status = RunStatus.FAILED
-            await wm.run_after_run_hook(workspace)
+            await active_wm.run_after_run_hook(workspace)
             raise AgentError("before_run_hook_error", str(exc)) from exc
 
         # Workspace-level preflight checks (git repo state)
@@ -1476,10 +1492,12 @@ class Orchestrator:
         try:
             # Planning turn (build mode only): agent produces a TodoWrite checklist.
             # Review mode skips planning — the review prompt is self-contained.
-            if not is_review:
+            if workflow_runtime.requires_planning():
                 entry.session.plan_comment_id = None
                 entry.status = RunStatus.PLANNING
-                plan_prompt = render_plan_prompt(self._workflow, issue)
+                plan_prompt = self._execution_workflow.build_plan_prompt(
+                    self._workflow, issue
+                )
                 issue_log(
                     logger, logging.INFO,
                     "planning_turn_start",
@@ -1509,18 +1527,17 @@ class Orchestrator:
                 # Render full prompt on the first execution turn; continuation turns
                 # send brief guidance so the original task description is not re-injected (spec §7.1).
                 entry.status = RunStatus.BUILDING_PROMPT
-                if first_execution_turn:
-                    try:
-                        if is_review:
-                            prompt = render_review_prompt(self._workflow, issue)
-                        else:
-                            prompt = render_prompt(self._workflow, issue, attempt)
-                    except WorkflowError as exc:
-                        entry.status = RunStatus.FAILED
-                        raise AgentError("prompt_error", str(exc)) from exc
-                    first_execution_turn = False
-                else:
-                    prompt = "Continue working on the task."
+                try:
+                    prompt = workflow_runtime.build_turn_prompt(
+                        self._workflow,
+                        issue,
+                        attempt,
+                        first_turn=first_execution_turn,
+                    )
+                except WorkflowError as exc:
+                    entry.status = RunStatus.FAILED
+                    raise AgentError("prompt_error", str(exc)) from exc
+                first_execution_turn = False
 
                 entry.session.turn_count += 1
                 issue_log(
@@ -1547,31 +1564,43 @@ class Orchestrator:
 
                 # Check current issue state after turn
                 try:
-                    client = LinearClient(self._config.tracker)
-                    refreshed = await client.fetch_issue_states_by_ids([issue.id])
-                    if refreshed:
-                        issue = refreshed[0]
-                        entry.issue = issue
+                    refreshed_issue = await workflow_runtime.refresh_issue(issue.id)
+                    if refreshed_issue is not None:
+                        issue = refreshed_issue
+                    entry.issue = issue
                 except Exception as exc:
                     raise AgentError("issue_state_refresh_error", str(exc)) from exc
 
-                active_lower = [s.lower() for s in self._config.tracker.active_states]
-                if issue.state.lower() not in active_lower:
-                    issue_log(
-                        logger, logging.INFO,
-                        "turn_loop_exit_inactive",
-                        issue.id, issue.identifier,
-                        state=issue.state,
-                    )
-                    break
-
-                if turn_number >= max_turns:
-                    issue_log(
-                        logger, logging.INFO,
-                        "turn_loop_exit_max_turns",
-                        issue.id, issue.identifier,
-                        max_turns=max_turns,
-                    )
+                should_continue, stop_reason = workflow_runtime.should_continue(
+                    issue,
+                    active_states=self._config.tracker.active_states,
+                    turn_number=turn_number,
+                    max_turns=max_turns,
+                    workspace_path=workspace.path,
+                    last_message=entry.session.last_message,
+                )
+                if not should_continue:
+                    if stop_reason == "inactive_state":
+                        issue_log(
+                            logger, logging.INFO,
+                            "turn_loop_exit_inactive",
+                            issue.id, issue.identifier,
+                            state=issue.state,
+                        )
+                    elif stop_reason == "max_turns":
+                        issue_log(
+                            logger, logging.INFO,
+                            "turn_loop_exit_max_turns",
+                            issue.id, issue.identifier,
+                            max_turns=max_turns,
+                        )
+                    elif stop_reason in {"task_complete", "review_complete", "review_result_ready"}:
+                        issue_log(
+                            logger, logging.INFO,
+                            "turn_loop_exit_complete",
+                            issue.id, issue.identifier,
+                            reason=stop_reason,
+                        )
                     break
 
                 turn_number += 1
@@ -1580,13 +1609,12 @@ class Orchestrator:
 
             # Capture the review result before after_run hooks run. Hooks may
             # clean workspace files as part of post-processing.
-            if is_review:
-                entry.review_result = parse_review_result(workspace.path)
+            entry.review_result = workflow_runtime.capture_run_result(workspace.path)
 
         finally:
             # Run after_run hook as an independent task so that a concurrent
             # reconciler cancel() on this worker task cannot interrupt it.
-            hook_task = asyncio.create_task(wm.run_after_run_hook(workspace))
+            hook_task = asyncio.create_task(active_wm.run_after_run_hook(workspace))
             try:
                 await asyncio.shield(hook_task)
             except asyncio.CancelledError:
@@ -1711,196 +1739,401 @@ class Orchestrator:
         # Resolve transitions based on execution mode: review-mode workers
         # use the qa_review sub-config, build-mode workers use top-level transitions.
         is_review = entry.mode == ExecutionMode.REVIEW
-        qa = self._config.transitions.qa_review
 
         if exc is None:
-            # Normal exit → apply configured success transition if still in
-            # an active state, then schedule continuation retry (spec §8.4)
-            entry.status = RunStatus.SUCCEEDED
-            self._state.completed.add(issue_id)
-            issue_log(
-                logger, logging.INFO,
-                "worker_exited_normal",
-                issue_id, identifier,
-                mode=entry.mode.value,
-            )
-            review_result: ReviewResult | None = None
-            if is_review:
-                review_result = self._resolve_review_result(issue_id, identifier, entry)
-                entry.review_result = review_result
-                await self._post_review_result_comment(issue_id, identifier, review_result)
-                if review_result.decision is None:
-                    await self._handle_review_retry_or_hold(
-                        issue_id,
-                        identifier,
-                        entry,
-                        attempt=_next_attempt(entry.retry_attempt),
-                        error=review_result.error or "qa review result could not be parsed",
-                    )
-                    return
-
-                issue_log(
-                    logger, logging.INFO,
-                    "qa_review_decision",
-                    issue_id, identifier,
-                    decision=review_result.decision.value,
-                    summary=review_result.summary,
-                )
-                if review_result.decision == ReviewDecision.PASS:
-                    target = qa.success if qa.enabled else None
-                else:
-                    target = qa.failure if qa.enabled else None
-            else:
-                if qa.enabled:
-                    review_ready, review_error = await self._validate_review_handoff(identifier)
-                    if not review_ready:
-                        entry.status = RunStatus.FAILED
-                        self._state.completed.discard(issue_id)
-                        self._record_problem(
-                            kind="qa_review_not_ready",
-                            summary="Build finished without a reviewable GitHub PR",
-                            detail=review_error,
-                            issue_id=issue_id,
-                            issue_identifier=identifier,
-                        )
-                        issue_log(
-                            logger, logging.WARNING,
-                            "qa_review_handoff_blocked",
-                            issue_id, identifier,
-                            error=review_error,
-                        )
-                        failure_target = self._config.transitions.resolve("failure")
-                        if failure_target:
-                            active_lower = [s.lower() for s in self._config.tracker.active_states]
-                            if entry.issue.state.lower() in active_lower:
-                                await self._transition_issue_state(
-                                    issue_id,
-                                    failure_target,
-                                    trigger="failure",
-                                    issue_identifier=identifier,
-                                    from_state=entry.issue.state,
-                                )
-                        await self._schedule_retry(
-                            issue_id,
-                            identifier,
-                            attempt=_next_attempt(entry.retry_attempt),
-                            error=review_error,
-                            entry=entry,
-                        )
-                        return
-                target = qa.dispatch if qa.enabled else self._config.transitions.resolve("success")
-            transition_succeeded = False
-            if target:
-                active_lower = [s.lower() for s in self._config.tracker.active_states]
-                if entry.issue.state.lower() in active_lower:
-                    transition_succeeded = await self._transition_issue_state(
-                        issue_id,
-                        target,
-                        trigger="success",
-                        issue_identifier=identifier,
-                        from_state=entry.issue.state,
-                    )
-            if is_review and review_result and transition_succeeded:
-                if review_result.decision == ReviewDecision.PASS:
-                    self._clear_qa_review_bounces(issue_id)
-                elif (
-                    review_result.decision == ReviewDecision.CHANGES_REQUESTED
-                    and target
-                    and target.lower() != qa.dispatch.lower()
-                ):
-                    bounce_count = self._increment_qa_review_bounces(issue_id)
-                    entry.qa_review_bounce_count = bounce_count
-                    self._state.qa_review_comment_ids.pop(issue_id, None)
-                    self._persist_state()
-            if is_review and review_result and review_result.decision == ReviewDecision.CHANGES_REQUESTED:
-                issue_log(
-                    logger, logging.WARNING,
-                    "qa_review_bounced",
-                    issue_id, identifier,
-                    bounce_count=entry.qa_review_bounce_count,
-                    max_bounces=qa.max_bounces,
-                )
-                if entry.qa_review_bounce_count > qa.max_bounces:
-                    self._record_problem(
-                        kind="qa_review_bounce_limit_reached",
-                        summary="QA review re-entry limit reached",
-                        detail=(
-                            f"Reached {entry.qa_review_bounce_count} QA review bounces; "
-                            "holding issue for manual intervention."
-                        ),
-                        issue_id=issue_id,
-                        issue_identifier=identifier,
-                    )
-                    self._hold_issue_for_manual_intervention(
-                        issue_id,
-                        identifier,
-                        reason="qa_review_bounce_limit",
-                    )
-                    return
-            await self._schedule_retry(
-                issue_id, identifier,
-                attempt=1,
-                delay_ms=_CONTINUATION_RETRY_DELAY_MS,
-                error=None,
-                entry=entry,
-            )
+            await self._handle_worker_success(issue_id, identifier, entry)
         else:
-            # Abnormal exit ��� set status based on error type, then retry
-            if isinstance(exc, AgentError) and exc.code == "stall_timeout":
-                entry.status = RunStatus.STALLED
-            elif isinstance(exc, AgentError) and exc.code == "turn_timeout":
-                entry.status = RunStatus.TIMED_OUT
-            else:
-                entry.status = RunStatus.FAILED
-            next_attempt = _next_attempt(entry.retry_attempt)
-            error_str = str(exc)[:200]
-            issue_log(
-                logger, logging.WARNING,
-                "worker_exited_abnormal",
-                issue_id, identifier,
-                attempt=next_attempt,
-                error=error_str,
-                run_status=entry.status.value,
-                mode=entry.mode.value,
+            await self._handle_worker_failure(issue_id, identifier, entry, exc)
+
+    async def _handle_worker_success(
+        self,
+        issue_id: str,
+        identifier: str,
+        entry: RunningEntry,
+    ) -> None:
+        """Handle normal worker completion."""
+        entry.status = RunStatus.SUCCEEDED
+        self._state.completed.add(issue_id)
+        issue_log(
+            logger, logging.INFO,
+            "worker_exited_normal",
+            issue_id, identifier,
+            mode=entry.mode.value,
+        )
+
+        if entry.mode == ExecutionMode.REVIEW:
+            await self._handle_review_worker_success(issue_id, identifier, entry)
+            return
+
+        await self._handle_execution_worker_success(issue_id, identifier, entry)
+
+    async def _handle_execution_worker_success(
+        self,
+        issue_id: str,
+        identifier: str,
+        entry: RunningEntry,
+    ) -> None:
+        """Handle successful completion of an execution worker."""
+        qa = self._config.transitions.qa_review
+        if qa.enabled:
+            review_ready, review_error = await self._validate_review_handoff(
+                identifier,
+                workspace_path=entry.workspace_path,
             )
-            error_code = getattr(exc, "code", "unknown")
-            kind = "worker_failed"
-            if error_code == "before_run_hook_error":
-                kind = "hook_failed"
-            elif error_code == "workspace_error":
-                kind = "workspace_error"
-            self._record_problem(
-                kind=kind,
-                severity="error",
-                summary=f"Worker failed for {identifier}",
-                detail=error_str,
-                issue_id=issue_id,
-                issue_identifier=identifier,
-            )
-            if is_review:
-                await self._handle_review_retry_or_hold(
+            if not review_ready:
+                await self._handle_execution_review_handoff_failure(
                     issue_id,
                     identifier,
                     entry,
-                    attempt=next_attempt,
-                    error=error_str,
+                    review_error,
                 )
                 return
-            target = self._config.transitions.resolve("failure")
-            if target:
-                self._transition_issue_state_background(
-                    issue_id,
-                    target,
-                    trigger="failure",
-                    issue_identifier=identifier,
-                    from_state=entry.issue.state,
-                )
-            await self._schedule_retry(
-                issue_id, identifier,
-                attempt=next_attempt,
-                error=error_str,
+
+        execution_outcome = self._execution_workflow.resolve_success_outcome(self._config)
+        await self._apply_worker_success_transition(
+            issue_id,
+            identifier,
+            entry,
+            execution_outcome.target,
+        )
+        if execution_outcome.schedule_continuation_retry:
+            retry_outcome = self._execution_workflow.resolve_continuation_retry_outcome(
+                delay_ms=_CONTINUATION_RETRY_DELAY_MS,
+            )
+            await self._schedule_retry_from_outcome(
+                issue_id,
+                identifier,
+                retry_outcome,
                 entry=entry,
             )
+
+    async def _handle_execution_review_handoff_failure(
+        self,
+        issue_id: str,
+        identifier: str,
+        entry: RunningEntry,
+        review_error: str,
+    ) -> None:
+        """Handle an execution run that did not produce a reviewable handoff."""
+        entry.status = RunStatus.FAILED
+        self._state.completed.discard(issue_id)
+        self._record_problem(
+            kind="qa_review_not_ready",
+            summary="Build finished without a reviewable GitHub PR",
+            detail=review_error,
+            issue_id=issue_id,
+            issue_identifier=identifier,
+        )
+        issue_log(
+            logger, logging.WARNING,
+            "qa_review_handoff_blocked",
+            issue_id, identifier,
+            error=review_error,
+        )
+        self._state.completed.discard(issue_id)
+        failure_outcome = self._execution_workflow.resolve_failure_outcome(
+            self._config,
+            next_attempt=_next_attempt(entry.retry_attempt),
+            error=review_error,
+        )
+        await self._apply_execution_failure_outcome(
+            issue_id,
+            identifier,
+            entry,
+            failure_outcome,
+        )
+        await self._schedule_retry_from_outcome(
+            issue_id,
+            identifier,
+            failure_outcome.retry,
+            entry=entry,
+        )
+
+    async def _handle_review_worker_success(
+        self,
+        issue_id: str,
+        identifier: str,
+        entry: RunningEntry,
+    ) -> None:
+        """Handle successful completion of a QA review worker."""
+        review_result = self._resolve_review_result(issue_id, identifier, entry)
+        entry.review_result = review_result
+        await self._post_review_result_comment(issue_id, identifier, review_result)
+        if review_result.decision is None:
+            await self._cleanup_review_workspace(entry)
+            await self._handle_review_retry_or_hold(
+                issue_id,
+                identifier,
+                entry,
+                attempt=_next_attempt(entry.retry_attempt),
+                error=review_result.error or "qa review result could not be parsed",
+            )
+            return
+
+        issue_log(
+            logger, logging.INFO,
+            "qa_review_decision",
+            issue_id, identifier,
+            decision=review_result.decision.value,
+            summary=review_result.summary,
+        )
+
+        initial_outcome = self._qa_review_workflow.resolve_completion_outcome(
+            self._config,
+            review_result,
+            transition_succeeded=False,
+            current_bounce_count=entry.qa_review_bounce_count,
+        )
+        transition_succeeded = await self._apply_worker_success_transition(
+            issue_id,
+            identifier,
+            entry,
+            initial_outcome.target,
+        )
+        current_bounce_count = self._state.qa_review_bounces.get(
+            issue_id,
+            entry.qa_review_bounce_count,
+        )
+        completion_outcome = self._qa_review_workflow.resolve_completion_outcome(
+            self._config,
+            review_result,
+            transition_succeeded=transition_succeeded,
+            current_bounce_count=current_bounce_count,
+        )
+        await self._apply_review_completion_outcome(
+            issue_id,
+            identifier,
+            entry,
+            review_result,
+            completion_outcome,
+        )
+
+    async def _apply_review_completion_outcome(
+        self,
+        issue_id: str,
+        identifier: str,
+        entry: RunningEntry,
+        review_result: ReviewResult,
+        completion_outcome: QAReviewCompletionOutcome,
+    ) -> None:
+        """Apply QA-review completion bookkeeping after transition resolution."""
+        qa = self._config.transitions.qa_review
+        if completion_outcome.clear_bounces:
+            self._clear_qa_review_bounces(issue_id)
+        elif completion_outcome.increment_bounce:
+            bounce_count = self._increment_qa_review_bounces(issue_id)
+            entry.qa_review_bounce_count = bounce_count
+            self._state.qa_review_comment_ids.pop(issue_id, None)
+            self._persist_state()
+
+        if review_result.decision == ReviewDecision.CHANGES_REQUESTED:
+            issue_log(
+                logger, logging.WARNING,
+                "qa_review_bounced",
+                issue_id, identifier,
+                bounce_count=entry.qa_review_bounce_count,
+                max_bounces=qa.max_bounces,
+            )
+
+        if completion_outcome.hold_for_manual_intervention:
+            hold_outcome = self._qa_review_workflow.resolve_bounce_limit_hold_outcome(
+                bounce_count=entry.qa_review_bounce_count,
+            )
+            await self._apply_review_manual_hold(
+                issue_id,
+                identifier,
+                entry,
+                problem_kind="qa_review_bounce_limit_reached",
+                summary=hold_outcome.summary,
+                detail=hold_outcome.detail,
+                reason=hold_outcome.reason,
+                cleanup_workspace=completion_outcome.should_cleanup_workspace,
+            )
+            return
+
+        if completion_outcome.should_cleanup_workspace:
+            await self._cleanup_review_workspace(entry)
+
+    async def _apply_worker_success_transition(
+        self,
+        issue_id: str,
+        identifier: str,
+        entry: RunningEntry,
+        target: str | None,
+    ) -> bool:
+        """Apply a success transition if a target exists and the issue is active."""
+        if not target or not self._issue_is_in_active_state(entry.issue):
+            return False
+        return await self._transition_issue_state(
+            issue_id,
+            target,
+            trigger="success",
+            issue_identifier=identifier,
+            from_state=entry.issue.state,
+        )
+
+    async def _handle_worker_failure(
+        self,
+        issue_id: str,
+        identifier: str,
+        entry: RunningEntry,
+        exc: BaseException,
+    ) -> None:
+        """Handle abnormal worker completion."""
+        if isinstance(exc, AgentError) and exc.code == "stall_timeout":
+            entry.status = RunStatus.STALLED
+        elif isinstance(exc, AgentError) and exc.code == "turn_timeout":
+            entry.status = RunStatus.TIMED_OUT
+        else:
+            entry.status = RunStatus.FAILED
+
+        next_attempt = _next_attempt(entry.retry_attempt)
+        error_str = str(exc)[:200]
+        issue_log(
+            logger, logging.WARNING,
+            "worker_exited_abnormal",
+            issue_id, identifier,
+            attempt=next_attempt,
+            error=error_str,
+            run_status=entry.status.value,
+            mode=entry.mode.value,
+        )
+        error_code = getattr(exc, "code", "unknown")
+        kind = "worker_failed"
+        if error_code == "before_run_hook_error":
+            kind = "hook_failed"
+        elif error_code == "workspace_error":
+            kind = "workspace_error"
+        self._record_problem(
+            kind=kind,
+            severity="error",
+            summary=f"Worker failed for {identifier}",
+            detail=error_str,
+            issue_id=issue_id,
+            issue_identifier=identifier,
+        )
+
+        if entry.mode == ExecutionMode.REVIEW:
+            await self._cleanup_review_workspace(entry)
+            await self._handle_review_retry_or_hold(
+                issue_id,
+                identifier,
+                entry,
+                attempt=next_attempt,
+                error=error_str,
+            )
+            return
+
+        failure_outcome = self._execution_workflow.resolve_failure_outcome(
+            self._config,
+            next_attempt=next_attempt,
+            error=error_str,
+        )
+        await self._apply_execution_failure_outcome(
+            issue_id,
+            identifier,
+            entry,
+            failure_outcome,
+            background=True,
+        )
+        await self._schedule_retry_from_outcome(
+            issue_id,
+            identifier,
+            failure_outcome.retry,
+            entry=entry,
+        )
+
+    async def _apply_execution_failure_outcome(
+        self,
+        issue_id: str,
+        identifier: str,
+        entry: RunningEntry,
+        failure_outcome: ExecutionFailureOutcome,
+        *,
+        background: bool = False,
+    ) -> None:
+        """Apply the transition side of an execution failure outcome."""
+        target = failure_outcome.transition_target
+        if not target:
+            return
+        if background:
+            self._transition_issue_state_background(
+                issue_id,
+                target,
+                trigger="failure",
+                issue_identifier=identifier,
+                from_state=entry.issue.state,
+            )
+            return
+        if self._issue_is_in_active_state(entry.issue):
+            await self._transition_issue_state(
+                issue_id,
+                target,
+                trigger="failure",
+                issue_identifier=identifier,
+                from_state=entry.issue.state,
+            )
+
+    async def _schedule_retry_from_outcome(
+        self,
+        issue_id: str,
+        identifier: str,
+        retry_outcome: ExecutionRetryOutcome,
+        *,
+        entry: RunningEntry | None = None,
+    ) -> None:
+        """Schedule a retry using a workflow-owned retry outcome."""
+        await self._schedule_retry(
+            issue_id,
+            identifier,
+            attempt=retry_outcome.attempt,
+            delay_ms=retry_outcome.delay_ms,
+            error=retry_outcome.error,
+            entry=entry,
+        )
+
+    async def _apply_review_manual_hold(
+        self,
+        issue_id: str,
+        identifier: str,
+        entry: RunningEntry,
+        *,
+        problem_kind: str,
+        summary: str,
+        detail: str,
+        reason: str,
+        cleanup_workspace: bool,
+    ) -> None:
+        """Record and apply a QA-review manual intervention hold."""
+        self._record_problem(
+            kind=problem_kind,
+            summary=summary,
+            detail=detail,
+            issue_id=issue_id,
+            issue_identifier=identifier,
+        )
+        self._hold_issue_for_manual_intervention(
+            issue_id,
+            identifier,
+            reason=reason,
+        )
+        if cleanup_workspace:
+            await self._cleanup_review_workspace(entry)
+
+    def _issue_is_in_active_state(self, issue: Issue) -> bool:
+        """Return whether an issue is currently in an active workflow state."""
+        active_lower = [s.lower() for s in self._config.tracker.active_states]
+        return issue.state.lower() in active_lower
+
+    def _resolve_execution_workspace_path(
+        self,
+        identifier: str,
+        recorded_workspace_path: str | None = None,
+    ) -> Path:
+        """Return the execution workspace path, preferring recorded runtime metadata."""
+        if recorded_workspace_path:
+            return Path(recorded_workspace_path)
+        return self._execution_workflow.workspace_path_for_identifier(identifier)
 
     def _resolve_review_result(
         self,
@@ -1911,9 +2144,16 @@ class Orchestrator:
         """Load the machine-readable QA review result for a completed review run."""
         if entry.review_result is not None:
             result = entry.review_result
+        elif entry.workspace_path:
+            result = self._qa_review_workflow.load_review_result(entry.workspace_path)
         else:
-            workspace_path = str(WorkspaceManager(self._config).get_path(identifier))
-            result = parse_review_result(workspace_path)
+            result = ReviewResult(
+                decision=None,
+                error=(
+                    "QA review workspace metadata missing; "
+                    "cannot load REVIEW_RESULT.json from an isolated review run"
+                ),
+            )
 
         if result.decision is None:
             missing_result = is_review_result_missing(result.error)
@@ -1956,94 +2196,50 @@ class Orchestrator:
             error=error,
             run_status=entry.status.value,
         )
-        if attempt > qa.max_retries:
+        retry_outcome = self._qa_review_workflow.resolve_retry_outcome(
+            self._config,
+            attempt=attempt,
+            error=error,
+        )
+        if retry_outcome.hold_for_manual_intervention:
             self._record_problem(
                 kind="qa_review_retry_limit_reached",
-                summary="QA review retry limit reached",
-                detail=(
-                    f"Reviewer run failed {attempt} times; "
-                    "holding issue in QA review for manual intervention."
-                ),
+                summary=retry_outcome.summary or "QA review retry limit reached",
+                detail=retry_outcome.detail or error,
                 issue_id=issue_id,
                 issue_identifier=identifier,
             )
             self._hold_issue_for_manual_intervention(
                 issue_id,
                 identifier,
-                reason="qa_review_retry_limit",
+                reason=retry_outcome.reason or "qa_review_retry_limit",
             )
             return
 
         await self._schedule_retry(
             issue_id,
             identifier,
-            attempt=attempt,
-            error=error,
+            attempt=retry_outcome.attempt or attempt,
+            error=retry_outcome.error or error,
             entry=entry,
         )
 
-    async def _validate_review_handoff(self, identifier: str) -> tuple[bool, str]:
+    async def _validate_review_handoff(
+        self,
+        identifier: str,
+        workspace_path: str | None = None,
+    ) -> tuple[bool, str]:
         """Verify that build-mode work produced a reviewable PR before QA dispatch."""
-        workspace_path = WorkspaceManager(self._config).get_path(identifier)
-        if not workspace_path.exists():
-            return False, f"Workspace path does not exist: {workspace_path}"
-
-        base_branch = (self._config.preflight.base_branch or _DEFAULT_BASE_BRANCH).strip()
-        if not base_branch:
-            base_branch = _DEFAULT_BASE_BRANCH
-
-        rc, stdout, stderr = await self._run_workspace_command(
-            workspace_path,
-            "git", "branch", "--show-current",
+        resolved_workspace_path = self._resolve_execution_workspace_path(
+            identifier,
+            recorded_workspace_path=workspace_path,
         )
-        if rc != 0:
-            return False, f"Failed to detect current branch: {stderr or stdout or 'unknown git error'}"
-        branch = stdout.strip()
-        if not branch:
-            return False, "Workspace is not on a named branch after the build run"
-        if branch == base_branch:
-            return False, (
-                f"Workspace is still on {base_branch!r}; "
-                "after_run did not leave a review branch checked out"
-            )
-
-        rc, stdout, stderr = await self._run_workspace_command(
-            workspace_path,
-            "git", "status", "--porcelain",
+        base_branch = self._config.preflight.base_branch or _DEFAULT_BASE_BRANCH
+        return await self._execution_workflow.validate_review_handoff(
+            resolved_workspace_path,
+            base_branch=base_branch,
+            run_command=self._run_workspace_command,
         )
-        if rc != 0:
-            return False, f"Failed to inspect workspace status: {stderr or stdout or 'unknown git error'}"
-        dirty_lines = [line for line in stdout.splitlines() if line.strip()]
-        if dirty_lines:
-            sample = "; ".join(dirty_lines[:5])
-            return False, f"Workspace still has uncommitted changes after the build run: {sample}"
-
-        rc, stdout, stderr = await self._run_workspace_command(
-            workspace_path,
-            "gh", "pr", "list",
-            "--head", branch,
-            "--json", "url,state",
-            "--limit", "1",
-        )
-        if rc != 0:
-            return False, (
-                "Failed to confirm a GitHub PR for the review branch: "
-                f"{stderr or stdout or 'unknown gh error'}"
-            )
-
-        try:
-            prs = json.loads(stdout or "[]")
-        except json.JSONDecodeError as exc:
-            return False, f"Failed to parse GitHub PR lookup output: {exc}"
-
-        if not prs:
-            return False, f"No GitHub PR exists for branch {branch!r}"
-
-        pr_url = str(prs[0].get("url") or "").strip()
-        if not pr_url:
-            return False, f"GitHub PR lookup for branch {branch!r} returned no URL"
-
-        return True, pr_url
 
     async def _run_workspace_command(
         self,
@@ -2159,7 +2355,7 @@ class Orchestrator:
             )
             retry_entry.last_message = entry.session.last_message
             retry_entry.last_event_at = entry.session.last_event_timestamp
-            retry_entry.workspace_path = str(WorkspaceManager(self._config).get_path(entry.identifier))
+            retry_entry.workspace_path = entry.workspace_path
             retry_entry.tokens = {
                 "input_tokens": entry.session.input_tokens,
                 "output_tokens": entry.session.output_tokens,
@@ -2243,80 +2439,146 @@ class Orchestrator:
         is_continuation = self._is_continuation_retry(retry_entry)
 
         try:
-            client = LinearClient(self._config.tracker)
-            candidates = await client.fetch_candidate_issues()
+            candidates = await self._linear_service.fetch_candidate_issues()
         except Exception as exc:
-            logger.warning(
-                f"action=retry_poll_failed "
-                f"issue_id={issue_id} error={exc}"
-            )
-            await self._schedule_retry(
-                issue_id,
-                retry_entry.identifier,
-                attempt=retry_entry.attempt + 1,
-                error="retry poll failed",
-            )
+            await self._handle_retry_poll_failure(issue_id, retry_entry, exc)
             return
 
         issue = next((i for i in candidates if i.id == issue_id), None)
 
         if issue is None:
-            # No longer a candidate — release claim
-            self._state.claimed.discard(issue_id)
-            self._state.completed.discard(issue_id)
-            issue_log(
-                logger, logging.INFO,
-                "retry_claim_released_not_found",
-                issue_id, retry_entry.identifier,
+            self._release_retry_bookkeeping(issue_id)
+            self._log_retry_release(
+                issue_id,
+                retry_entry.identifier,
+                is_continuation=is_continuation,
+                issue_found=False,
             )
             return
 
-        # Retry timers re-open eligibility by clearing bookkeeping guards before
-        # checking whether the issue is still a valid candidate.
-        self._state.claimed.discard(issue_id)
-        self._state.completed.discard(issue_id)
+        self._release_retry_bookkeeping(issue_id)
 
         if not self._is_dispatch_eligible(issue):
             self._maybe_transition_blocked_issue(issue)
-            # No longer active — release
-            self._state.claimed.discard(issue_id)
-            self._state.completed.discard(issue_id)
-            issue_log(
-                logger, logging.INFO,
-                "continuation_retry_released_inactive"
-                if is_continuation else "retry_claim_released_inactive",
-                issue_id, retry_entry.identifier,
+            self._log_retry_release(
+                issue_id,
+                retry_entry.identifier,
+                is_continuation=is_continuation,
+                issue_found=True,
                 state=issue.state,
             )
             return
 
         if not self._has_slots() or not self._has_state_slot(issue):
-            if is_continuation:
-                issue_log(
-                    logger, logging.INFO,
-                    "continuation_retry_waiting_for_slot",
-                    issue_id, retry_entry.identifier,
-                )
-                await self._schedule_retry(
-                    issue_id,
-                    issue.identifier,
-                    attempt=retry_entry.attempt,
-                    delay_ms=_CONTINUATION_RETRY_DELAY_MS,
-                    error=None,
-                )
-            else:
-                await self._schedule_retry(
-                    issue_id,
-                    issue.identifier,
-                    attempt=retry_entry.attempt + 1,
-                    error="no available orchestrator slots",
-                )
+            await self._handle_retry_waiting_for_slot(
+                issue_id,
+                retry_entry,
+                issue,
+                is_continuation=is_continuation,
+            )
             return
 
+        await self._redispatch_retry_issue(
+            issue_id,
+            retry_entry,
+            issue,
+            is_continuation=is_continuation,
+        )
+
+    async def _handle_retry_poll_failure(
+        self,
+        issue_id: str,
+        retry_entry: RetryEntry,
+        exc: Exception,
+    ) -> None:
+        """Reschedule a retry after candidate polling fails."""
+        logger.warning(
+            f"action=retry_poll_failed "
+            f"issue_id={issue_id} error={exc}"
+        )
+        retry_outcome = self._execution_workflow.resolve_retry_poll_failure_outcome(
+            attempt=retry_entry.attempt,
+        )
+        await self._schedule_retry(
+            issue_id,
+            retry_entry.identifier,
+            attempt=retry_outcome.attempt,
+            delay_ms=retry_outcome.delay_ms,
+            error=retry_outcome.error,
+        )
+
+    def _release_retry_bookkeeping(self, issue_id: str) -> None:
+        """Clear guards so a retry can be evaluated or released cleanly."""
+        self._state.claimed.discard(issue_id)
+        self._state.completed.discard(issue_id)
+
+    def _log_retry_release(
+        self,
+        issue_id: str,
+        identifier: str,
+        *,
+        is_continuation: bool,
+        issue_found: bool,
+        state: str | None = None,
+    ) -> None:
+        """Log that a retry was released without redispatch."""
         issue_log(
             logger, logging.INFO,
-            "continuation_retry_redispatching"
-            if is_continuation else "retry_dispatching",
+            self._execution_workflow.release_log_action(
+                is_continuation=is_continuation,
+                issue_found=issue_found,
+            ),
+            issue_id, identifier,
+            state=state,
+        )
+
+    async def _handle_retry_waiting_for_slot(
+        self,
+        issue_id: str,
+        retry_entry: RetryEntry,
+        issue: Issue,
+        *,
+        is_continuation: bool,
+    ) -> None:
+        """Reschedule a retry when the orchestrator has no capacity."""
+        retry_outcome = self._execution_workflow.resolve_slot_wait_retry_outcome(
+            attempt=retry_entry.attempt,
+            continuation_delay_ms=_CONTINUATION_RETRY_DELAY_MS,
+            is_continuation=is_continuation,
+        )
+        log_kwargs: dict[str, Any] = {}
+        if not is_continuation:
+            log_kwargs["attempt"] = retry_outcome.attempt
+        issue_log(
+            logger, logging.INFO,
+            self._execution_workflow.waiting_for_slot_log_action(
+                is_continuation=is_continuation,
+            ),
+            issue_id, retry_entry.identifier,
+            **log_kwargs,
+        )
+        await self._schedule_retry(
+            issue_id,
+            issue.identifier,
+            attempt=retry_outcome.attempt,
+            delay_ms=retry_outcome.delay_ms,
+            error=retry_outcome.error,
+        )
+
+    async def _redispatch_retry_issue(
+        self,
+        issue_id: str,
+        retry_entry: RetryEntry,
+        issue: Issue,
+        *,
+        is_continuation: bool,
+    ) -> None:
+        """Redispatch an eligible retry candidate."""
+        issue_log(
+            logger, logging.INFO,
+            self._execution_workflow.redispatch_log_action(
+                is_continuation=is_continuation,
+            ),
             issue_id, retry_entry.identifier,
             attempt=retry_entry.attempt,
         )
@@ -2336,11 +2598,10 @@ class Orchestrator:
         totals = self._state.codex_totals
         qa_review = self._config.transitions.qa_review
         qa_agent_cfg = qa_review.agent
-        wm = WorkspaceManager(self._config)
 
         running_rows = []
         for entry in self._state.running.values():
-            running_rows.append(self._snapshot_running_entry(entry, wm))
+            running_rows.append(self._snapshot_running_entry(entry))
 
         retrying_rows = []
         for issue_id, retry in self._state.retry_attempts.items():
@@ -2691,7 +2952,6 @@ class Orchestrator:
     def _snapshot_running_entry(
         self,
         entry: RunningEntry,
-        wm: WorkspaceManager,
     ) -> dict[str, Any]:
         s = entry.session
         return {
@@ -2721,7 +2981,7 @@ class Orchestrator:
             if s.last_event_timestamp else None,
             "retry_attempt": entry.retry_attempt,
             "qa_review_bounce_count": entry.qa_review_bounce_count,
-            "workspace_path": str(wm.get_path(entry.identifier)),
+            "workspace_path": entry.workspace_path,
             "plan_comment_id": s.plan_comment_id,
             "latest_plan": s.latest_plan,
             "recent_events": list(s.recent_events),

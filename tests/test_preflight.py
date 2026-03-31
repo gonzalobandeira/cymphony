@@ -381,7 +381,7 @@ async def test_orchestrator_tick_blocks_on_preflight_failure(monkeypatch: pytest
         ),
     )
     workflow = WorkflowDefinition(config={}, prompt_template="")
-    orch = Orchestrator(Path("WORKFLOW.md"), config, workflow)
+    orch = Orchestrator(Path(".cymphony/config.yml"), config, workflow)
 
     # Stub out reconcile and fetch so only preflight matters
     async def noop_reconcile() -> None:
@@ -455,7 +455,7 @@ async def test_orchestrator_tick_passes_preflight_when_disabled(monkeypatch: pyt
         ),
     )
     workflow = WorkflowDefinition(config={}, prompt_template="")
-    orch = Orchestrator(Path("WORKFLOW.md"), config, workflow)
+    orch = Orchestrator(Path(".cymphony/config.yml"), config, workflow)
 
     async def noop_reconcile() -> None:
         pass
@@ -526,7 +526,7 @@ async def test_snapshot_includes_preflight_errors(monkeypatch: pytest.MonkeyPatc
         ),
     )
     workflow = WorkflowDefinition(config={}, prompt_template="")
-    orch = Orchestrator(Path("WORKFLOW.md"), config, workflow)
+    orch = Orchestrator(Path(".cymphony/config.yml"), config, workflow)
 
     snap = orch.snapshot()
     assert "preflight_errors" in snap

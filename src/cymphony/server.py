@@ -19,8 +19,8 @@ from .config import _DEFAULT_LINEAR_ENDPOINT, build_config, validate_dispatch_co
 from .linear import LinearClient
 from .models import Issue, TrackerConfig, WorkflowDefinition
 from .workflow import (
+    LOCAL_CONFIG_FILENAME,
     LOCAL_CONFIG_DIR,
-    LOCAL_WORKFLOW_FILENAME,
     load_example_workflow,
     load_workflow,
     save_workflow,
@@ -36,10 +36,7 @@ _DEFAULT_SETUP_FORM = {
     "tracker_api_key": "$LINEAR_API_KEY",
     "project_slug": "",
     "assignee": "",
-    "active_states": "Todo, In Progress",
-    "terminal_states": "Done, Cancelled, Canceled, Duplicate, Closed",
     "poll_interval_ms": "30000",
-    "workspace_root": "~/symphony_workspaces",
     "max_concurrent_agents": "5",
     "max_turns": "20",
     "max_retry_backoff_ms": "300000",
@@ -49,16 +46,8 @@ _DEFAULT_SETUP_FORM = {
     "read_timeout_ms": "60000",
     "stall_timeout_ms": "300000",
     "dangerously_skip_permissions": True,
-    "after_create": "",
-    "before_run": "",
-    "after_run": "",
-    "before_remove": "",
-    "hooks_timeout_ms": "120000",
     "server_port": "8080",
     "qa_review_enabled": False,
-    "qa_review_dispatch": "QA Review",
-    "qa_review_success": "In Review",
-    "qa_review_failure": "Todo",
     "qa_agent_provider": "",
     "qa_agent_command": "",
     "qa_agent_turn_timeout_ms": "",
@@ -309,14 +298,12 @@ def _extract_workflow_fields(
     data: dict[str, object],
     workflow: WorkflowDefinition,
 ) -> None:
-    """Extract workflow config fields into the flat form-data dict *in place*."""
+    """Extract active workflow-config fields into the flat form-data dict *in place*."""
     raw = workflow.config
     tracker = raw.get("tracker") or {}
     polling = raw.get("polling") or {}
-    workspace = raw.get("workspace") or {}
     agent = raw.get("agent") or {}
-    runner = raw.get("runner") or raw.get("codex") or {}
-    hooks = raw.get("hooks") or {}
+    runner = raw.get("runner") or {}
     server = raw.get("server") or {}
     transitions = raw.get("transitions") or {}
     qa_review = transitions.get("qa_review") or {}
@@ -328,10 +315,7 @@ def _extract_workflow_fields(
             "tracker_api_key": str(tracker.get("api_key") or "$LINEAR_API_KEY"),
             "project_slug": str(tracker.get("project_slug") or ""),
             "assignee": str(tracker.get("assignee") or ""),
-            "active_states": ", ".join(str(v) for v in (tracker.get("active_states") or [])) or data["active_states"],
-            "terminal_states": ", ".join(str(v) for v in (tracker.get("terminal_states") or [])) or data["terminal_states"],
             "poll_interval_ms": str(polling.get("interval_ms") or data["poll_interval_ms"]),
-            "workspace_root": str(workspace.get("root") or data["workspace_root"]),
             "max_concurrent_agents": str(agent.get("max_concurrent_agents") or data["max_concurrent_agents"]),
             "max_turns": str(agent.get("max_turns") or data["max_turns"]),
             "max_retry_backoff_ms": str(agent.get("max_retry_backoff_ms") or data["max_retry_backoff_ms"]),
@@ -341,23 +325,15 @@ def _extract_workflow_fields(
             "read_timeout_ms": str(runner.get("read_timeout_ms") or data["read_timeout_ms"]),
             "stall_timeout_ms": str(runner.get("stall_timeout_ms") or data["stall_timeout_ms"]),
             "dangerously_skip_permissions": bool(runner.get("dangerously_skip_permissions", True)),
-            "after_create": str(hooks.get("after_create") or ""),
-            "before_run": str(hooks.get("before_run") or ""),
-            "after_run": str(hooks.get("after_run") or ""),
-            "before_remove": str(hooks.get("before_remove") or ""),
-            "hooks_timeout_ms": str(hooks.get("timeout_ms") or data["hooks_timeout_ms"]),
             "server_port": str(server.get("port") or data["server_port"]),
             "qa_review_enabled": bool(qa_review.get("enabled", False)),
-            "qa_review_dispatch": str(qa_review.get("dispatch") or data["qa_review_dispatch"]),
-            "qa_review_success": str(qa_review.get("success") or data["qa_review_success"]),
-            "qa_review_failure": str(qa_review.get("failure") or data["qa_review_failure"]),
             "qa_agent_provider": str(qa_agent.get("provider") or ""),
             "qa_agent_command": str(qa_agent.get("command") or ""),
             "qa_agent_turn_timeout_ms": str(qa_agent.get("turn_timeout_ms") or ""),
             "qa_agent_read_timeout_ms": str(qa_agent.get("read_timeout_ms") or ""),
             "qa_agent_stall_timeout_ms": str(qa_agent.get("stall_timeout_ms") or ""),
             "qa_agent_dangerously_skip_permissions": bool(qa_agent.get("dangerously_skip_permissions", False)),
-            "review_prompt": str(raw.get("review_prompt") or ""),
+            "review_prompt": str(workflow.review_prompt_template or ""),
             "prompt_template": workflow.prompt_template or data["prompt_template"],
         }
     )
@@ -374,7 +350,7 @@ def _workflow_form_data(
     Precedence (highest wins):
       1. ``form_overrides`` — user-submitted values (on validation error re-render)
       2. ``workflow`` — the current local config
-      3. ``example_workflow`` — repo-level ``WORKFLOW.example.md``
+      3. ``example_workflow`` — repo-level ``config.example.yml``
       4. ``_DEFAULT_SETUP_FORM`` — hardcoded safe defaults
     """
     data: dict[str, object] = dict(_DEFAULT_SETUP_FORM)
@@ -403,28 +379,15 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
         "kind": str(form.get("tracker_kind") or "linear"),
         "api_key": str(form.get("tracker_api_key") or "$LINEAR_API_KEY"),
         "project_slug": str(form.get("project_slug") or "").strip(),
-        "active_states": _split_csv(str(form.get("active_states") or "")),
-        "terminal_states": _split_csv(str(form.get("terminal_states") or "")),
     }
     assignee = str(form.get("assignee") or "").strip()
     if assignee:
         tracker["assignee"] = assignee
 
-    hooks = {
-        "timeout_ms": int(str(form.get("hooks_timeout_ms") or "120000")),
-    }
-    for key in ("after_create", "before_run", "after_run", "before_remove"):
-        value = str(form.get(key) or "").rstrip()
-        if value:
-            hooks[key] = value
-
     config = {
         "tracker": tracker,
         "polling": {
             "interval_ms": int(str(form.get("poll_interval_ms") or "30000")),
-        },
-        "workspace": {
-            "root": str(form.get("workspace_root") or "").strip(),
         },
         "agent": {
             "max_concurrent_agents": int(str(form.get("max_concurrent_agents") or "5")),
@@ -439,28 +402,21 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
             "stall_timeout_ms": int(str(form.get("stall_timeout_ms") or "300000")),
             "dangerously_skip_permissions": bool(form.get("dangerously_skip_permissions")),
         },
-        "hooks": hooks,
         "server": {
             "port": int(str(form.get("server_port") or "8080")),
         },
     }
 
     qa_enabled = bool(form.get("qa_review_enabled"))
-    qa_dispatch = str(form.get("qa_review_dispatch") or "").strip()
-    qa_success = str(form.get("qa_review_success") or "").strip()
-    qa_failure = str(form.get("qa_review_failure") or "").strip()
     qa_agent_provider = str(form.get("qa_agent_provider") or "").strip()
     qa_agent_command = str(form.get("qa_agent_command") or "").strip()
     qa_agent_turn_timeout = str(form.get("qa_agent_turn_timeout_ms") or "").strip()
     qa_agent_read_timeout = str(form.get("qa_agent_read_timeout_ms") or "").strip()
     qa_agent_stall_timeout = str(form.get("qa_agent_stall_timeout_ms") or "").strip()
     qa_agent_skip_perms = bool(form.get("qa_agent_dangerously_skip_permissions"))
-    if qa_enabled or qa_dispatch or qa_success or qa_failure:
+    if qa_enabled:
         qa_review_block: dict[str, Any] = {
             "enabled": qa_enabled,
-            "dispatch": qa_dispatch or None,
-            "success": qa_success or None,
-            "failure": qa_failure or None,
         }
         # Build QA agent override only when at least one field is set
         qa_agent_block: dict[str, Any] = {}
@@ -482,12 +438,11 @@ def _build_workflow_from_form(form: dict[str, object]) -> WorkflowDefinition:
         config["transitions"] = {"qa_review": qa_review_block}
 
     review_prompt = str(form.get("review_prompt") or "").strip()
-    if review_prompt:
-        config["review_prompt"] = review_prompt
 
     return WorkflowDefinition(
         config=config,
         prompt_template=str(form.get("prompt_template") or "").strip(),
+        review_prompt_template=review_prompt or None,
     )
 
 
@@ -505,8 +460,6 @@ def _validate_workflow_form(form: dict[str, object]) -> list[str]:
         errors.append("tracker.api_key is required.")
     if not tracker.get("project_slug"):
         errors.append("tracker.project_slug is required.")
-    if not workflow.config["workspace"].get("root"):
-        errors.append("workspace.root is required.")
     from .models import SUPPORTED_PROVIDERS
     agent_provider = workflow.config.get("agent", {}).get("provider", "claude")
     if agent_provider not in SUPPORTED_PROVIDERS:
@@ -540,7 +493,7 @@ def _render_setup_page(
 ) -> str:
     title = "Set Up Cymphony" if setup_mode else "Workflow Settings"
     subtitle = (
-        f"Create a config in {LOCAL_CONFIG_DIR}/{LOCAL_WORKFLOW_FILENAME} so the service can start."
+        f"Create a config in {LOCAL_CONFIG_DIR}/{LOCAL_CONFIG_FILENAME} so the service can start."
         if setup_mode
         else "Edit the current workflow. Running services will reload changes when the file updates."
     )
@@ -632,22 +585,6 @@ def _render_setup_page(
         <span class="toggle-manual" id="assignee_toggle" style="display:none;"></span>
       </section>
       <section class="card field-required">
-        <label for="workspace_root">Workspace root</label>
-        <input id="workspace_root" name="workspace_root" value="{field("workspace_root")}" required />
-      </section>
-      <section class="card field-required">
-        <label for="active_states">Active states</label>
-        <div id="active_states_checkboxes" class="state-checkboxes" style="display:none;"></div>
-        <input id="active_states" name="active_states" value="{field("active_states")}" required />
-        <span class="toggle-manual" id="active_states_toggle" style="display:none;"></span>
-      </section>
-      <section class="card field-required">
-        <label for="terminal_states">Terminal states</label>
-        <div id="terminal_states_checkboxes" class="state-checkboxes" style="display:none;"></div>
-        <input id="terminal_states" name="terminal_states" value="{field("terminal_states")}" required />
-        <span class="toggle-manual" id="terminal_states_toggle" style="display:none;"></span>
-      </section>
-      <section class="card field-required">
         <label for="poll_interval_ms">Poll interval (ms)</label>
         <input id="poll_interval_ms" name="poll_interval_ms" value="{field("poll_interval_ms")}" required />
       </section>
@@ -691,29 +628,13 @@ def _render_setup_page(
         <input id="stall_timeout_ms" name="stall_timeout_ms" value="{field("stall_timeout_ms")}" required />
       </section>
       <section class="card">
-        <label for="hooks_timeout_ms">Hooks timeout (ms)</label>
-        <input id="hooks_timeout_ms" name="hooks_timeout_ms" value="{field("hooks_timeout_ms")}" required />
-      </section>
-      <section class="card">
         <label>Permissions</label>
         <label class="check"><input type="checkbox" name="dangerously_skip_permissions" value="1"{_checkbox_checked(values.get("dangerously_skip_permissions"))} />Dangerously skip permissions</label>
       </section>
       <section class="card">
         <label>QA review lane</label>
-        <label class="check"><input type="checkbox" name="qa_review_enabled" value="1"{_checkbox_checked(values.get("qa_review_enabled"))} />Enable implementation → QA Review → human review</label>
+        <label class="check"><input type="checkbox" name="qa_review_enabled" value="1"{_checkbox_checked(values.get("qa_review_enabled"))} />Enable execution → QA review → human review</label>
         <div class="muted">When enabled, successful implementation runs move into the QA review state first.</div>
-      </section>
-      <section class="card">
-        <label for="qa_review_dispatch">QA review dispatch state</label>
-        <input id="qa_review_dispatch" name="qa_review_dispatch" value="{field("qa_review_dispatch")}" />
-      </section>
-      <section class="card">
-        <label for="qa_review_success">QA review pass state</label>
-        <input id="qa_review_success" name="qa_review_success" value="{field("qa_review_success")}" />
-      </section>
-      <section class="card">
-        <label for="qa_review_failure">QA review failure state</label>
-        <input id="qa_review_failure" name="qa_review_failure" value="{field("qa_review_failure")}" />
       </section>
       <section class="card">
         <label for="qa_agent_provider">QA agent provider (optional override)</label>
@@ -740,22 +661,6 @@ def _render_setup_page(
       <section class="card">
         <label class="check"><input type="checkbox" name="qa_agent_dangerously_skip_permissions" value="1"{_checkbox_checked(values.get("qa_agent_dangerously_skip_permissions"))} />QA agent: dangerously skip permissions</label>
         <div class="muted">Leave unchecked to inherit from main agent.</div>
-      </section>
-      <section class="card full">
-        <label for="after_create">after_create hook</label>
-        <textarea id="after_create" name="after_create">{field("after_create")}</textarea>
-      </section>
-      <section class="card full">
-        <label for="before_run">before_run hook</label>
-        <textarea id="before_run" name="before_run">{field("before_run")}</textarea>
-      </section>
-      <section class="card full">
-        <label for="after_run">after_run hook</label>
-        <textarea id="after_run" name="after_run">{field("after_run")}</textarea>
-      </section>
-      <section class="card full">
-        <label for="before_remove">before_remove hook</label>
-        <textarea id="before_remove" name="before_remove">{field("before_remove")}</textarea>
       </section>
       <section class="card full">
         <label for="review_prompt">QA review prompt template</label>
@@ -937,15 +842,7 @@ def _render_setup_page(
         errors.push("Members: " + (membData.error || "unknown error"));
       }}
 
-      if (stateData.ok && stateData.states.length) {{
-        var activeInput = qs("#active_states");
-        var terminalInput = qs("#terminal_states");
-        var activeCurrent = (activeInput.value || "").split(",").filter(function(s) {{ return s.trim(); }});
-        var terminalCurrent = (terminalInput.value || "").split(",").filter(function(s) {{ return s.trim(); }});
-
-        setupStateCheckboxes("active_states_checkboxes", activeInput, qs("#active_states_toggle"), stateData.states, activeCurrent);
-        setupStateCheckboxes("terminal_states_checkboxes", terminalInput, qs("#terminal_states_toggle"), stateData.states, terminalCurrent);
-      }} else if (!stateData.ok) {{
+      if (!stateData.ok) {{
         errors.push("States: " + (stateData.error || "unknown error"));
       }}
 
@@ -1398,7 +1295,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     workflow_config_section = (
         "<section class='panel'>"
         "<div class='panel-head'><h2>Workflow Configuration</h2>"
-        "<p>Active states, terminal states, and transition rules from WORKFLOW.md.</p></div>"
+        "<p>Active states, terminal states, and transition rules from the active workflow config.</p></div>"
         "<div class='kv'><span class='k'>Active states</span>"
         f"<span class='v'>{escape(wf_active) or '<span class=\"muted\">none</span>'}</span></div>"
         "<div class='kv'><span class='k'>Terminal states</span>"
@@ -2215,7 +2112,7 @@ window.cym = {{
         el.textContent = d.toLocaleString("sv-SE", {{
           timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
           hour: "2-digit", minute: "2-digit", hour12: false
-        }}).replace(",", "") + " " + tz.replace(/^.*\//, "");
+        }}).replace(",", "") + " " + tz.replace(/^.*\\//, "");
       }} catch(e) {{}}
     }});
   }},
@@ -2466,10 +2363,7 @@ async def _save_workflow_from_request(request: web.Request, *, setup_mode: bool)
         "tracker_api_key": submitted.get("tracker_api_key", "$LINEAR_API_KEY"),
         "project_slug": submitted.get("project_slug", ""),
         "assignee": submitted.get("assignee", ""),
-        "active_states": submitted.get("active_states", ""),
-        "terminal_states": submitted.get("terminal_states", ""),
         "poll_interval_ms": submitted.get("poll_interval_ms", ""),
-        "workspace_root": submitted.get("workspace_root", ""),
         "max_concurrent_agents": submitted.get("max_concurrent_agents", ""),
         "max_turns": submitted.get("max_turns", ""),
         "max_retry_backoff_ms": submitted.get("max_retry_backoff_ms", ""),
@@ -2480,20 +2374,12 @@ async def _save_workflow_from_request(request: web.Request, *, setup_mode: bool)
         "stall_timeout_ms": submitted.get("stall_timeout_ms", ""),
         "dangerously_skip_permissions": submitted.get("dangerously_skip_permissions") == "1",
         "qa_review_enabled": submitted.get("qa_review_enabled") == "1",
-        "qa_review_dispatch": submitted.get("qa_review_dispatch", ""),
-        "qa_review_success": submitted.get("qa_review_success", ""),
-        "qa_review_failure": submitted.get("qa_review_failure", ""),
         "qa_agent_provider": submitted.get("qa_agent_provider", ""),
         "qa_agent_command": submitted.get("qa_agent_command", ""),
         "qa_agent_turn_timeout_ms": submitted.get("qa_agent_turn_timeout_ms", ""),
         "qa_agent_read_timeout_ms": submitted.get("qa_agent_read_timeout_ms", ""),
         "qa_agent_stall_timeout_ms": submitted.get("qa_agent_stall_timeout_ms", ""),
         "qa_agent_dangerously_skip_permissions": submitted.get("qa_agent_dangerously_skip_permissions") == "1",
-        "after_create": submitted.get("after_create", ""),
-        "before_run": submitted.get("before_run", ""),
-        "after_run": submitted.get("after_run", ""),
-        "before_remove": submitted.get("before_remove", ""),
-        "hooks_timeout_ms": submitted.get("hooks_timeout_ms", ""),
         "server_port": submitted.get("server_port", ""),
         "review_prompt": submitted.get("review_prompt", ""),
         "prompt_template": submitted.get("prompt_template", ""),
@@ -2516,7 +2402,12 @@ async def _save_workflow_from_request(request: web.Request, *, setup_mode: bool)
 
     workflow = _build_workflow_from_form(form)
     workflow_path.parent.mkdir(parents=True, exist_ok=True)
-    save_workflow(workflow_path, workflow.config, workflow.prompt_template)
+    save_workflow(
+        workflow_path,
+        workflow.config,
+        workflow.prompt_template,
+        workflow.review_prompt_template,
+    )
     return _redirect(("/setup" if setup_mode else "/settings") + "?saved=1")
 
 

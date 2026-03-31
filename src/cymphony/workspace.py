@@ -170,10 +170,11 @@ class WorkspaceManager:
         logger.info(
             f"action=hook_start hook={hook_name} cwd={cwd}"
         )
+        normalized_script = script.replace("\r\n", "\n").replace("\r", "\n")
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                "bash", "-lc", script,
+                "bash", "-lc", normalized_script,
                 cwd=str(cwd),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

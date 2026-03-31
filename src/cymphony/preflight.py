@@ -211,7 +211,7 @@ async def run_preflight_checks(
     """Run all configured preflight checks and return aggregated results.
 
     Args:
-        config: Preflight configuration from WORKFLOW.md.
+        config: Preflight configuration from .cymphony/config.yml.
         workspace_path: If provided, run git-repo checks against this path.
             When None, only CLI and env var checks are run (useful before
             workspace creation).

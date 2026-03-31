@@ -1,14 +1,12 @@
-"""WORKFLOW.md loader, parser, template renderer, and file watcher (spec §5, §6.2)."""
+"""Config loader, prompt renderer, and file watcher."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import shutil
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Awaitable
+from typing import Any, Awaitable, Callable
 
 import yaml
 from jinja2 import Environment, StrictUndefined, TemplateSyntaxError, UndefinedError
@@ -19,19 +17,22 @@ from .models import WorkflowDefinition, WorkflowError
 
 logger = logging.getLogger(__name__)
 
-# Default workflow path (spec §5.1)
-DEFAULT_WORKFLOW_FILENAME = "WORKFLOW.md"
-EXAMPLE_WORKFLOW_FILENAME = "WORKFLOW.example.md"
 LOCAL_CONFIG_DIR = ".cymphony"
-LOCAL_WORKFLOW_FILENAME = "workflow.md"
+LOCAL_CONFIG_FILENAME = "config.yml"
+EXAMPLE_CONFIG_FILENAME = "config.example.yml"
+EXAMPLE_PROMPTS_DIRNAME = "prompts.example"
+PROMPTS_DIRNAME = "prompts"
+EXECUTION_PROMPT_FILENAME = "execution.md"
+QA_REVIEW_PROMPT_FILENAME = "qa_review.md"
 
 
 class ConfigSource(str, Enum):
     """Identifies which source provided the active workflow config."""
-    CLI_OVERRIDE = "cli_override"           # --workflow-path flag
-    LOCAL_CONFIG = "local_config"           # .cymphony/workflow.md
-    LEGACY_COMMITTED = "legacy_committed"   # WORKFLOW.md (deprecated)
-    SETUP_REQUIRED = "setup_required"       # no config found
+
+    CLI_OVERRIDE = "cli_override"
+    LOCAL_CONFIG = "local_config"
+    SETUP_REQUIRED = "setup_required"
+
 
 OnChangeCallback = Callable[[WorkflowDefinition], Awaitable[None]]
 
@@ -48,87 +49,133 @@ def _represent_workflow_str(dumper: yaml.SafeDumper, value: str) -> yaml.nodes.N
 _WorkflowDumper.add_representer(str, _represent_workflow_str)
 
 
-def load_workflow(path: str | Path) -> WorkflowDefinition:
-    """Load and parse a WORKFLOW.md file (spec §5.2).
+def _parse_yaml_config(text: str, path: str | Path) -> dict[str, Any]:
+    """Parse the YAML config format."""
+    try:
+        parsed = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise WorkflowError(
+            "workflow_parse_error",
+            f"YAML parse error in {path}: {exc}",
+        ) from exc
 
-    Returns WorkflowDefinition with config dict and prompt_template string.
-    Raises WorkflowError on any failure.
-    """
+    if parsed is None:
+        return {}
+    if not isinstance(parsed, dict):
+        raise WorkflowError(
+            "workflow_front_matter_not_a_map",
+            f"Config in {path} must be a YAML map, got {type(parsed).__name__}",
+        )
+    return parsed
+
+
+def _default_prompt_paths(config_path: Path) -> dict[str, Path]:
+    prompts_dir = config_path.parent / PROMPTS_DIRNAME
+    return {
+        "execution": prompts_dir / EXECUTION_PROMPT_FILENAME,
+        "qa_review": prompts_dir / QA_REVIEW_PROMPT_FILENAME,
+    }
+
+
+def _resolve_prompt_paths(config_path: Path, config: dict[str, Any]) -> dict[str, Path]:
+    defaults = _default_prompt_paths(config_path)
+    prompts_raw = config.get("prompts") or {}
+    resolved = dict(defaults)
+    if isinstance(prompts_raw, dict):
+        execution_raw = prompts_raw.get("execution")
+        qa_review_raw = prompts_raw.get("qa_review")
+        if execution_raw:
+            resolved["execution"] = (config_path.parent / str(execution_raw)).resolve()
+        if qa_review_raw:
+            resolved["qa_review"] = (config_path.parent / str(qa_review_raw)).resolve()
+    return resolved
+
+
+def _load_optional_prompt(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise WorkflowError(
+            "missing_workflow_file",
+            f"Cannot read prompt file {path}: {exc}",
+        ) from exc
+
+
+def load_workflow(path: str | Path) -> WorkflowDefinition:
+    """Load and parse a YAML config source."""
     p = Path(path)
     try:
         text = p.read_text(encoding="utf-8")
     except OSError as exc:
         raise WorkflowError(
             "missing_workflow_file",
-            f"Cannot read workflow file {path}: {exc}",
+            f"Cannot read config file {path}: {exc}",
         ) from exc
 
-    config: dict[str, Any]
-    prompt_template: str
+    if p.suffix.lower() not in {".yml", ".yaml"}:
+        raise WorkflowError(
+            "unsupported_workflow_format",
+            f"Config file {path} must use .yml or .yaml.",
+        )
+    config = _parse_yaml_config(text, path)
+    prompt_paths = _resolve_prompt_paths(p.resolve(), config)
+    execution_prompt = _load_optional_prompt(prompt_paths["execution"])
+    review_prompt = _load_optional_prompt(prompt_paths["qa_review"])
 
-    if text.startswith("---"):
-        # Split on second ---
-        lines = text.splitlines(keepends=True)
-        end_idx = None
-        for i, line in enumerate(lines[1:], start=1):
-            if line.rstrip() == "---":
-                end_idx = i
-                break
-
-        if end_idx is not None:
-            front_matter_text = "".join(lines[1:end_idx])
-            body_lines = lines[end_idx + 1 :]
-        else:
-            # No closing ---, treat whole file as prompt
-            front_matter_text = None
-            body_lines = lines
-    else:
-        front_matter_text = None
-        body_lines = text.splitlines(keepends=True)
-
-    if front_matter_text is not None:
-        try:
-            parsed = yaml.safe_load(front_matter_text)
-        except yaml.YAMLError as exc:
-            raise WorkflowError(
-                "workflow_parse_error",
-                f"YAML parse error in {path}: {exc}",
-            ) from exc
-
-        if parsed is None:
-            config = {}
-        elif not isinstance(parsed, dict):
-            raise WorkflowError(
-                "workflow_front_matter_not_a_map",
-                f"Front matter in {path} must be a YAML map, got {type(parsed).__name__}",
-            )
-        else:
-            config = parsed
-    else:
-        config = {}
-
-    prompt_template = "".join(body_lines).strip()
-    return WorkflowDefinition(config=config, prompt_template=prompt_template)
+    return WorkflowDefinition(
+        config=config,
+        prompt_template=execution_prompt or "",
+        review_prompt_template=review_prompt,
+    )
 
 
-def dump_workflow(config: dict[str, Any], prompt_template: str) -> str:
-    """Serialize workflow config and prompt template back to WORKFLOW.md text."""
-    front_matter = yaml.dump(
+def _dump_yaml_config(config: dict[str, Any]) -> str:
+    return yaml.dump(
         config,
         Dumper=_WorkflowDumper,
         sort_keys=False,
         allow_unicode=False,
-    ).strip()
-    prompt_body = prompt_template.strip() or "You are working on an issue from Linear."
-    return f"---\n{front_matter}\n---\n{prompt_body}\n"
+    )
 
 
-def save_workflow(path: str | Path, config: dict[str, Any], prompt_template: str) -> None:
-    """Write a WORKFLOW.md file."""
-    Path(path).write_text(
-        dump_workflow(config, prompt_template),
+def save_workflow(
+    path: str | Path,
+    config: dict[str, Any],
+    prompt_template: str,
+    review_prompt_template: str | None = None,
+) -> None:
+    """Write YAML config plus prompt files."""
+    target = Path(path)
+    if target.suffix.lower() not in {".yml", ".yaml"}:
+        raise WorkflowError(
+            "unsupported_workflow_format",
+            f"Config file {path} must use .yml or .yaml.",
+        )
+
+    prompt_paths = _resolve_prompt_paths(target.resolve(), config)
+    prompts_dir = prompt_paths["execution"].parent
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+
+    yaml_config = dict(config)
+    yaml_config["prompts"] = {
+        "execution": str(prompt_paths["execution"].relative_to(target.parent)),
+        "qa_review": str(prompt_paths["qa_review"].relative_to(target.parent)),
+    }
+
+    target.write_text(_dump_yaml_config(yaml_config), encoding="utf-8")
+    prompt_paths["execution"].write_text(
+        (prompt_template or "You are working on an issue from Linear.").strip() + "\n",
         encoding="utf-8",
     )
+    if review_prompt_template and review_prompt_template.strip():
+        prompt_paths["qa_review"].write_text(
+            review_prompt_template.strip() + "\n",
+            encoding="utf-8",
+        )
+    elif prompt_paths["qa_review"].exists():
+        prompt_paths["qa_review"].unlink()
 
 
 def render_prompt(
@@ -136,10 +183,7 @@ def render_prompt(
     issue: Any,
     attempt: int | None,
 ) -> str:
-    """Render the prompt template with strict variable checking (spec §5.4).
-
-    Raises WorkflowError on template parse or render failure.
-    """
+    """Render the execution prompt with strict variable checking."""
     template_str = workflow.prompt_template
     if not template_str:
         return "You are working on an issue from Linear."
@@ -154,7 +198,6 @@ def render_prompt(
             f"Template syntax error: {exc}",
         ) from exc
 
-    # Convert issue to dict with string keys for template compatibility.
     issue_dict = _issue_to_dict(issue)
     issue_dict["latest_qa_feedback"] = _extract_latest_qa_feedback(issue_dict)
 
@@ -253,8 +296,7 @@ Do NOT write any other value for `decision`. Do NOT skip writing the file.
 
 def render_review_prompt(workflow: WorkflowDefinition, issue: Any) -> str:
     """Render the QA review prompt for review-mode workers."""
-    # Use the review_prompt from workflow config if provided, otherwise use built-in template.
-    review_template = (workflow.config.get("review_prompt") or "").strip()
+    review_template = (workflow.review_prompt_template or "").strip()
     if not review_template:
         review_template = _REVIEW_PROMPT_TEMPLATE
 
@@ -280,21 +322,20 @@ def render_review_prompt(workflow: WorkflowDefinition, issue: Any) -> str:
 
 def _issue_to_dict(issue: Any) -> dict[str, Any]:
     """Recursively convert issue dataclass to template-friendly dict."""
-    from .models import Issue, BlockerRef
     import dataclasses
 
     if dataclasses.is_dataclass(issue) and not isinstance(issue, type):
         result: dict[str, Any] = {}
-        for f in dataclasses.fields(issue):
-            val = getattr(issue, f.name)
-            if isinstance(val, list):
-                result[f.name] = [_issue_to_dict(v) for v in val]
-            elif dataclasses.is_dataclass(val) and not isinstance(val, type):
-                result[f.name] = _issue_to_dict(val)
-            elif hasattr(val, "isoformat"):
-                result[f.name] = val.isoformat()
+        for field in dataclasses.fields(issue):
+            value = getattr(issue, field.name)
+            if isinstance(value, list):
+                result[field.name] = [_issue_to_dict(item) for item in value]
+            elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+                result[field.name] = _issue_to_dict(value)
+            elif hasattr(value, "isoformat"):
+                result[field.name] = value.isoformat()
             else:
-                result[f.name] = val
+                result[field.name] = value
         return result
     return issue
 
@@ -320,12 +361,8 @@ def _extract_latest_qa_feedback(issue: dict[str, Any]) -> dict[str, str] | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# File watcher
-# ---------------------------------------------------------------------------
-
 class WorkflowWatcher:
-    """Watches WORKFLOW.md for changes and triggers async reload (spec §6.2)."""
+    """Watch the config and prompt files for changes and reload them."""
 
     def __init__(
         self,
@@ -337,11 +374,27 @@ class WorkflowWatcher:
         self._on_change = on_change
         self._loop = loop or asyncio.get_event_loop()
         self._observer: Observer | None = None
+        self._prompt_paths = self._discover_prompt_paths()
+
+    def _discover_prompt_paths(self) -> set[Path]:
+        try:
+            workflow = load_workflow(self._path)
+        except WorkflowError:
+            return set()
+        return {
+            path.resolve()
+            for path in _resolve_prompt_paths(self._path, workflow.config).values()
+        }
 
     def start(self) -> None:
-        handler = _WorkflowFileHandler(self._path, self._on_change, self._loop)
+        handler = _WorkflowFileHandler(
+            self._path,
+            self._prompt_paths,
+            self._on_change,
+            self._loop,
+        )
         self._observer = Observer()
-        self._observer.schedule(handler, str(self._path.parent), recursive=False)
+        self._observer.schedule(handler, str(self._path.parent), recursive=True)
         self._observer.start()
         logger.info(f"action=workflow_watch_started path={self._path}")
 
@@ -357,25 +410,35 @@ class _WorkflowFileHandler(FileSystemEventHandler):
     def __init__(
         self,
         path: Path,
+        prompt_paths: set[Path],
         on_change: OnChangeCallback,
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         super().__init__()
         self._path = path
+        self._prompt_paths = {p.resolve() for p in prompt_paths}
         self._on_change = on_change
         self._loop = loop
 
     def on_modified(self, event: FileSystemEvent) -> None:
-        if Path(str(event.src_path)).resolve() == self._path:
+        if self._should_reload(Path(str(event.src_path))):
             self._trigger()
 
     def on_created(self, event: FileSystemEvent) -> None:
-        if Path(str(event.src_path)).resolve() == self._path:
+        if self._should_reload(Path(str(event.src_path))):
             self._trigger()
+
+    def _should_reload(self, changed_path: Path) -> bool:
+        resolved = changed_path.resolve()
+        return resolved == self._path or resolved in self._prompt_paths
 
     def _trigger(self) -> None:
         try:
             workflow = load_workflow(self._path)
+            self._prompt_paths = {
+                path.resolve()
+                for path in _resolve_prompt_paths(self._path, workflow.config).values()
+            }
             asyncio.run_coroutine_threadsafe(self._on_change(workflow), self._loop)
             logger.info(f"action=workflow_reloaded path={self._path}")
         except WorkflowError as exc:
@@ -385,70 +448,27 @@ class _WorkflowFileHandler(FileSystemEventHandler):
             )
 
 
-def resolve_workflow_path(explicit_path: str | None) -> Path:
-    """Resolve workflow file path with precedence rules (spec §5.1).
-
-    Precedence (highest to lowest):
-    1. CLI ``--workflow-path`` (explicit override)
-    2. ``.cymphony/workflow.md`` (local generated config)
-    3. ``WORKFLOW.md`` (legacy committed file — deprecated)
-    4. ``.cymphony/workflow.md`` target path (for setup mode to create)
-    """
-    if explicit_path:
-        return Path(explicit_path).resolve()
-
-    cwd = Path.cwd()
-
-    # Prefer local config directory
-    local_path = cwd / LOCAL_CONFIG_DIR / LOCAL_WORKFLOW_FILENAME
-    if local_path.exists():
-        return local_path.resolve()
-
-    # Fall back to legacy committed WORKFLOW.md
-    legacy_path = cwd / DEFAULT_WORKFLOW_FILENAME
-    if legacy_path.exists():
-        return legacy_path.resolve()
-
-    # No config found — return the local config target path so setup mode
-    # knows where to write the new config.
-    return local_path.resolve()
-
-
 def resolve_config_source(explicit_path: str | None) -> tuple[Path, ConfigSource]:
-    """Resolve the workflow path and identify which source it came from.
-
-    Returns ``(resolved_path, source)`` so callers can log the config
-    origin and emit deprecation warnings for legacy paths.
-    """
+    """Resolve the config path and identify which source it came from."""
     if explicit_path:
         return Path(explicit_path).resolve(), ConfigSource.CLI_OVERRIDE
 
     cwd = Path.cwd()
+    yaml_path = cwd / LOCAL_CONFIG_DIR / LOCAL_CONFIG_FILENAME
+    if yaml_path.exists():
+        return yaml_path.resolve(), ConfigSource.LOCAL_CONFIG
 
-    local_path = cwd / LOCAL_CONFIG_DIR / LOCAL_WORKFLOW_FILENAME
-    if local_path.exists():
-        return local_path.resolve(), ConfigSource.LOCAL_CONFIG
-
-    legacy_path = cwd / DEFAULT_WORKFLOW_FILENAME
-    if legacy_path.exists():
-        return legacy_path.resolve(), ConfigSource.LEGACY_COMMITTED
-
-    return local_path.resolve(), ConfigSource.SETUP_REQUIRED
+    return yaml_path.resolve(), ConfigSource.SETUP_REQUIRED
 
 
 def load_example_workflow(base: Path | None = None) -> WorkflowDefinition | None:
-    """Load ``WORKFLOW.example.md`` from the repo root if it exists.
-
-    ``base`` may be either the repository root or a workflow/config path inside
-    that repository. Returns the parsed workflow or ``None`` if the file
-    doesn't exist or cannot be parsed.
-    """
+    """Load ``config.example.yml`` from the repo root if it exists."""
     root = (base or Path.cwd()).resolve()
-    if root.name == LOCAL_WORKFLOW_FILENAME and root.parent.name == LOCAL_CONFIG_DIR:
+    if root.name == LOCAL_CONFIG_FILENAME and root.parent.name == LOCAL_CONFIG_DIR:
         root = root.parent.parent
-    elif root.suffix.lower() == ".md":
+    elif root.suffix.lower() in {".yml", ".yaml"}:
         root = root.parent
-    example = root / EXAMPLE_WORKFLOW_FILENAME
+    example = root / EXAMPLE_CONFIG_FILENAME
     if not example.exists():
         return None
     try:
@@ -459,35 +479,5 @@ def load_example_workflow(base: Path | None = None) -> WorkflowDefinition | None
 
 
 def local_config_path(base: Path | None = None) -> Path:
-    """Return the canonical local config path (``.cymphony/workflow.md``)."""
-    return (base or Path.cwd()) / LOCAL_CONFIG_DIR / LOCAL_WORKFLOW_FILENAME
-
-
-def migrate_legacy_workflow(base: Path | None = None) -> Path | None:
-    """Copy a legacy ``WORKFLOW.md`` into ``.cymphony/workflow.md`` if needed.
-
-    Returns the new path if migration occurred, or ``None`` if no migration
-    was needed (either the local config already exists or there is no legacy
-    file to migrate).
-    """
-    root = base or Path.cwd()
-    local = root / LOCAL_CONFIG_DIR / LOCAL_WORKFLOW_FILENAME
-    legacy = root / DEFAULT_WORKFLOW_FILENAME
-
-    if local.exists():
-        return None  # already migrated or created by setup
-
-    if not legacy.exists():
-        return None  # nothing to migrate
-
-    local.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(str(legacy), str(local))
-    logger.warning(
-        "action=migrate_legacy_workflow "
-        f"from={legacy} to={local} "
-        "hint='WORKFLOW.md is deprecated as the primary config source. "
-        "Your config has been copied to .cymphony/workflow.md. "
-        "Consider adding .cymphony/ to .gitignore and converting "
-        "WORKFLOW.md to WORKFLOW.example.md as a template for new operators.'"
-    )
-    return local
+    """Return the canonical local config path (``.cymphony/config.yml``)."""
+    return (base or Path.cwd()) / LOCAL_CONFIG_DIR / LOCAL_CONFIG_FILENAME

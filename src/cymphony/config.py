@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,69 @@ _MISSING = object()
 
 def _default_workspace_root() -> str:
     return str(Path(tempfile.gettempdir()) / "symphony_workspaces")
+
+
+def _default_workspace_root_for_project(project_slug: str) -> str:
+    slug = project_slug.strip() or "default"
+    return os.path.expanduser(f"~/cymphony-workspaces/{slug}")
+
+
+def _git_output(args: list[str]) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    output = proc.stdout.strip()
+    return output or None
+
+
+def _repo_root() -> Path:
+    root = _git_output(["rev-parse", "--show-toplevel"])
+    return Path(root).resolve() if root else Path.cwd().resolve()
+
+
+def _repo_clone_source(repo_root: Path) -> str:
+    origin = _git_output(["remote", "get-url", "origin"])
+    return origin or str(repo_root)
+
+
+def _default_base_branch() -> str:
+    origin_head = _git_output(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+    if origin_head and "/" in origin_head:
+        return origin_head.rsplit("/", 1)[-1]
+    current = _git_output(["branch", "--show-current"])
+    return current or "main"
+
+
+def _default_hooks(project_slug: str) -> HooksConfig:
+    repo_root = _repo_root()
+    clone_source = _repo_clone_source(repo_root)
+    base_branch = _default_base_branch()
+    return HooksConfig(
+        after_create=f"git clone {clone_source} .",
+        before_run=(
+            f"git fetch origin\n"
+            f"git checkout {base_branch}\n"
+            f"git reset --hard origin/{base_branch}"
+        ),
+        after_run=(
+            "BRANCH=$(git branch --show-current)\n"
+            f"if [ \"$BRANCH\" != \"{base_branch}\" ]; then\n"
+            "  git add -A\n"
+            "  git commit -m \"chore: agent work [skip ci]\" || true\n"
+            "  git push -u origin \"$BRANCH\" || true\n"
+            f"  TITLE=$(git log --format=\"%s\" origin/{base_branch}..HEAD | tail -1)\n"
+            "  gh pr create --title \"$TITLE\" --body \"\" --head \"$BRANCH\" || true\n"
+            "fi"
+        ),
+        before_remove=None,
+        timeout_ms=_DEFAULT_HOOKS_TIMEOUT_MS,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -117,11 +181,8 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
 
     tracker_raw: dict[str, Any] = raw.get("tracker") or {}
     polling_raw: dict[str, Any] = raw.get("polling") or {}
-    workspace_raw: dict[str, Any] = raw.get("workspace") or {}
-    hooks_raw: dict[str, Any] = raw.get("hooks") or {}
     agent_raw: dict[str, Any] = raw.get("agent") or {}
-    # "runner:" is the canonical section; fall back to legacy "codex:" key
-    runner_raw: dict[str, Any] = raw.get("runner") or raw.get("codex") or {}
+    runner_raw: dict[str, Any] = raw.get("runner") or {}
     server_raw: dict[str, Any] = raw.get("server") or {}
 
     # --- tracker ---
@@ -130,8 +191,6 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
     raw_api_key = _to_str(tracker_raw.get("api_key"), "$LINEAR_API_KEY")
     api_key = _resolve_env(raw_api_key) if raw_api_key.startswith("$") else raw_api_key
     project_slug = _to_str(tracker_raw.get("project_slug"), "")
-    active_states = _to_str_list(tracker_raw.get("active_states"), _DEFAULT_ACTIVE_STATES)
-    terminal_states = _to_str_list(tracker_raw.get("terminal_states"), _DEFAULT_TERMINAL_STATES)
     assignee = _to_str(tracker_raw.get("assignee"), "") or None
 
     tracker = TrackerConfig(
@@ -139,8 +198,8 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
         endpoint=endpoint,
         api_key=api_key,
         project_slug=project_slug,
-        active_states=active_states,
-        terminal_states=terminal_states,
+        active_states=list(_DEFAULT_ACTIVE_STATES),
+        terminal_states=list(_DEFAULT_TERMINAL_STATES),
         assignee=assignee,
     )
 
@@ -149,28 +208,9 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
         interval_ms=_to_int(polling_raw.get("interval_ms"), _DEFAULT_POLL_INTERVAL_MS),
     )
 
-    # --- workspace ---
-    raw_root = workspace_raw.get("root")
-    if raw_root:
-        workspace_root = _expand_path(str(raw_root))
-    else:
-        workspace_root = _default_workspace_root()
-
-    workspace = WorkspaceConfig(root=workspace_root)
-
-    # --- hooks ---
-    hooks_timeout_raw = hooks_raw.get("timeout_ms")
-    hooks_timeout = _to_int(hooks_timeout_raw, _DEFAULT_HOOKS_TIMEOUT_MS)
-    if hooks_timeout <= 0:
-        hooks_timeout = _DEFAULT_HOOKS_TIMEOUT_MS
-
-    hooks = HooksConfig(
-        after_create=hooks_raw.get("after_create") or None,
-        before_run=hooks_raw.get("before_run") or None,
-        after_run=hooks_raw.get("after_run") or None,
-        before_remove=hooks_raw.get("before_remove") or None,
-        timeout_ms=hooks_timeout,
-    )
+    # --- workspace / repo lifecycle ---
+    workspace = WorkspaceConfig(root=_default_workspace_root_for_project(project_slug))
+    hooks = _default_hooks(project_slug)
 
     # --- agent ---
     per_state_raw: Any = agent_raw.get("max_concurrent_agents_by_state") or {}
@@ -213,7 +253,7 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
             runner_raw.get("dangerously_skip_permissions", True)
         ),
     )
-    coding_agent = CodingAgentConfig(
+    main_runner = CodingAgentConfig(
         command=runner.command,
         turn_timeout_ms=runner.turn_timeout_ms,
         read_timeout_ms=runner.read_timeout_ms,
@@ -232,26 +272,17 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
     server = ServerConfig(port=server_port)
 
     # --- preflight ---
-    preflight_raw: dict[str, Any] = raw.get("preflight") or {}
-    preflight_enabled = preflight_raw.get("enabled")
-    if preflight_enabled is None:
-        preflight_enabled = True  # on by default
-    else:
-        preflight_enabled = bool(preflight_enabled)
-
     preflight = PreflightConfig(
-        enabled=preflight_enabled,
-        required_clis=_to_str_list(preflight_raw.get("required_clis"), ["git"]),
-        required_env_vars=_to_str_list(preflight_raw.get("required_env_vars"), []),
-        expect_clean_worktree=bool(preflight_raw.get("expect_clean_worktree", False)),
-        base_branch=_to_str(preflight_raw.get("base_branch"), "main"),
+        enabled=True,
+        required_clis=["git", "gh"],
+        required_env_vars=[],
+        expect_clean_worktree=False,
+        base_branch=_default_base_branch(),
     )
 
     # --- transitions ---
-    transitions_raw: dict[str, Any] = raw.get("transitions") or {}
-    _TRANSITION_DEFAULTS = TransitionsConfig()
-
     # --- qa_review sub-config ---
+    transitions_raw: dict[str, Any] = raw.get("transitions") or {}
     qa_raw: Any = transitions_raw.get("qa_review")
     _QA_DEFAULTS = QAReviewConfig()
     if isinstance(qa_raw, dict):
@@ -261,14 +292,14 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
         qa_agent_raw: dict[str, Any] = qa_raw.get("agent") or {}
         qa_agent: CodingAgentConfig | None = None
         if qa_agent_raw:
-            qa_provider = _to_str(qa_agent_raw.get("provider"), coding_agent.provider)
+            qa_provider = _to_str(qa_agent_raw.get("provider"), main_runner.provider)
             qa_agent = CodingAgentConfig(
-                command=_to_str(qa_agent_raw.get("command"), coding_agent.command) or coding_agent.command,
-                turn_timeout_ms=_to_int(qa_agent_raw.get("turn_timeout_ms"), coding_agent.turn_timeout_ms),
-                read_timeout_ms=_to_int(qa_agent_raw.get("read_timeout_ms"), coding_agent.read_timeout_ms),
-                stall_timeout_ms=_to_int(qa_agent_raw.get("stall_timeout_ms"), coding_agent.stall_timeout_ms),
+                command=_to_str(qa_agent_raw.get("command"), main_runner.command) or main_runner.command,
+                turn_timeout_ms=_to_int(qa_agent_raw.get("turn_timeout_ms"), main_runner.turn_timeout_ms),
+                read_timeout_ms=_to_int(qa_agent_raw.get("read_timeout_ms"), main_runner.read_timeout_ms),
+                stall_timeout_ms=_to_int(qa_agent_raw.get("stall_timeout_ms"), main_runner.stall_timeout_ms),
                 dangerously_skip_permissions=bool(
-                    qa_agent_raw.get("dangerously_skip_permissions", coding_agent.dangerously_skip_permissions)
+                    qa_agent_raw.get("dangerously_skip_permissions", main_runner.dangerously_skip_permissions)
                 ),
                 provider=qa_provider,
             )
@@ -304,24 +335,7 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
         if qa_review.dispatch.lower() not in active_lower:
             tracker.active_states = [*tracker.active_states, qa_review.dispatch]
 
-    transitions = TransitionsConfig(
-        dispatch=_to_optional_str(
-            transitions_raw.get("dispatch", _MISSING), _TRANSITION_DEFAULTS.dispatch
-        ),
-        success=_to_optional_str(
-            transitions_raw.get("success", _MISSING), _TRANSITION_DEFAULTS.success
-        ),
-        failure=_to_optional_str(
-            transitions_raw.get("failure", _MISSING), _TRANSITION_DEFAULTS.failure
-        ),
-        blocked=_to_optional_str(
-            transitions_raw.get("blocked", _MISSING), _TRANSITION_DEFAULTS.blocked
-        ),
-        cancelled=_to_optional_str(
-            transitions_raw.get("cancelled", _MISSING), _TRANSITION_DEFAULTS.cancelled
-        ),
-        qa_review=qa_review,
-    )
+    transitions = TransitionsConfig(qa_review=qa_review)
 
     return ServiceConfig(
         tracker=tracker,

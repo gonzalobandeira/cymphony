@@ -11,13 +11,11 @@ from pathlib import Path
 
 from .config import build_config, validate_dispatch_config
 from .workflow import (
+    LOCAL_CONFIG_FILENAME,
     LOCAL_CONFIG_DIR,
-    LOCAL_WORKFLOW_FILENAME,
     ConfigSource,
     load_workflow,
-    migrate_legacy_workflow,
     resolve_config_source,
-    resolve_workflow_path,
 )
 
 
@@ -25,11 +23,7 @@ def _dotenv_candidates(workflow_path: Path) -> list[Path]:
     """Return .env locations to load for the resolved workflow path."""
     candidates = [workflow_path.parent / ".env"]
 
-    # Keep repo-root .env working after migrating to .cymphony/workflow.md.
-    if (
-        workflow_path.name == LOCAL_WORKFLOW_FILENAME
-        and workflow_path.parent.name == LOCAL_CONFIG_DIR
-    ):
+    if workflow_path.name == LOCAL_CONFIG_FILENAME and workflow_path.parent.name == LOCAL_CONFIG_DIR:
         candidates.append(workflow_path.parent.parent / ".env")
 
     seen: set[Path] = set()
@@ -76,14 +70,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--workflow-path",
         metavar="PATH",
         default=None,
-        help="Path to WORKFLOW.md (default: ./WORKFLOW.md)",
+        help="Path to workflow config (default: ./.cymphony/config.yml)",
     )
     parser.add_argument(
         "--port",
         type=int,
         default=None,
         metavar="PORT",
-        help="Enable HTTP server on this port (overrides server.port in WORKFLOW.md)",
+        help="Enable HTTP server on this port (overrides server.port in the workflow config)",
     )
     parser.add_argument(
         "--log-level",
@@ -145,22 +139,8 @@ def main(argv: list[str] | None = None) -> None:
 
     log = logging.getLogger(__name__)
 
-    # Attempt legacy migration before resolving the config path.
-    if not args.workflow_path:
-        migrated = migrate_legacy_workflow()
-        if migrated:
-            log.info(f"action=legacy_migration target={migrated}")
-
     workflow_path, source = resolve_config_source(args.workflow_path)
-
-    if source == ConfigSource.LEGACY_COMMITTED:
-        log.warning(
-            f"action=config_source_deprecated path={workflow_path} "
-            "hint='Using legacy WORKFLOW.md. Run the setup screen or move "
-            "your config to .cymphony/workflow.md.'"
-        )
-    else:
-        log.info(f"action=config_source source={source.value} path={workflow_path}")
+    log.info(f"action=config_source source={source.value} path={workflow_path}")
 
     _load_dotenv(workflow_path)
 

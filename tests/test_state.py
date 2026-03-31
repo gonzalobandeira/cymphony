@@ -296,7 +296,7 @@ def _build_orchestrator(tmp_path: Path) -> Orchestrator:
         ),
     )
     workflow = WorkflowDefinition(config={}, prompt_template="")
-    return Orchestrator(Path("WORKFLOW.md"), config, workflow)
+    return Orchestrator(Path(".cymphony/config.yml"), config, workflow)
 
 
 def _build_issue(

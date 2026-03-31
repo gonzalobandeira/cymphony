@@ -54,9 +54,10 @@ class Issue:
 
 @dataclass
 class WorkflowDefinition:
-    """Parsed WORKFLOW.md (spec §4.1.2)."""
+    """Parsed workflow/config source and associated prompt templates."""
     config: dict[str, Any]
     prompt_template: str
+    review_prompt_template: str | None = None
 
 
 @dataclass
@@ -113,7 +114,7 @@ class RunnerConfig:
 
 @dataclass
 class CodingAgentConfig(RunnerConfig):
-    """Backward-compatible config shape for older Python callers."""
+    """Runner config with an explicit provider for provider-specific overrides."""
     provider: str = "claude"
 
 
@@ -189,18 +190,6 @@ class ServiceConfig:
     server: ServerConfig
     preflight: PreflightConfig
     transitions: TransitionsConfig = field(default_factory=TransitionsConfig)
-    coding_agent: CodingAgentConfig = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        """Populate the legacy coding_agent alias from the canonical runner config."""
-        self.coding_agent = CodingAgentConfig(
-            command=self.runner.command,
-            turn_timeout_ms=self.runner.turn_timeout_ms,
-            read_timeout_ms=self.runner.read_timeout_ms,
-            stall_timeout_ms=self.runner.stall_timeout_ms,
-            dangerously_skip_permissions=self.runner.dangerously_skip_permissions,
-            provider=self.agent.provider,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +310,9 @@ class RunningEntry:
     mode: ExecutionMode = field(default=ExecutionMode.BUILD)
     status: RunStatus = field(default=RunStatus.PREPARING_WORKSPACE)
     qa_review_bounce_count: int = 0
+    workspace_path: str | None = None
+    workspace_root: str | None = None
+    workspace_key: str | None = None
 
 
 @dataclass

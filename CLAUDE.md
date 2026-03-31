@@ -5,13 +5,15 @@ Orchestration service that polls Linear issues and runs coding agents (Claude Co
 ## Architecture
 
 ```
-WORKFLOW.example.md  ← committed template (sanitized, no operator secrets)
+config.example.yml  ← committed example config
+prompts.example/    ← committed example prompts
 .cymphony/
-  workflow.md        ← local config (gitignored, created by setup or migration)
+  config.yml         ← local config (gitignored)
+  prompts/           ← local execution and QA prompts
 src/cymphony/
   __main__.py        ← CLI entry point (cymphony --port <port>)
-  config.py          ← parses WORKFLOW.md YAML into typed ServiceConfig
-  workflow.py        ← loads/watches WORKFLOW.md, renders Jinja2 prompts
+  config.py          ← parses .cymphony/config.yml YAML into typed ServiceConfig
+  workflow.py        ← loads/watches YAML config + prompt files, renders prompts
   orchestrator.py    ← poll loop, dispatch, reconciliation, retry scheduling
   agent.py           ← backward-compat re-exports from runners/
   runners/
@@ -30,7 +32,6 @@ src/cymphony/
 
 Provider selection uses one authoritative field: `agent.provider` (`"claude"` or `"codex"`).
 Subprocess runtime settings live in a provider-neutral `runner:` YAML block (parsed into `RunnerConfig`).
-The legacy `codex:` YAML key is still accepted as a fallback for backward compatibility.
 
 ## Data flow
 
@@ -43,16 +44,13 @@ The legacy `codex:` YAML key is still accepted as a fallback for backward compat
 
 State transitions are configured declaratively through workflow config frontmatter (`transitions.dispatch`, `success`, `failure`, `blocked`, `cancelled`, and `qa_review.*`).
 
-## Config ownership model (BAP-187)
+## Config model
 
-Config resolution follows this precedence (highest to lowest):
+Config resolution follows this precedence:
 
 1. `--workflow-path <path>` (CLI override)
-2. `.cymphony/workflow.md` (local generated config, gitignored)
-3. `WORKFLOW.md` (legacy committed file — **deprecated**)
-4. Setup mode (no config found → launch setup screen)
-
-On first startup, `migrate_legacy_workflow()` auto-copies `WORKFLOW.md` → `.cymphony/workflow.md` if the local config doesn't exist yet. See `docs/design/config-ownership.md` for the full design.
+2. `.cymphony/config.yml`
+3. Setup mode (no config found → launch setup screen)
 
 ## Running
 
@@ -61,7 +59,7 @@ export LINEAR_API_KEY=...
 # First time: use setup screen
 cymphony --port 8081
 # Or with explicit config:
-cymphony --workflow-path /path/to/workflow.md --port 8081 --log-level DEBUG
+cymphony --workflow-path /path/to/config.yml --port 8081 --log-level DEBUG
 ```
 
 ## Development
@@ -86,7 +84,7 @@ Dependencies: `pyyaml`, `jinja2`, `aiohttp`, `watchdog`. Python ≥ 3.11. Built 
 - **QA review lane is opt-in**: when `transitions.qa_review.enabled` is true, implementation success transitions to `qa_review.dispatch` (typically `QA Review`) instead of directly to `transitions.success`.
 - **QA agent override**: set `transitions.qa_review.agent` to run review-mode workers with a different provider, command, or timeout settings. Fields: `provider`, `command`, `turn_timeout_ms`, `read_timeout_ms`, `stall_timeout_ms`, `dangerously_skip_permissions`. Omit the block entirely to inherit the main `codex` settings.
 - **Required Linear states for QA review**: create `QA Review` in Linear before enabling the feature. The end-to-end workflow is `Todo -> In Progress -> QA Review -> (Todo | In Review)`.
-- **Config lives in `.cymphony/`**: local config is gitignored. `WORKFLOW.md` at repo root is a deprecated fallback. `WORKFLOW.example.md` is the committed template for new operators.
+- **Config lives in `.cymphony/`**: runtime config is `.cymphony/config.yml` and prompts live in `.cymphony/prompts/`. `config.example.yml` and `prompts.example/` are committed examples only.
 
 ## HTTP API
 

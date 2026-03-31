@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 from cymphony.models import Comment, Issue, WorkflowDefinition
-from cymphony.workflow import render_prompt
+from cymphony.workflow import load_workflow, render_prompt, save_workflow
 
 
 def _build_issue(*, comments: list[Comment]) -> Issue:
@@ -84,3 +85,49 @@ def test_render_prompt_omits_feedback_section_without_qa_comment() -> None:
     prompt = render_prompt(workflow, issue, attempt=1)
 
     assert prompt == "NO FEEDBACK"
+
+
+def test_load_workflow_reads_split_yaml_and_prompt_files(tmp_path: Path) -> None:
+    config_path = tmp_path / ".cymphony" / "config.yml"
+    prompts_dir = config_path.parent / "prompts"
+    prompts_dir.mkdir(parents=True)
+    config_path.write_text(
+        "tracker:\n"
+        "  kind: linear\n"
+        "  api_key: $LINEAR_API_KEY\n"
+        "  project_slug: test-project\n",
+        encoding="utf-8",
+    )
+    (prompts_dir / "execution.md").write_text("Execute {{ issue.identifier }}", encoding="utf-8")
+    (prompts_dir / "qa_review.md").write_text("Review {{ issue.identifier }}", encoding="utf-8")
+
+    workflow = load_workflow(config_path)
+
+    assert workflow.config["tracker"]["project_slug"] == "test-project"
+    assert workflow.prompt_template == "Execute {{ issue.identifier }}"
+    assert workflow.review_prompt_template == "Review {{ issue.identifier }}"
+
+
+def test_save_workflow_writes_split_yaml_and_prompt_files(tmp_path: Path) -> None:
+    config_path = tmp_path / ".cymphony" / "config.yml"
+    config_path.parent.mkdir(parents=True)
+
+    save_workflow(
+        config_path,
+        {
+            "tracker": {
+                "kind": "linear",
+                "api_key": "$LINEAR_API_KEY",
+                "project_slug": "test-project",
+            }
+        },
+        "Execute {{ issue.identifier }}",
+        "Review {{ issue.identifier }}",
+    )
+
+    saved = load_workflow(config_path)
+
+    assert saved.prompt_template == "Execute {{ issue.identifier }}"
+    assert saved.review_prompt_template == "Review {{ issue.identifier }}"
+    assert (config_path.parent / "prompts" / "execution.md").exists()
+    assert (config_path.parent / "prompts" / "qa_review.md").exists()

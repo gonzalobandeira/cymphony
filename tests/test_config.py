@@ -96,8 +96,7 @@ def test_runner_command_explicit_override_respected() -> None:
     assert config.runner.command == "/usr/local/bin/my-codex"
 
 
-def test_legacy_codex_yaml_key_still_parsed() -> None:
-    """Backward compat: the old 'codex:' YAML key is accepted as 'runner:'."""
+def test_legacy_codex_yaml_key_is_ignored() -> None:
     wf = WorkflowDefinition(
         config={
             "tracker": {"kind": "linear", "api_key": "k", "project_slug": "p"},
@@ -108,7 +107,7 @@ def test_legacy_codex_yaml_key_still_parsed() -> None:
     )
     config = build_config(wf)
     assert config.runner.command == "claude"
-    assert config.runner.turn_timeout_ms == 999
+    assert config.runner.turn_timeout_ms != 999
 
 
 def test_runner_command_blank_string_resolves_to_provider_default() -> None:
@@ -168,7 +167,7 @@ def test_transitions_defaults_when_empty_dict() -> None:
     assert config.transitions.success == "In Review"
 
 
-def test_transitions_custom_values() -> None:
+def test_transitions_are_opinionated_defaults_even_when_custom_values_are_supplied() -> None:
     config = build_config(_workflow_with_transitions({
         "dispatch": "Working",
         "success": "Done",
@@ -176,46 +175,46 @@ def test_transitions_custom_values() -> None:
         "blocked": "On Hold",
         "cancelled": "Cancelled",
     }))
-    assert config.transitions.dispatch == "Working"
-    assert config.transitions.success == "Done"
-    assert config.transitions.failure == "Failed"
-    assert config.transitions.blocked == "On Hold"
-    assert config.transitions.cancelled == "Cancelled"
+    assert config.transitions.dispatch == "In Progress"
+    assert config.transitions.success == "In Review"
+    assert config.transitions.failure is None
+    assert config.transitions.blocked is None
+    assert config.transitions.cancelled is None
 
 
-def test_transitions_disable_with_false() -> None:
+def test_transitions_cannot_be_disabled_with_false() -> None:
     config = build_config(_workflow_with_transitions({
         "dispatch": False,
         "success": False,
     }))
-    assert config.transitions.dispatch is None
-    assert config.transitions.success is None
+    assert config.transitions.dispatch == "In Progress"
+    assert config.transitions.success == "In Review"
 
 
-def test_transitions_disable_with_empty_string() -> None:
+def test_transitions_cannot_be_disabled_with_empty_string() -> None:
     config = build_config(_workflow_with_transitions({
         "dispatch": "",
         "success": "",
     }))
-    assert config.transitions.dispatch is None
-    assert config.transitions.success is None
+    assert config.transitions.dispatch == "In Progress"
+    assert config.transitions.success == "In Review"
 
 
-def test_transitions_disable_with_null() -> None:
+def test_transitions_cannot_be_disabled_with_null() -> None:
     config = build_config(_workflow_with_transitions({
         "dispatch": None,
         "success": None,
     }))
-    assert config.transitions.dispatch is None
-    assert config.transitions.success is None
+    assert config.transitions.dispatch == "In Progress"
+    assert config.transitions.success == "In Review"
 
 
-def test_transitions_partial_override() -> None:
+def test_transitions_ignore_partial_override() -> None:
     config = build_config(_workflow_with_transitions({
         "success": "Completed",
     }))
     assert config.transitions.dispatch == "In Progress"
-    assert config.transitions.success == "Completed"
+    assert config.transitions.success == "In Review"
     assert config.transitions.failure is None
 
 
@@ -286,25 +285,22 @@ def test_qa_review_enabled_with_defaults() -> None:
     assert qa.max_retries == 2
 
 
-def test_qa_review_custom_states() -> None:
+def test_qa_review_custom_retry_settings_are_respected_but_states_remain_fixed() -> None:
     config = build_config(_workflow_with_transitions({
         "qa_review": {
             "enabled": True,
-            "dispatch": "QA",
-            "success": "Ready to Merge",
-            "failure": "Needs Work",
             "max_bounces": 4,
             "max_retries": 3,
         },
     }))
     qa = config.transitions.qa_review
     assert qa.enabled is True
-    assert qa.dispatch == "QA"
-    assert qa.success == "Ready to Merge"
-    assert qa.failure == "Needs Work"
+    assert qa.dispatch == "QA Review"
+    assert qa.success == "In Review"
+    assert qa.failure == "Todo"
     assert qa.max_bounces == 4
     assert qa.max_retries == 3
-    assert "QA" in config.tracker.active_states
+    assert "QA Review" in config.tracker.active_states
 
 
 def test_qa_review_disable_individual_transitions() -> None:
@@ -320,14 +316,14 @@ def test_qa_review_disable_individual_transitions() -> None:
     assert qa.failure is None
 
 
-def test_qa_review_does_not_affect_main_transitions() -> None:
+def test_qa_review_does_not_change_fixed_main_transitions() -> None:
     config = build_config(_workflow_with_transitions({
         "dispatch": "Working",
         "success": "Done",
         "qa_review": {"enabled": True},
     }))
-    assert config.transitions.dispatch == "Working"
-    assert config.transitions.success == "Done"
+    assert config.transitions.dispatch == "In Progress"
+    assert config.transitions.success == "In Review"
     assert config.transitions.qa_review.enabled is True
 
 
@@ -405,8 +401,8 @@ def test_qa_agent_explicit_override() -> None:
     assert qa_agent.stall_timeout_ms == 555
 
 
-def test_qa_agent_inherits_defaults_from_main_coding_agent() -> None:
-    """Fields omitted in qa_review.agent inherit from the main codex config."""
+def test_qa_agent_inherits_defaults_from_main_runner() -> None:
+    """Fields omitted in qa_review.agent inherit from the main runner config."""
     config = build_config(_workflow_with_transitions({
         "qa_review": {
             "enabled": True,
@@ -418,11 +414,11 @@ def test_qa_agent_inherits_defaults_from_main_coding_agent() -> None:
     qa_agent = config.transitions.qa_review.agent
     assert qa_agent is not None
     assert qa_agent.provider == "claude"
-    # command should inherit from the main codex block default ("claude")
+    # command should inherit from the main runner default ("claude")
     assert qa_agent.command == "claude"
-    # timeouts inherit from main coding_agent defaults
-    assert qa_agent.turn_timeout_ms == config.coding_agent.turn_timeout_ms
-    assert qa_agent.stall_timeout_ms == config.coding_agent.stall_timeout_ms
+    # timeouts inherit from main runner defaults
+    assert qa_agent.turn_timeout_ms == config.runner.turn_timeout_ms
+    assert qa_agent.stall_timeout_ms == config.runner.stall_timeout_ms
 
 
 def test_qa_agent_validation_rejects_invalid_provider() -> None:
@@ -438,7 +434,7 @@ def test_qa_agent_validation_rejects_invalid_provider() -> None:
 
 
 def test_qa_agent_empty_command_inherits_from_main() -> None:
-    """An empty command in qa_review.agent falls back to the main codex command."""
+    """An empty command in qa_review.agent falls back to the main runner command."""
     config = build_config(_workflow_with_transitions({
         "qa_review": {
             "enabled": True,
@@ -447,7 +443,7 @@ def test_qa_agent_empty_command_inherits_from_main() -> None:
     }))
     qa_agent = config.transitions.qa_review.agent
     assert qa_agent is not None
-    assert qa_agent.command == config.coding_agent.command
+    assert qa_agent.command == config.runner.command
     result = validate_dispatch_config(config)
     assert result.ok
 

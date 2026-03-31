@@ -5,11 +5,12 @@ Orchestration service that polls Linear issues and runs Claude Code agents on th
 ## Architecture
 
 ```
-WORKFLOW.md          ← user config (YAML frontmatter + Jinja2 prompt template)
+.cymphony/config.yml          ← user config (YAML)
+.cymphony/prompts/            ← execution and QA prompt templates
 src/cymphony/
   __main__.py        ← CLI entry point (cymphony --port <port>)
-  config.py          ← parses WORKFLOW.md YAML into typed ServiceConfig
-  workflow.py        ← loads/watches WORKFLOW.md, renders Jinja2 prompts
+  config.py          ← parses .cymphony/config.yml into typed ServiceConfig
+  workflow.py        ← loads/watches YAML config + prompt files, renders prompts
   orchestrator.py    ← poll loop, dispatch, reconciliation, retry scheduling
   agent.py           ← backward-compat re-exports from runners/
   runners/
@@ -33,7 +34,7 @@ src/cymphony/
 5. **Reconcile**: each tick checks running workers for stalls and refreshes issue states from Linear; terminal-state issues get their workers cancelled and workspaces removed
 6. **Retry**: workers that exit abnormally are retried with exponential backoff; clean exits get a 1-second continuation retry to re-evaluate the issue
 
-State transitions are configured declaratively through `WORKFLOW.md` frontmatter (`transitions.dispatch`, `success`, `failure`, `blocked`, `cancelled`).
+State transitions are configured declaratively through `.cymphony/config.yml` (`transitions.dispatch`, `success`, `failure`, `blocked`, `cancelled`).
 
 ## Running
 
@@ -41,7 +42,7 @@ State transitions are configured declaratively through `WORKFLOW.md` frontmatter
 export LINEAR_API_KEY=...
 cymphony --port 8081
 # or
-cymphony --workflow-path /path/to/WORKFLOW.md --port 8081 --log-level DEBUG
+cymphony --workflow-path /path/to/config.yml --port 8081 --log-level DEBUG
 ```
 
 ## Development

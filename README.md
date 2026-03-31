@@ -56,7 +56,7 @@ pip install -e ".[dev]"
 
 ## Quick start
 
-**1. Create a `.env` file** next to your `WORKFLOW.md`:
+**1. Create a `.env` file** in your repo root or inside `.cymphony/`:
 
 ```bash
 LINEAR_API_KEY=lin_api_...
@@ -70,29 +70,29 @@ Cymphony loads this file automatically on startup. You can also export these as 
 
 > **Auth notes:** The Claude Code CLI supports both OAuth (interactive login) and API key authentication. OAuth tokens expire, which silently breaks background agents. An API key never expires and is the recommended approach for automated workflows. Cymphony passes auth environment variables (`ANTHROPIC_API_KEY` for Claude, `OPENAI_API_KEY` for Codex) through to the subprocess unchanged.
 
-**2. Create a `WORKFLOW.md`** in your project directory (see [Configuration](#configuration) below).
+**2. Create a `.cymphony/config.yml`** in your project directory, plus prompt files under `.cymphony/prompts/` (see [Configuration](#configuration) below).
 
 **3. Run:**
 
 ```bash
 cymphony --port 8081
 # or with a custom workflow path
-cymphony --workflow-path /path/to/WORKFLOW.md --port 8081 --log-level DEBUG
+cymphony --workflow-path /path/to/config.yml --port 8081 --log-level DEBUG
 ```
 
 Open `http://localhost:8081` for the live dashboard.
 
 ## Configuration
 
-`WORKFLOW.md` has two sections separated by YAML frontmatter:
+The runtime config is split across:
 
-1. **YAML config block** (between `---` delimiters): service settings
-2. **Jinja2 prompt template** (after the closing `---`): the prompt sent to the Claude Code agent
+1. `.cymphony/config.yml`: service settings
+2. `.cymphony/prompts/execution.md`: execution-agent prompt
+3. `.cymphony/prompts/qa_review.md`: QA-review prompt
 
-### Example `WORKFLOW.md`
+### Example `.cymphony/config.yml`
 
 ```yaml
----
 tracker:
   kind: linear                 # only "linear" supported
   api_key: $LINEAR_API_KEY     # env var reference (expanded at runtime)
@@ -154,7 +154,14 @@ transitions:
   failure: null                # optional: move issue after an abnormal worker exit
   blocked: Blocked             # optional: move issue when dependencies block dispatch
   cancelled: null              # optional: move issue when reconciliation cancels a worker
----
+prompts:
+  execution: prompts/execution.md
+  qa_review: prompts/qa_review.md
+```
+
+### Example `.cymphony/prompts/execution.md`
+
+```md
 You are a senior software engineer working on the **MyProject** project.
 
 ## Issue
@@ -183,6 +190,15 @@ You are a senior software engineer working on the **MyProject** project.
 5. Commit with a descriptive message referencing the issue.
 ```
 
+### Example `.cymphony/prompts/qa_review.md`
+
+```md
+You are a senior QA reviewer for the issue **{{ issue.title }}**.
+
+Review the implementation in the current workspace. Do not write new code.
+Leave your decision in `REVIEW_RESULT.json`.
+```
+
 ### Prompt template variables
 
 | Variable | Type | Description |
@@ -199,7 +215,7 @@ You are a senior software engineer working on the **MyProject** project.
 
 ### Workflow transitions
 
-`WORKFLOW.md` can define a `transitions` block that maps orchestrator lifecycle events to Linear workflow state names:
+`.cymphony/config.yml` can define a `transitions` block that maps orchestrator lifecycle events to Linear workflow state names:
 
 - `dispatch`: state to apply when an issue is claimed and a worker starts
 - `success`: state to apply after a clean worker exit, before the continuation retry is scheduled
@@ -297,7 +313,7 @@ Preflight failures are surfaced as:
 - Problems in the dashboard and `/api/v1/state` JSON
 - `preflight_errors` array in the state snapshot
 
-To disable all checks: set `preflight.enabled: false` in your WORKFLOW.md.
+To disable all checks: set `preflight.enabled: false` in `.cymphony/config.yml`.
 
 ## Recommended safe hook patterns
 
@@ -356,8 +372,8 @@ Preflight checks run **after** workspace creation and the `before_run` hook. Thi
 ```
 src/cymphony/
   __main__.py     CLI entry point
-  config.py       Parses WORKFLOW.md YAML into typed ServiceConfig
-  workflow.py     Loads/watches WORKFLOW.md, renders Jinja2 prompts
+  config.py       Parses `.cymphony/config.yml` into typed ServiceConfig
+  workflow.py     Loads/watches YAML config plus prompt files
   orchestrator.py Poll loop, dispatch, reconciliation, retry scheduling
   agent.py        Runs `claude` CLI as subprocess, streams stream-json events
   linear.py       Async Linear GraphQL client

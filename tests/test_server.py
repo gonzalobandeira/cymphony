@@ -12,6 +12,25 @@ from cymphony.server import _build_operator_groups, _render_dashboard
 from cymphony.workflow import load_workflow
 
 
+def _write_split_workflow(
+    config_path: Path,
+    config_text: str,
+    *,
+    prompt: str = "Work on {{ issue.identifier }}.",
+    review_prompt: str | None = None,
+) -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(config_text, encoding="utf-8")
+    prompts_dir = config_path.parent / "prompts"
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    (prompts_dir / "execution.md").write_text(prompt, encoding="utf-8")
+    qa_review_path = prompts_dir / "qa_review.md"
+    if review_prompt:
+        qa_review_path.write_text(review_prompt, encoding="utf-8")
+    elif qa_review_path.exists():
+        qa_review_path.unlink()
+
+
 def _issue(
     *,
     issue_id: str,
@@ -834,7 +853,7 @@ def test_render_dashboard_includes_js_refresh_and_toast() -> None:
 
 @pytest.mark.asyncio
 async def test_setup_get_renders_setup_form_with_error(tmp_path: Path) -> None:
-    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path = tmp_path / ".cymphony" / "config.yml"
     request = _FakeRequest(
         app={
             "orchestrator": None,
@@ -854,7 +873,7 @@ async def test_setup_get_renders_setup_form_with_error(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_setup_post_writes_workflow_file(tmp_path: Path) -> None:
-    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path = tmp_path / ".cymphony" / "config.yml"
     request = _FakeRequest(
         app={
             "orchestrator": None,
@@ -866,10 +885,7 @@ async def test_setup_post_writes_workflow_file(tmp_path: Path) -> None:
             "tracker_api_key": "$LINEAR_API_KEY",
             "project_slug": "cymphony-b2a8d0064141",
             "assignee": "gonzalobandeira",
-            "active_states": "Todo, In Progress",
-            "terminal_states": "Done, Cancelled",
             "poll_interval_ms": "30000",
-            "workspace_root": "~/cymphony-workspaces",
             "max_concurrent_agents": "3",
             "max_turns": "20",
             "max_retry_backoff_ms": "300000",
@@ -879,20 +895,12 @@ async def test_setup_post_writes_workflow_file(tmp_path: Path) -> None:
             "stall_timeout_ms": "300000",
             "dangerously_skip_permissions": "1",
             "qa_review_enabled": "1",
-            "qa_review_dispatch": "QA Review",
-            "qa_review_success": "In Review",
-            "qa_review_failure": "Todo",
             "qa_agent_provider": "codex",
             "qa_agent_command": "review-cli",
             "qa_agent_turn_timeout_ms": "120000",
             "qa_agent_read_timeout_ms": "45000",
             "qa_agent_stall_timeout_ms": "15000",
             "qa_agent_dangerously_skip_permissions": "1",
-            "after_create": "git clone git@github.com:org/repo.git .",
-            "before_run": "git fetch origin",
-            "after_run": "git status",
-            "before_remove": "",
-            "hooks_timeout_ms": "120000",
             "server_port": "8080",
             "review_prompt": "Review {{ issue.identifier }} carefully.",
             "prompt_template": "You are working on {{ issue.identifier }}.",
@@ -910,9 +918,6 @@ async def test_setup_post_writes_workflow_file(tmp_path: Path) -> None:
     assert saved.config["runner"]["read_timeout_ms"] == 60000
     assert saved.config["transitions"]["qa_review"] == {
         "enabled": True,
-        "dispatch": "QA Review",
-        "success": "In Review",
-        "failure": "Todo",
         "agent": {
             "provider": "codex",
             "command": "review-cli",
@@ -922,7 +927,7 @@ async def test_setup_post_writes_workflow_file(tmp_path: Path) -> None:
             "dangerously_skip_permissions": True,
         },
     }
-    assert saved.config["review_prompt"] == "Review {{ issue.identifier }} carefully."
+    assert saved.review_prompt_template == "Review {{ issue.identifier }} carefully."
     assert saved.prompt_template == "You are working on {{ issue.identifier }}."
 
 
@@ -931,7 +936,7 @@ async def test_settings_get_redirects_to_setup_when_in_setup_mode(tmp_path: Path
     request = _FakeRequest(
         app={
             "orchestrator": None,
-            "workflow_path": tmp_path / "WORKFLOW.md",
+            "workflow_path": tmp_path / ".cymphony" / "config.yml",
             "setup_mode": True,
             "setup_error": None,
         }
@@ -1002,37 +1007,28 @@ def test_render_dashboard_shows_workflow_configuration_section() -> None:
 
 @pytest.mark.asyncio
 async def test_settings_get_renders_saved_qa_review_fields(tmp_path: Path) -> None:
-    workflow_path = tmp_path / "WORKFLOW.md"
-    workflow_path.write_text(
-        """---
-tracker:
+    workflow_path = tmp_path / ".cymphony" / "config.yml"
+    _write_split_workflow(
+        workflow_path,
+        """tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
   project_slug: cymphony
-  active_states: [Todo, In Progress]
-  terminal_states: [Done]
-workspace:
-  root: ~/cymphony-workspaces
 agent:
   max_concurrent_agents: 2
   max_turns: 10
   max_retry_backoff_ms: 1000
-codex:
+runner:
   command: claude
   turn_timeout_ms: 1000
   read_timeout_ms: 2222
   stall_timeout_ms: 1000
   dangerously_skip_permissions: true
-hooks:
-  timeout_ms: 120000
 server:
   port: 8080
 transitions:
   qa_review:
     enabled: true
-    dispatch: QA Review
-    success: In Review
-    failure: Todo
     agent:
       provider: codex
       command: review-cli
@@ -1040,11 +1036,9 @@ transitions:
       read_timeout_ms: 600
       stall_timeout_ms: 700
       dangerously_skip_permissions: true
-review_prompt: Review {{ issue.identifier }} carefully.
----
-Implement {{ issue.identifier }}.
 """,
-        encoding="utf-8",
+        prompt="Implement {{ issue.identifier }}.",
+        review_prompt="Review {{ issue.identifier }} carefully.",
     )
     request = _FakeRequest(
         app={
@@ -1061,8 +1055,6 @@ Implement {{ issue.identifier }}.
     assert 'name="qa_review_enabled"' in response.text
     assert 'name="qa_review_enabled" value="1" checked' in response.text
     assert 'name="read_timeout_ms" value="2222"' in response.text
-    assert 'name="qa_review_dispatch" value="QA Review"' in response.text
-    assert 'name="qa_review_failure" value="Todo"' in response.text
     assert 'name="qa_agent_provider" value="codex"' in response.text
     assert 'name="qa_agent_read_timeout_ms" value="600"' in response.text
     assert "Review {{ issue.identifier }} carefully." in response.text
@@ -1420,7 +1412,7 @@ async def test_setup_projects_returns_json(tmp_path: Path) -> None:
     request = _FakeRequest(
         app={
             "orchestrator": None,
-            "workflow_path": tmp_path / "WORKFLOW.md",
+            "workflow_path": tmp_path / ".cymphony" / "config.yml",
             "setup_mode": True,
             "setup_error": None,
         },
@@ -1451,7 +1443,7 @@ async def test_setup_projects_returns_error_on_failure(tmp_path: Path) -> None:
     request = _FakeRequest(
         app={
             "orchestrator": None,
-            "workflow_path": tmp_path / "WORKFLOW.md",
+            "workflow_path": tmp_path / ".cymphony" / "config.yml",
             "setup_mode": True,
             "setup_error": None,
         },
@@ -1479,7 +1471,7 @@ async def test_setup_members_returns_json(tmp_path: Path) -> None:
     request = _FakeRequest(
         app={
             "orchestrator": None,
-            "workflow_path": tmp_path / "WORKFLOW.md",
+            "workflow_path": tmp_path / ".cymphony" / "config.yml",
             "setup_mode": True,
             "setup_error": None,
         },
@@ -1508,7 +1500,7 @@ async def test_setup_states_returns_json(tmp_path: Path) -> None:
     request = _FakeRequest(
         app={
             "orchestrator": None,
-            "workflow_path": tmp_path / "WORKFLOW.md",
+            "workflow_path": tmp_path / ".cymphony" / "config.yml",
             "setup_mode": True,
             "setup_error": None,
         },
@@ -1534,7 +1526,7 @@ async def test_setup_states_returns_error_on_failure(tmp_path: Path) -> None:
     request = _FakeRequest(
         app={
             "orchestrator": None,
-            "workflow_path": tmp_path / "WORKFLOW.md",
+            "workflow_path": tmp_path / ".cymphony" / "config.yml",
             "setup_mode": True,
             "setup_error": None,
         },
@@ -1560,7 +1552,7 @@ async def test_setup_page_contains_load_button(tmp_path: Path) -> None:
     request = _FakeRequest(
         app={
             "orchestrator": None,
-            "workflow_path": tmp_path / "WORKFLOW.md",
+            "workflow_path": tmp_path / ".cymphony" / "config.yml",
             "setup_mode": True,
             "setup_error": None,
         }
@@ -1570,8 +1562,6 @@ async def test_setup_page_contains_load_button(tmp_path: Path) -> None:
     assert "Load Linear data" in response.text
     assert "project_slug_select" in response.text
     assert "assignee_select" in response.text
-    assert "active_states_checkboxes" in response.text
-    assert "terminal_states_checkboxes" in response.text
 
 
 @pytest.mark.asyncio
@@ -1580,7 +1570,7 @@ async def test_setup_page_marks_required_and_optional_fields(tmp_path: Path) -> 
     request = _FakeRequest(
         app={
             "orchestrator": None,
-            "workflow_path": tmp_path / "WORKFLOW.md",
+            "workflow_path": tmp_path / ".cymphony" / "config.yml",
             "setup_mode": True,
             "setup_error": None,
         }
@@ -1598,7 +1588,7 @@ async def test_setup_page_selector_script_preserves_values_and_resets_assignees(
     request = _FakeRequest(
         app={
             "orchestrator": None,
-            "workflow_path": tmp_path / "WORKFLOW.md",
+            "workflow_path": tmp_path / ".cymphony" / "config.yml",
             "setup_mode": True,
             "setup_error": None,
         }
@@ -1617,43 +1607,30 @@ async def test_setup_page_selector_script_preserves_values_and_resets_assignees(
 # BAP-188: Setup prefill tests
 # ---------------------------------------------------------------------------
 
-_EXAMPLE_WORKFLOW_YAML = """\
----
+_EXAMPLE_CONFIG_YAML = """\
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
   project_slug: ""
-  active_states: [Todo, In Progress]
-  terminal_states: [Done, Cancelled]
   assignee: ""
 agent:
   max_concurrent_agents: 2
   max_turns: 15
   max_retry_backoff_ms: 300000
-codex:
+runner:
   command: claude
   turn_timeout_ms: 3600000
   stall_timeout_ms: 300000
   dangerously_skip_permissions: true
-workspace:
-  root: ~/cymphony-workspaces
-hooks:
-  timeout_ms: 120000
-  after_create: git clone git@github.com:org/repo.git .
 server:
   port: 8080
----
-Example prompt template for {{ issue.identifier }}.
 """
 
-_LOCAL_WORKFLOW_YAML = """\
----
+_LOCAL_CONFIG_YAML = """\
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
   project_slug: my-project
-  active_states: [Todo, In Progress]
-  terminal_states: [Done, Cancelled]
   assignee: alice
 agent:
   max_concurrent_agents: 4
@@ -1666,17 +1643,8 @@ runner:
   read_timeout_ms: 30000
   stall_timeout_ms: 120000
   dangerously_skip_permissions: true
-workspace:
-  root: ~/my-workspaces
-hooks:
-  timeout_ms: 60000
-  after_create: git clone git@github.com:team/repo.git .
-  before_run: git fetch
-  after_run: git push
 server:
   port: 9090
----
-Local prompt for {{ issue.identifier }}.
 """
 
 
@@ -1684,7 +1652,7 @@ def test_workflow_form_data_uses_defaults_when_no_config() -> None:
     """With no workflow and no example, form data should equal _DEFAULT_SETUP_FORM."""
     from cymphony.server import _workflow_form_data, _DEFAULT_SETUP_FORM
 
-    path = Path("/tmp/test/.cymphony/workflow.md")
+    path = Path("/tmp/test/.cymphony/config.yml")
     data = _workflow_form_data(path)
     for key, default_val in _DEFAULT_SETUP_FORM.items():
         assert data[key] == default_val, f"field {key!r} mismatch"
@@ -1695,18 +1663,20 @@ def test_workflow_form_data_seeds_from_example(tmp_path: Path) -> None:
     from cymphony.server import _workflow_form_data
     from cymphony.workflow import load_workflow
 
-    example_path = tmp_path / "WORKFLOW.example.md"
-    example_path.write_text(_EXAMPLE_WORKFLOW_YAML, encoding="utf-8")
+    example_path = tmp_path / "config.example.yml"
+    _write_split_workflow(
+        example_path,
+        _EXAMPLE_CONFIG_YAML,
+        prompt="Example prompt template for {{ issue.identifier }}.",
+    )
     example = load_workflow(example_path)
 
-    workflow_path = tmp_path / ".cymphony" / "workflow.md"
+    workflow_path = tmp_path / ".cymphony" / "config.yml"
     data = _workflow_form_data(workflow_path, example_workflow=example)
 
     assert data["max_concurrent_agents"] == "2"
     assert data["max_turns"] == "15"
     assert data["command"] == "claude"
-    assert data["workspace_root"] == "~/cymphony-workspaces"
-    assert data["after_create"] == "git clone git@github.com:org/repo.git ."
     assert data["prompt_template"] == "Example prompt template for {{ issue.identifier }}."
 
 
@@ -1715,13 +1685,20 @@ def test_workflow_form_data_local_config_overrides_example(tmp_path: Path) -> No
     from cymphony.server import _workflow_form_data
     from cymphony.workflow import load_workflow
 
-    example_path = tmp_path / "WORKFLOW.example.md"
-    example_path.write_text(_EXAMPLE_WORKFLOW_YAML, encoding="utf-8")
+    example_path = tmp_path / "config.example.yml"
+    _write_split_workflow(
+        example_path,
+        _EXAMPLE_CONFIG_YAML,
+        prompt="Example prompt template for {{ issue.identifier }}.",
+    )
     example = load_workflow(example_path)
 
-    local_path = tmp_path / ".cymphony" / "workflow.md"
-    local_path.parent.mkdir(parents=True)
-    local_path.write_text(_LOCAL_WORKFLOW_YAML, encoding="utf-8")
+    local_path = tmp_path / ".cymphony" / "config.yml"
+    _write_split_workflow(
+        local_path,
+        _LOCAL_CONFIG_YAML,
+        prompt="Local prompt for {{ issue.identifier }}.",
+    )
     local = load_workflow(local_path)
 
     data = _workflow_form_data(local_path, workflow=local, example_workflow=example)
@@ -1732,11 +1709,7 @@ def test_workflow_form_data_local_config_overrides_example(tmp_path: Path) -> No
     assert data["max_turns"] == "25"
     assert data["provider"] == "codex"
     assert data["command"] == "codex"
-    assert data["workspace_root"] == "~/my-workspaces"
     assert data["server_port"] == "9090"
-    assert data["after_create"] == "git clone git@github.com:team/repo.git ."
-    assert data["before_run"] == "git fetch"
-    assert data["after_run"] == "git push"
     assert data["prompt_template"] == "Local prompt for {{ issue.identifier }}."
 
 
@@ -1745,9 +1718,12 @@ def test_workflow_form_data_form_overrides_win(tmp_path: Path) -> None:
     from cymphony.server import _workflow_form_data
     from cymphony.workflow import load_workflow
 
-    local_path = tmp_path / ".cymphony" / "workflow.md"
-    local_path.parent.mkdir(parents=True)
-    local_path.write_text(_LOCAL_WORKFLOW_YAML, encoding="utf-8")
+    local_path = tmp_path / ".cymphony" / "config.yml"
+    _write_split_workflow(
+        local_path,
+        _LOCAL_CONFIG_YAML,
+        prompt="Local prompt for {{ issue.identifier }}.",
+    )
     local = load_workflow(local_path)
 
     overrides = {"project_slug": "overridden-slug", "max_turns": "99"}
@@ -1761,10 +1737,13 @@ def test_workflow_form_data_form_overrides_win(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_setup_get_prefills_from_existing_local_config(tmp_path: Path) -> None:
-    """GET /setup should prefill from existing .cymphony/workflow.md."""
-    workflow_path = tmp_path / ".cymphony" / "workflow.md"
-    workflow_path.parent.mkdir(parents=True)
-    workflow_path.write_text(_LOCAL_WORKFLOW_YAML, encoding="utf-8")
+    """GET /setup should prefill from existing .cymphony/config.yml."""
+    workflow_path = tmp_path / ".cymphony" / "config.yml"
+    _write_split_workflow(
+        workflow_path,
+        _LOCAL_CONFIG_YAML,
+        prompt="Local prompt for {{ issue.identifier }}.",
+    )
 
     request = _FakeRequest(
         app={
@@ -1788,12 +1767,16 @@ async def test_setup_get_prefills_from_existing_local_config(tmp_path: Path) -> 
 async def test_setup_get_seeds_from_example_when_no_local_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """GET /setup seeds defaults from WORKFLOW.example.md when no local config exists."""
-    example_path = tmp_path / "WORKFLOW.example.md"
-    example_path.write_text(_EXAMPLE_WORKFLOW_YAML, encoding="utf-8")
+    """GET /setup seeds defaults from config.example.yml when no local config exists."""
+    example_path = tmp_path / "config.example.yml"
+    _write_split_workflow(
+        example_path,
+        _EXAMPLE_CONFIG_YAML,
+        prompt="Example prompt template for {{ issue.identifier }}.",
+    )
     monkeypatch.chdir(tmp_path)
 
-    workflow_path = tmp_path / ".cymphony" / "workflow.md"
+    workflow_path = tmp_path / ".cymphony" / "config.yml"
 
     request = _FakeRequest(
         app={
@@ -1815,7 +1798,7 @@ async def test_setup_get_seeds_from_example_when_no_local_config(
 @pytest.mark.asyncio
 async def test_setup_post_preserves_provider_on_validation_failure(tmp_path: Path) -> None:
     """POST /setup should preserve the provider field when validation fails."""
-    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path = tmp_path / ".cymphony" / "config.yml"
     request = _FakeRequest(
         app={
             "orchestrator": None,
@@ -1827,10 +1810,7 @@ async def test_setup_post_preserves_provider_on_validation_failure(tmp_path: Pat
             "tracker_api_key": "$LINEAR_API_KEY",
             "project_slug": "",
             "assignee": "",
-            "active_states": "Todo, In Progress",
-            "terminal_states": "Done",
             "poll_interval_ms": "30000",
-            "workspace_root": "~/ws",
             "max_concurrent_agents": "3",
             "max_turns": "20",
             "max_retry_backoff_ms": "300000",
@@ -1841,20 +1821,12 @@ async def test_setup_post_preserves_provider_on_validation_failure(tmp_path: Pat
             "stall_timeout_ms": "300000",
             "dangerously_skip_permissions": "1",
             "qa_review_enabled": "",
-            "qa_review_dispatch": "",
-            "qa_review_success": "",
-            "qa_review_failure": "",
             "qa_agent_provider": "",
             "qa_agent_command": "",
             "qa_agent_turn_timeout_ms": "",
             "qa_agent_read_timeout_ms": "",
             "qa_agent_stall_timeout_ms": "",
             "qa_agent_dangerously_skip_permissions": "",
-            "after_create": "git clone .",
-            "before_run": "",
-            "after_run": "",
-            "before_remove": "",
-            "hooks_timeout_ms": "120000",
             "server_port": "8080",
             "review_prompt": "",
             "prompt_template": "Custom prompt.",
@@ -1866,15 +1838,13 @@ async def test_setup_post_preserves_provider_on_validation_failure(tmp_path: Pat
     assert response.status == 200
     assert "project_slug" in response.text.lower()
     assert 'value="codex" selected' in response.text
-    assert "git clone ." in response.text
     assert "Custom prompt." in response.text
 
 
 @pytest.mark.asyncio
 async def test_setup_post_saves_provider_field(tmp_path: Path) -> None:
     """POST /setup should persist the provider selection to the config file."""
-    workflow_path = tmp_path / ".cymphony" / "workflow.md"
-    workflow_path.parent.mkdir(parents=True)
+    workflow_path = tmp_path / ".cymphony" / "config.yml"
 
     request = _FakeRequest(
         app={
@@ -1934,9 +1904,12 @@ async def test_settings_post_validation_failure_preserves_existing_config_contex
     tmp_path: Path,
 ) -> None:
     """POST /settings validation failure should layer user values on top of existing config."""
-    workflow_path = tmp_path / ".cymphony" / "workflow.md"
-    workflow_path.parent.mkdir(parents=True)
-    workflow_path.write_text(_LOCAL_WORKFLOW_YAML, encoding="utf-8")
+    workflow_path = tmp_path / ".cymphony" / "config.yml"
+    _write_split_workflow(
+        workflow_path,
+        _LOCAL_CONFIG_YAML,
+        prompt="Local prompt for {{ issue.identifier }}.",
+    )
 
     request = _FakeRequest(
         app={
@@ -1995,11 +1968,15 @@ async def test_setup_post_validation_failure_seeds_from_example(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """POST /setup validation failure with no local config should seed from example."""
-    example_path = tmp_path / "WORKFLOW.example.md"
-    example_path.write_text(_EXAMPLE_WORKFLOW_YAML, encoding="utf-8")
+    example_path = tmp_path / "config.example.yml"
+    _write_split_workflow(
+        example_path,
+        _EXAMPLE_CONFIG_YAML,
+        prompt="Example prompt template for {{ issue.identifier }}.",
+    )
     monkeypatch.chdir(tmp_path)
 
-    workflow_path = tmp_path / ".cymphony" / "workflow.md"
+    workflow_path = tmp_path / ".cymphony" / "config.yml"
 
     request = _FakeRequest(
         app={
@@ -2062,11 +2039,15 @@ def test_load_example_workflow_returns_none_when_missing(tmp_path: Path) -> None
 
 
 def test_load_example_workflow_loads_valid_file(tmp_path: Path) -> None:
-    """load_example_workflow parses WORKFLOW.example.md correctly."""
+    """load_example_workflow parses config.example.yml correctly."""
     from cymphony.workflow import load_example_workflow
 
-    example = tmp_path / "WORKFLOW.example.md"
-    example.write_text(_EXAMPLE_WORKFLOW_YAML, encoding="utf-8")
+    example = tmp_path / "config.example.yml"
+    _write_split_workflow(
+        example,
+        _EXAMPLE_CONFIG_YAML,
+        prompt="Example prompt template for {{ issue.identifier }}.",
+    )
 
     result = load_example_workflow(base=tmp_path)
     assert result is not None
@@ -2075,12 +2056,16 @@ def test_load_example_workflow_loads_valid_file(tmp_path: Path) -> None:
 
 
 def test_load_example_workflow_accepts_local_config_path(tmp_path: Path) -> None:
-    """load_example_workflow should resolve the repo root from .cymphony/workflow.md."""
+    """load_example_workflow should resolve the repo root from .cymphony/config.yml."""
     from cymphony.workflow import load_example_workflow
 
-    example = tmp_path / "WORKFLOW.example.md"
-    example.write_text(_EXAMPLE_WORKFLOW_YAML, encoding="utf-8")
-    workflow_path = tmp_path / ".cymphony" / "workflow.md"
+    example = tmp_path / "config.example.yml"
+    _write_split_workflow(
+        example,
+        _EXAMPLE_CONFIG_YAML,
+        prompt="Example prompt template for {{ issue.identifier }}.",
+    )
+    workflow_path = tmp_path / ".cymphony" / "config.yml"
     workflow_path.parent.mkdir(parents=True)
 
     result = load_example_workflow(base=workflow_path)

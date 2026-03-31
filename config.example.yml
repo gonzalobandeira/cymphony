@@ -1,0 +1,32 @@
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: my-project
+  assignee: ""
+
+polling:
+  interval_ms: 30000
+
+agent:
+  provider: claude
+  max_concurrent_agents: 5
+  max_turns: 20
+  max_retry_backoff_ms: 300000
+
+runner:
+  command: ""
+  turn_timeout_ms: 3600000
+  read_timeout_ms: 60000
+  stall_timeout_ms: 300000
+  dangerously_skip_permissions: true
+
+server:
+  port: 8080
+
+transitions:
+  qa_review:
+    enabled: true
+
+prompts:
+  execution: prompts.example/execution.md
+  qa_review: prompts.example/qa_review.md
