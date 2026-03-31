@@ -417,11 +417,15 @@ def resolve_config_source(explicit_path: str | None) -> tuple[Path, ConfigSource
 def load_example_workflow(base: Path | None = None) -> WorkflowDefinition | None:
     """Load ``WORKFLOW.example.md`` from the repo root if it exists.
 
-    Returns the parsed workflow or ``None`` if the file doesn't exist or
-    cannot be parsed.  Used by the setup screen to seed form defaults from
-    the repo maintainer's example template instead of hardcoded values.
+    ``base`` may be either the repository root or a workflow/config path inside
+    that repository. Returns the parsed workflow or ``None`` if the file
+    doesn't exist or cannot be parsed.
     """
-    root = base or Path.cwd()
+    root = (base or Path.cwd()).resolve()
+    if root.name == LOCAL_WORKFLOW_FILENAME and root.parent.name == LOCAL_CONFIG_DIR:
+        root = root.parent.parent
+    elif root.suffix.lower() == ".md":
+        root = root.parent
     example = root / EXAMPLE_WORKFLOW_FILENAME
     if not example.exists():
         return None

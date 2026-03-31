@@ -1808,3 +1808,17 @@ def test_load_example_workflow_loads_valid_file(tmp_path: Path) -> None:
     assert result is not None
     assert result.config["agent"]["max_turns"] == 15
     assert "Example prompt template" in result.prompt_template
+
+
+def test_load_example_workflow_accepts_local_config_path(tmp_path: Path) -> None:
+    """load_example_workflow should resolve the repo root from .cymphony/workflow.md."""
+    from cymphony.workflow import load_example_workflow
+
+    example = tmp_path / "WORKFLOW.example.md"
+    example.write_text(_EXAMPLE_WORKFLOW_YAML, encoding="utf-8")
+    workflow_path = tmp_path / ".cymphony" / "workflow.md"
+    workflow_path.parent.mkdir(parents=True)
+
+    result = load_example_workflow(base=workflow_path)
+    assert result is not None
+    assert result.config["agent"]["max_turns"] == 15

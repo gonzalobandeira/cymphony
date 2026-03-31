@@ -2117,7 +2117,7 @@ def _load_current_workflow_or_none(workflow_path: Path) -> WorkflowDefinition | 
 async def _handle_setup_get(request: web.Request) -> web.Response:
     workflow_path = Path(request.app["workflow_path"])
     workflow = _load_current_workflow_or_none(workflow_path)
-    example = load_example_workflow() if workflow is None else None
+    example = load_example_workflow(workflow_path) if workflow is None else None
     values = _workflow_form_data(workflow_path, workflow, example_workflow=example)
     errors: list[str] = []
     setup_error = request.app.get("setup_error")
@@ -2193,7 +2193,7 @@ async def _save_workflow_from_request(request: web.Request, *, setup_mode: bool)
 
     errors = _validate_workflow_form(form)
     workflow = _load_current_workflow_or_none(workflow_path)
-    example = load_example_workflow() if workflow is None else None
+    example = load_example_workflow(workflow_path) if workflow is None else None
     values = _workflow_form_data(
         workflow_path, workflow, example_workflow=example, form_overrides=form,
     )
