@@ -2192,7 +2192,11 @@ async def _save_workflow_from_request(request: web.Request, *, setup_mode: bool)
     }
 
     errors = _validate_workflow_form(form)
-    values = _workflow_form_data(workflow_path, form_overrides=form)
+    workflow = _load_current_workflow_or_none(workflow_path)
+    example = load_example_workflow() if workflow is None else None
+    values = _workflow_form_data(
+        workflow_path, workflow, example_workflow=example, form_overrides=form,
+    )
     if errors:
         return _html_response(
             _render_setup_page(

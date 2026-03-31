@@ -1660,6 +1660,135 @@ async def test_setup_post_saves_provider_field(tmp_path: Path) -> None:
     assert saved.config["agent"]["provider"] == "codex"
 
 
+@pytest.mark.asyncio
+async def test_settings_post_validation_failure_preserves_existing_config_context(
+    tmp_path: Path,
+) -> None:
+    """POST /settings validation failure should layer user values on top of existing config."""
+    # Create an existing local config with known values
+    workflow_path = tmp_path / ".cymphony" / "workflow.md"
+    workflow_path.parent.mkdir(parents=True)
+    workflow_path.write_text(_LOCAL_WORKFLOW_YAML, encoding="utf-8")
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": workflow_path,
+            "setup_mode": False,
+            "setup_error": None,
+        },
+        post_data={
+            "tracker_api_key": "$LINEAR_API_KEY",
+            "project_slug": "",  # Missing required field → validation error
+            "assignee": "bob",
+            "active_states": "Todo, In Progress",
+            "terminal_states": "Done",
+            "poll_interval_ms": "30000",
+            "workspace_root": "~/ws",
+            "max_concurrent_agents": "3",
+            "max_turns": "20",
+            "max_retry_backoff_ms": "300000",
+            "provider": "codex",
+            "command": "codex",
+            "turn_timeout_ms": "3600000",
+            "read_timeout_ms": "60000",
+            "stall_timeout_ms": "300000",
+            "dangerously_skip_permissions": "1",
+            "qa_review_enabled": "",
+            "qa_review_dispatch": "",
+            "qa_review_success": "",
+            "qa_review_failure": "",
+            "qa_agent_provider": "",
+            "qa_agent_command": "",
+            "qa_agent_turn_timeout_ms": "",
+            "qa_agent_read_timeout_ms": "",
+            "qa_agent_stall_timeout_ms": "",
+            "qa_agent_dangerously_skip_permissions": "",
+            "after_create": "",
+            "before_run": "",
+            "after_run": "",
+            "before_remove": "",
+            "hooks_timeout_ms": "120000",
+            "server_port": "8080",
+            "review_prompt": "",
+            "prompt_template": "Custom prompt.",
+        },
+    )
+
+    response = await server._handle_settings_post(request)
+
+    assert response.status == 200
+    # User-submitted value should win (form_overrides layer)
+    assert 'value="bob"' in response.text
+    # Provider from user submission preserved
+    assert 'value="codex" selected' in response.text
+
+
+@pytest.mark.asyncio
+async def test_setup_post_validation_failure_seeds_from_example(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /setup validation failure with no local config should seed from example."""
+    example_path = tmp_path / "WORKFLOW.example.md"
+    example_path.write_text(_EXAMPLE_WORKFLOW_YAML, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    workflow_path = tmp_path / ".cymphony" / "workflow.md"
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": workflow_path,
+            "setup_mode": True,
+            "setup_error": None,
+        },
+        post_data={
+            "tracker_api_key": "$LINEAR_API_KEY",
+            "project_slug": "",  # Missing → validation error
+            "assignee": "",
+            "active_states": "Todo, In Progress",
+            "terminal_states": "Done",
+            "poll_interval_ms": "30000",
+            "workspace_root": "~/ws",
+            "max_concurrent_agents": "2",
+            "max_turns": "15",
+            "max_retry_backoff_ms": "300000",
+            "provider": "claude",
+            "command": "claude",
+            "turn_timeout_ms": "3600000",
+            "read_timeout_ms": "60000",
+            "stall_timeout_ms": "300000",
+            "dangerously_skip_permissions": "1",
+            "qa_review_enabled": "",
+            "qa_review_dispatch": "",
+            "qa_review_success": "",
+            "qa_review_failure": "",
+            "qa_agent_provider": "",
+            "qa_agent_command": "",
+            "qa_agent_turn_timeout_ms": "",
+            "qa_agent_read_timeout_ms": "",
+            "qa_agent_stall_timeout_ms": "",
+            "qa_agent_dangerously_skip_permissions": "",
+            "after_create": "",
+            "before_run": "",
+            "after_run": "",
+            "before_remove": "",
+            "hooks_timeout_ms": "120000",
+            "server_port": "8080",
+            "review_prompt": "",
+            "prompt_template": "Custom prompt.",
+        },
+    )
+
+    response = await server._handle_setup_post(request)
+
+    assert response.status == 200
+    # Should re-render with errors
+    assert "project_slug" in response.text.lower()
+    # User-submitted prompt preserved
+    assert "Custom prompt." in response.text
+
+
 def test_load_example_workflow_returns_none_when_missing(tmp_path: Path) -> None:
     """load_example_workflow returns None when no example file exists."""
     from cymphony.workflow import load_example_workflow
