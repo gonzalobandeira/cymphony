@@ -297,6 +297,133 @@ class LinearClient:
             "Content-Type": "application/json",
         }
 
+    # ------------------------------------------------------------------
+    # Setup / discovery queries (BAP-189)
+    # ------------------------------------------------------------------
+
+    async def fetch_projects(self) -> list[dict[str, str]]:
+        """Return all projects visible to the authenticated user.
+
+        Each dict has ``id``, ``name``, and ``slugId`` keys.
+        """
+        query = """
+query Projects($after: String) {
+  projects(first: 50, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { id name slugId }
+  }
+}
+"""
+        results: list[dict[str, str]] = []
+        after: str | None = None
+        async with aiohttp.ClientSession(
+            headers=self._headers(), timeout=_NETWORK_TIMEOUT
+        ) as session:
+            while True:
+                variables: dict[str, Any] = {}
+                if after:
+                    variables["after"] = after
+                data = await self._request(session, query, variables)
+                page = data.get("projects") or {}
+                nodes = page.get("nodes") or []
+                for node in nodes:
+                    slug = node.get("slugId") or ""
+                    name = node.get("name") or ""
+                    pid = node.get("id") or ""
+                    if slug and pid:
+                        results.append({"id": pid, "name": name, "slugId": slug})
+
+                page_info = page.get("pageInfo") or {}
+                if not page_info.get("hasNextPage"):
+                    break
+                end_cursor = page_info.get("endCursor")
+                if not end_cursor:
+                    break
+                after = end_cursor
+
+        results.sort(key=lambda p: p.get("name", "").lower())
+        return results
+
+    async def fetch_members(self) -> list[dict[str, str]]:
+        """Return organisation members (id + displayName)."""
+        query = """
+query Members($after: String) {
+  users(first: 50, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { id displayName }
+  }
+}
+"""
+        results: list[dict[str, str]] = []
+        after: str | None = None
+        async with aiohttp.ClientSession(
+            headers=self._headers(), timeout=_NETWORK_TIMEOUT
+        ) as session:
+            while True:
+                variables: dict[str, Any] = {}
+                if after:
+                    variables["after"] = after
+                data = await self._request(session, query, variables)
+                page = data.get("users") or {}
+                nodes = page.get("nodes") or []
+                for node in nodes:
+                    uid = node.get("id") or ""
+                    name = node.get("displayName") or ""
+                    if uid and name:
+                        results.append({"id": uid, "displayName": name})
+
+                page_info = page.get("pageInfo") or {}
+                if not page_info.get("hasNextPage"):
+                    break
+                end_cursor = page_info.get("endCursor")
+                if not end_cursor:
+                    break
+                after = end_cursor
+
+        results.sort(key=lambda m: m.get("displayName", "").lower())
+        return results
+
+    async def fetch_all_workflow_state_names(self) -> list[str]:
+        """Return deduplicated workflow state names across all teams visible to the token."""
+        query = """
+query AllWorkflowStates($after: String) {
+  workflowStates(first: 50, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { name }
+  }
+}
+"""
+        names: set[str] = set()
+        after: str | None = None
+        async with aiohttp.ClientSession(
+            headers=self._headers(), timeout=_NETWORK_TIMEOUT
+        ) as session:
+            while True:
+                variables: dict[str, Any] = {}
+                if after:
+                    variables["after"] = after
+                data = await self._request(session, query, variables)
+                page = data.get("workflowStates") or {}
+                nodes = page.get("nodes") or []
+                for node in nodes:
+                    name = node.get("name")
+                    if name:
+                        names.add(name)
+
+                page_info = page.get("pageInfo") or {}
+                if not page_info.get("hasNextPage"):
+                    break
+                end_cursor = page_info.get("endCursor")
+                if not end_cursor:
+                    break
+                after = end_cursor
+
+        return sorted(names, key=str.lower)
+
+    # ------------------------------------------------------------------
+    # Runtime queries
+    # ------------------------------------------------------------------
+
     async def fetch_candidate_issues(self) -> list[Issue]:
         """Fetch issues in active states for the configured project (spec §11.1.1)."""
         issues: list[Issue] = []
