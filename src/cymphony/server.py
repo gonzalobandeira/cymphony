@@ -1611,6 +1611,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   .stack {{
     display: grid;
     gap: 18px;
+    align-content: start;
   }}
   .panel {{
     padding: 14px 18px;
@@ -1626,7 +1627,8 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     align-items: center;
   }}
   .control-toolbar {{
-    justify-content: space-between;
+    justify-content: flex-start;
+    gap: 0;
   }}
   .control-group {{
     display: flex;
@@ -1923,7 +1925,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   .panel-head {{
     display: flex;
     justify-content: space-between;
-    align-items: end;
+    align-items: baseline;
     gap: 12px;
     margin-bottom: 10px;
   }}
