@@ -166,7 +166,7 @@ def render_prompt(
         ) from exc
 
 
-_PLAN_PROMPT_TEMPLATE = """\
+_PLAN_PROMPT_TEMPLATE_CLAUDE = """\
 You are about to work on the following Linear issue:
 
 **Title**: {{ issue.title }}
@@ -183,11 +183,44 @@ Use the TodoWrite tool to create a step-by-step checklist of everything you will
 Once you have written the plan with TodoWrite, you are done — stop immediately.
 """
 
+_PLAN_PROMPT_TEMPLATE_CODEX = """\
+You are about to work on the following Linear issue:
 
-def render_plan_prompt(workflow: WorkflowDefinition, issue: Any) -> str:  # noqa: ARG001
-    """Render the planning prompt that instructs the agent to produce a TodoWrite checklist only."""
+**Title**: {{ issue.title }}
+
+{% if issue.description %}
+**Description**:
+{{ issue.description }}
+{% endif %}
+
+Your task right now is PLANNING ONLY. Do not read any files, write any code, or make any changes.
+
+Output your plan as a markdown checklist using this exact format:
+
+- [ ] First step
+- [ ] Second step
+- [ ] Third step
+
+Each item should be a concrete, actionable step. Output ONLY the checklist — no other text before or after it.
+"""
+
+
+def render_plan_prompt(
+    workflow: WorkflowDefinition,
+    issue: Any,
+    provider: str = "claude",
+) -> str:
+    """Render the planning prompt for the given provider.
+
+    Claude is instructed to use TodoWrite; Codex is instructed to output
+    a markdown checklist that can be parsed back into structured todos.
+    """
+    template = (
+        _PLAN_PROMPT_TEMPLATE_CODEX if provider == "codex"
+        else _PLAN_PROMPT_TEMPLATE_CLAUDE
+    )
     env = Environment(undefined=StrictUndefined, autoescape=False)
-    tmpl = env.from_string(_PLAN_PROMPT_TEMPLATE)
+    tmpl = env.from_string(template)
     issue_dict = _issue_to_dict(issue)
     return tmpl.render(issue=issue_dict).strip()
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent import create_agent_runner
+from .runners.codex import extract_plan_todos_from_codex_event
 from .config import ServiceConfig, build_config, validate_dispatch_config
 from .linear import LinearClient
 from .logging_ import issue_log, session_log
@@ -1477,7 +1478,7 @@ class Orchestrator:
             if not is_review:
                 entry.session.plan_comment_id = None
                 entry.status = RunStatus.PLANNING
-                plan_prompt = render_plan_prompt(self._workflow, issue)
+                plan_prompt = render_plan_prompt(self._workflow, issue, provider=self._config.agent.provider)
                 issue_log(
                     logger, logging.INFO,
                     "planning_turn_start",
@@ -1632,20 +1633,29 @@ class Orchestrator:
         if len(session.recent_events) > _MAX_RECENT_EVENTS:
             session.recent_events = session.recent_events[-_MAX_RECENT_EVENTS:]
 
-        # Detect TodoWrite tool calls in raw assistant events and sync to Linear
+        # Detect plan updates from raw agent events and sync to Linear.
+        # Claude: TodoWrite tool_use blocks in assistant messages.
+        # Codex: markdown checklists in agent_message items.
         raw = event.raw
-        if raw and raw.get("type") == "assistant":
-            message = raw.get("message") or {}
-            content = message.get("content") or []
-            for block in content:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "tool_use"
-                    and block.get("name") == "TodoWrite"
-                ):
-                    todos = (block.get("input") or {}).get("todos") or []
-                    if todos:
-                        self._sync_todo_comment(issue_id, entry, todos)
+        if raw:
+            if raw.get("type") == "assistant":
+                # Claude path: extract TodoWrite tool calls
+                message = raw.get("message") or {}
+                content = message.get("content") or []
+                for block in content:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "tool_use"
+                        and block.get("name") == "TodoWrite"
+                    ):
+                        todos = (block.get("input") or {}).get("todos") or []
+                        if todos:
+                            self._sync_todo_comment(issue_id, entry, todos)
+            elif raw.get("type") == "item.completed":
+                # Codex path: extract markdown checklist from agent_message
+                codex_todos = extract_plan_todos_from_codex_event(raw)
+                if codex_todos:
+                    self._sync_todo_comment(issue_id, entry, codex_todos)
 
         # Token accounting (spec §13.5)
         if event.usage:

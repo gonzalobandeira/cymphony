@@ -205,6 +205,65 @@ def _summarize_codex_item(item: dict) -> str | None:
     return None
 
 
+def extract_plan_todos_from_codex_event(raw: dict) -> list[dict] | None:
+    """Extract a plan todos list from a Codex ``item.completed`` event.
+
+    Codex does not have a TodoWrite tool.  Instead the planning prompt asks
+    Codex to output a markdown checklist.  This function inspects the raw
+    event payload and, if it looks like it contains a checklist, converts
+    it into the same ``[{content, status}]`` structure that Claude's
+    TodoWrite produces so downstream sync logic stays provider-agnostic.
+
+    Returns ``None`` when the event does not contain a recognisable plan.
+    """
+    if raw.get("type") != "item.completed":
+        return None
+
+    item = raw.get("item") or {}
+    if item.get("type") != "agent_message":
+        return None
+
+    text = str(item.get("text") or "")
+    return _parse_markdown_checklist(text)
+
+
+def _parse_markdown_checklist(text: str) -> list[dict] | None:
+    """Parse a markdown checklist into a TodoWrite-compatible todos list.
+
+    Recognised formats::
+
+        - [ ] pending item
+        - [x] completed item
+        - [X] completed item
+        - [ ] 🔄 in-progress item *(in progress)*
+        * [ ] also accepted with asterisk bullets
+
+    Returns ``None`` if no checklist items are found.
+    """
+    import re
+
+    pattern = re.compile(r"^[-*]\s+\[([ xX])\]\s+(.+)$", re.MULTILINE)
+    matches = pattern.findall(text)
+    if not matches:
+        return None
+
+    todos: list[dict] = []
+    for check, content in matches:
+        content = content.strip()
+        if check.lower() == "x":
+            status = "completed"
+        elif "🔄" in content or "*(in progress)*" in content:
+            # Strip decoration so stored content is clean
+            content = content.replace("🔄", "").strip()
+            content = re.sub(r"\s*\*\(in progress\)\*\s*$", "", content).strip()
+            status = "in_progress"
+        else:
+            status = "pending"
+        todos.append({"content": content, "status": status})
+
+    return todos
+
+
 def _extract_codex_usage(msg: dict) -> dict[str, int] | None:
     """Extract token usage from a Codex completion event."""
     usage = msg.get("usage")
