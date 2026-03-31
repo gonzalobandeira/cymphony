@@ -77,3 +77,165 @@ async def test_fetch_project_team_ids_paginates_all_project_issues() -> None:
 
     assert team_ids == ["team-1", "team-2"]
     assert request_mock.await_count == 2
+
+
+def _make_client() -> LinearClient:
+    return LinearClient(
+        TrackerConfig(
+            kind="linear",
+            endpoint="https://example.test/graphql",
+            api_key="test-key",
+            project_slug="proj",
+            active_states=["Todo"],
+            terminal_states=["Done"],
+            assignee=None,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_projects_returns_sorted_list() -> None:
+    client = _make_client()
+    response = {
+        "projects": {
+            "nodes": [
+                {"id": "p2", "name": "Zeta", "slugId": "zeta-abc"},
+                {"id": "p1", "name": "Alpha", "slugId": "alpha-def"},
+            ],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        }
+    }
+    with patch.object(client, "_request", AsyncMock(return_value=response)):
+        projects = await client.fetch_projects()
+
+    assert len(projects) == 2
+    assert projects[0]["name"] == "Alpha"
+    assert projects[0]["slugId"] == "alpha-def"
+    assert projects[1]["name"] == "Zeta"
+
+
+@pytest.mark.asyncio
+async def test_fetch_projects_paginates() -> None:
+    client = _make_client()
+    responses = [
+        {
+            "projects": {
+                "nodes": [{"id": "p1", "name": "A", "slugId": "a-1"}],
+                "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+            }
+        },
+        {
+            "projects": {
+                "nodes": [{"id": "p2", "name": "B", "slugId": "b-2"}],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }
+        },
+    ]
+    with patch.object(client, "_request", AsyncMock(side_effect=responses)) as mock:
+        projects = await client.fetch_projects()
+
+    assert len(projects) == 2
+    assert mock.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_projects_skips_nodes_without_slug() -> None:
+    client = _make_client()
+    response = {
+        "projects": {
+            "nodes": [
+                {"id": "p1", "name": "Good", "slugId": "good-1"},
+                {"id": "p2", "name": "Bad", "slugId": ""},
+                {"id": "", "name": "NoId", "slugId": "noid-1"},
+            ],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        }
+    }
+    with patch.object(client, "_request", AsyncMock(return_value=response)):
+        projects = await client.fetch_projects()
+
+    assert len(projects) == 1
+    assert projects[0]["slugId"] == "good-1"
+
+
+@pytest.mark.asyncio
+async def test_fetch_members_returns_sorted_list() -> None:
+    client = _make_client()
+    response = {
+        "users": {
+            "nodes": [
+                {"id": "u2", "displayName": "Zara"},
+                {"id": "u1", "displayName": "Alice"},
+            ],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        }
+    }
+    with patch.object(client, "_request", AsyncMock(return_value=response)):
+        members = await client.fetch_members()
+
+    assert len(members) == 2
+    assert members[0]["displayName"] == "Alice"
+    assert members[1]["displayName"] == "Zara"
+
+
+@pytest.mark.asyncio
+async def test_fetch_members_skips_empty_names() -> None:
+    client = _make_client()
+    response = {
+        "users": {
+            "nodes": [
+                {"id": "u1", "displayName": "Bob"},
+                {"id": "u2", "displayName": ""},
+            ],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        }
+    }
+    with patch.object(client, "_request", AsyncMock(return_value=response)):
+        members = await client.fetch_members()
+
+    assert len(members) == 1
+    assert members[0]["displayName"] == "Bob"
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_workflow_state_names_deduplicates_and_sorts() -> None:
+    client = _make_client()
+    response = {
+        "workflowStates": {
+            "nodes": [
+                {"name": "Done"},
+                {"name": "Todo"},
+                {"name": "In Progress"},
+                {"name": "Done"},  # duplicate
+            ],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        }
+    }
+    with patch.object(client, "_request", AsyncMock(return_value=response)):
+        states = await client.fetch_all_workflow_state_names()
+
+    assert states == ["Done", "In Progress", "Todo"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_workflow_state_names_paginates() -> None:
+    client = _make_client()
+    responses = [
+        {
+            "workflowStates": {
+                "nodes": [{"name": "Todo"}],
+                "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+            }
+        },
+        {
+            "workflowStates": {
+                "nodes": [{"name": "Done"}],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }
+        },
+    ]
+    with patch.object(client, "_request", AsyncMock(side_effect=responses)) as mock:
+        states = await client.fetch_all_workflow_state_names()
+
+    assert states == ["Done", "Todo"]
+    assert mock.await_count == 2

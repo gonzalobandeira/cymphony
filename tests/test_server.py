@@ -1335,6 +1335,211 @@ def test_problems_panel_hidden_when_no_problems() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Setup discovery endpoint tests (BAP-189)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_setup_projects_returns_json(tmp_path: Path) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        },
+        query={"api_key": "test-key"},
+    )
+
+    mock_projects = [
+        {"id": "p1", "name": "Alpha", "slugId": "alpha-1"},
+        {"id": "p2", "name": "Beta", "slugId": "beta-2"},
+    ]
+    with patch("cymphony.server.LinearClient") as MockClient:
+        instance = MockClient.return_value
+        instance.fetch_projects = AsyncMock(return_value=mock_projects)
+        response = await server._handle_setup_projects(request)
+
+    import json
+    body = json.loads(response.text)
+    assert body["ok"] is True
+    assert len(body["projects"]) == 2
+    assert body["projects"][0]["slugId"] == "alpha-1"
+
+
+@pytest.mark.asyncio
+async def test_setup_projects_returns_error_on_failure(tmp_path: Path) -> None:
+    from unittest.mock import AsyncMock, patch
+    from cymphony.models import TrackerError
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        },
+        query={"api_key": "bad-key"},
+    )
+
+    with patch("cymphony.server.LinearClient") as MockClient:
+        instance = MockClient.return_value
+        instance.fetch_projects = AsyncMock(
+            side_effect=TrackerError("auth", "Unauthorized")
+        )
+        response = await server._handle_setup_projects(request)
+
+    import json
+    body = json.loads(response.text)
+    assert body["ok"] is False
+    assert "Unauthorized" in body["error"]
+    assert body["projects"] == []
+
+
+@pytest.mark.asyncio
+async def test_setup_members_returns_json(tmp_path: Path) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        },
+        query={"api_key": "test-key"},
+    )
+
+    mock_members = [
+        {"id": "u1", "displayName": "Alice"},
+        {"id": "u2", "displayName": "Bob"},
+    ]
+    with patch("cymphony.server.LinearClient") as MockClient:
+        instance = MockClient.return_value
+        instance.fetch_members = AsyncMock(return_value=mock_members)
+        response = await server._handle_setup_members(request)
+
+    import json
+    body = json.loads(response.text)
+    assert body["ok"] is True
+    assert len(body["members"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_setup_states_returns_json(tmp_path: Path) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        },
+        query={"api_key": "test-key"},
+    )
+
+    mock_states = ["Backlog", "Done", "In Progress", "Todo"]
+    with patch("cymphony.server.LinearClient") as MockClient:
+        instance = MockClient.return_value
+        instance.fetch_all_workflow_state_names = AsyncMock(return_value=mock_states)
+        response = await server._handle_setup_states(request)
+
+    import json
+    body = json.loads(response.text)
+    assert body["ok"] is True
+    assert body["states"] == ["Backlog", "Done", "In Progress", "Todo"]
+
+
+@pytest.mark.asyncio
+async def test_setup_states_returns_error_on_failure(tmp_path: Path) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        },
+        query={"api_key": "bad-key"},
+    )
+
+    with patch("cymphony.server.LinearClient") as MockClient:
+        instance = MockClient.return_value
+        instance.fetch_all_workflow_state_names = AsyncMock(
+            side_effect=Exception("Connection failed")
+        )
+        response = await server._handle_setup_states(request)
+
+    import json
+    body = json.loads(response.text)
+    assert body["ok"] is False
+    assert body["states"] == []
+
+
+@pytest.mark.asyncio
+async def test_setup_page_contains_load_button(tmp_path: Path) -> None:
+    """The setup page should include the 'Load Linear data' button."""
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        }
+    )
+    response = await server._handle_setup_get(request)
+    assert response.status == 200
+    assert "Load Linear data" in response.text
+    assert "project_slug_select" in response.text
+    assert "assignee_select" in response.text
+    assert "active_states_checkboxes" in response.text
+    assert "terminal_states_checkboxes" in response.text
+
+
+@pytest.mark.asyncio
+async def test_setup_page_marks_required_and_optional_fields(tmp_path: Path) -> None:
+    """Required and optional fields should be clearly distinguished."""
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        }
+    )
+
+    response = await server._handle_setup_get(request)
+    assert "field-required" in response.text
+    assert "field-optional" in response.text
+
+
+@pytest.mark.asyncio
+async def test_setup_page_selector_script_preserves_values_and_resets_assignees(
+    tmp_path: Path,
+) -> None:
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        }
+    )
+
+    response = await server._handle_setup_get(request)
+
+    assert 'inputEl.value = selectEl.value;' in response.text
+    assert 'selectEl.value = inputEl.value;' in response.text
+    assert 'sel.innerHTML = \'<option value="">No filter (all assignees)</option>\';' in response.text
+    assert 'var currentProject = qs("#project_slug_select").value || qs("#project_slug").value;' in response.text
+    assert 'var currentAssignee = qs("#assignee_select").value || qs("#assignee").value;' in response.text
+
+
+# ---------------------------------------------------------------------------
 # BAP-188: Setup prefill tests
 # ---------------------------------------------------------------------------
 
@@ -1447,7 +1652,6 @@ def test_workflow_form_data_local_config_overrides_example(tmp_path: Path) -> No
 
     data = _workflow_form_data(local_path, workflow=local, example_workflow=example)
 
-    # Local config wins
     assert data["project_slug"] == "my-project"
     assert data["assignee"] == "alice"
     assert data["max_concurrent_agents"] == "4"
@@ -1477,7 +1681,6 @@ def test_workflow_form_data_form_overrides_win(tmp_path: Path) -> None:
 
     assert data["project_slug"] == "overridden-slug"
     assert data["max_turns"] == "99"
-    # Non-overridden fields still come from local config
     assert data["assignee"] == "alice"
     assert data["provider"] == "codex"
 
@@ -1503,8 +1706,8 @@ async def test_setup_get_prefills_from_existing_local_config(tmp_path: Path) -> 
     assert response.status == 200
     assert 'value="my-project"' in response.text
     assert 'value="alice"' in response.text
-    assert 'value="4"' in response.text  # max_concurrent_agents
-    assert 'value="9090"' in response.text  # server_port
+    assert 'value="4"' in response.text
+    assert 'value="9090"' in response.text
 
 
 @pytest.mark.asyncio
@@ -1512,14 +1715,10 @@ async def test_setup_get_seeds_from_example_when_no_local_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """GET /setup seeds defaults from WORKFLOW.example.md when no local config exists."""
-    # Create WORKFLOW.example.md in the "repo root" (cwd)
     example_path = tmp_path / "WORKFLOW.example.md"
     example_path.write_text(_EXAMPLE_WORKFLOW_YAML, encoding="utf-8")
-
-    # Point cwd to tmp_path so load_example_workflow() finds the example
     monkeypatch.chdir(tmp_path)
 
-    # No local config exists — workflow_path points to non-existent file
     workflow_path = tmp_path / ".cymphony" / "workflow.md"
 
     request = _FakeRequest(
@@ -1534,9 +1733,8 @@ async def test_setup_get_seeds_from_example_when_no_local_config(
     response = await server._handle_setup_get(request)
 
     assert response.status == 200
-    # Example values should appear in the form
-    assert 'value="2"' in response.text  # max_concurrent_agents from example
-    assert 'value="15"' in response.text  # max_turns from example
+    assert 'value="2"' in response.text
+    assert 'value="15"' in response.text
     assert "Example prompt template" in response.text
 
 
@@ -1553,7 +1751,7 @@ async def test_setup_post_preserves_provider_on_validation_failure(tmp_path: Pat
         },
         post_data={
             "tracker_api_key": "$LINEAR_API_KEY",
-            "project_slug": "",  # Missing required field → validation error
+            "project_slug": "",
             "assignee": "",
             "active_states": "Todo, In Progress",
             "terminal_states": "Done",
@@ -1562,7 +1760,7 @@ async def test_setup_post_preserves_provider_on_validation_failure(tmp_path: Pat
             "max_concurrent_agents": "3",
             "max_turns": "20",
             "max_retry_backoff_ms": "300000",
-            "provider": "codex",  # Should be preserved
+            "provider": "codex",
             "command": "codex",
             "turn_timeout_ms": "3600000",
             "read_timeout_ms": "60000",
@@ -1591,12 +1789,9 @@ async def test_setup_post_preserves_provider_on_validation_failure(tmp_path: Pat
 
     response = await server._handle_setup_post(request)
 
-    # Validation failed (no project_slug), form should re-render with user values
     assert response.status == 200
-    assert "project_slug" in response.text.lower()  # error message
-    # Provider should be preserved as "codex"
+    assert "project_slug" in response.text.lower()
     assert 'value="codex" selected' in response.text
-    # Other user-entered values preserved
     assert "git clone ." in response.text
     assert "Custom prompt." in response.text
 
@@ -1665,7 +1860,6 @@ async def test_settings_post_validation_failure_preserves_existing_config_contex
     tmp_path: Path,
 ) -> None:
     """POST /settings validation failure should layer user values on top of existing config."""
-    # Create an existing local config with known values
     workflow_path = tmp_path / ".cymphony" / "workflow.md"
     workflow_path.parent.mkdir(parents=True)
     workflow_path.write_text(_LOCAL_WORKFLOW_YAML, encoding="utf-8")
@@ -1679,7 +1873,7 @@ async def test_settings_post_validation_failure_preserves_existing_config_contex
         },
         post_data={
             "tracker_api_key": "$LINEAR_API_KEY",
-            "project_slug": "",  # Missing required field → validation error
+            "project_slug": "",
             "assignee": "bob",
             "active_states": "Todo, In Progress",
             "terminal_states": "Done",
@@ -1718,9 +1912,7 @@ async def test_settings_post_validation_failure_preserves_existing_config_contex
     response = await server._handle_settings_post(request)
 
     assert response.status == 200
-    # User-submitted value should win (form_overrides layer)
     assert 'value="bob"' in response.text
-    # Provider from user submission preserved
     assert 'value="codex" selected' in response.text
 
 
@@ -1744,7 +1936,7 @@ async def test_setup_post_validation_failure_seeds_from_example(
         },
         post_data={
             "tracker_api_key": "$LINEAR_API_KEY",
-            "project_slug": "",  # Missing → validation error
+            "project_slug": "",
             "assignee": "",
             "active_states": "Todo, In Progress",
             "terminal_states": "Done",
@@ -1783,9 +1975,7 @@ async def test_setup_post_validation_failure_seeds_from_example(
     response = await server._handle_setup_post(request)
 
     assert response.status == 200
-    # Should re-render with errors
     assert "project_slug" in response.text.lower()
-    # User-submitted prompt preserved
     assert "Custom prompt." in response.text
 
 

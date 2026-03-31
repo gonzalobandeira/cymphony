@@ -87,6 +87,7 @@ class Orchestrator:
         self._tick_handle: asyncio.TimerHandle | None = None
         self._tick_due_at_ms: float | None = None
         self._tick_rerun_requested: bool = False
+        self._plan_comment_locks: dict[str, asyncio.Lock] = {}
 
     # ------------------------------------------------------------------
     # Startup
@@ -955,6 +956,7 @@ class Orchestrator:
         entry = self._state.running.pop(issue_id, None)
         if not entry:
             return
+        self._plan_comment_locks.pop(issue_id, None)
 
         if entry.task and not entry.task.done():
             entry.task.cancel()
@@ -994,22 +996,24 @@ class Orchestrator:
         """Fire-and-forget: sync TodoWrite todos to a Linear comment; never raises."""
         body = self._render_todo_checklist(todos)
         entry.session.latest_plan = body
-        comment_id = entry.session.plan_comment_id
 
         async def _do() -> None:
+            lock = self._plan_comment_locks.setdefault(issue_id, asyncio.Lock())
             try:
-                client = LinearClient(self._config.tracker)
-                if comment_id is None:
-                    new_id = await client.create_comment(issue_id, body)
-                    entry.session.plan_comment_id = new_id
-                    logger.info(
-                        f"action=plan_comment_created issue_id={issue_id} comment_id={new_id}"
-                    )
-                else:
-                    await client.update_comment(comment_id, body)
-                    logger.info(
-                        f"action=plan_comment_updated issue_id={issue_id} comment_id={comment_id}"
-                    )
+                async with lock:
+                    comment_id = entry.session.plan_comment_id
+                    client = LinearClient(self._config.tracker)
+                    if comment_id is None:
+                        new_id = await client.create_comment(issue_id, body)
+                        entry.session.plan_comment_id = new_id
+                        logger.info(
+                            f"action=plan_comment_created issue_id={issue_id} comment_id={new_id}"
+                        )
+                    else:
+                        await client.update_comment(comment_id, body)
+                        logger.info(
+                            f"action=plan_comment_updated issue_id={issue_id} comment_id={comment_id}"
+                        )
             except Exception as exc:
                 logger.warning(
                     f"action=plan_comment_sync_failed issue_id={issue_id} error={exc}"
