@@ -512,6 +512,8 @@ def test_render_dashboard_shows_waiting_reasons_and_recent_problems(
     assert "invalid_config" in html
     assert "severity-error" in html
     assert "pause_dispatching" in html
+    assert '<time class="cym-ts" data-utc="2026-03-28T12:00:00+00:00">' in html
+    assert "&lt;time class=" not in html
 
 
 @pytest.mark.asyncio
@@ -707,6 +709,78 @@ def test_render_dashboard_shows_issue_drilldown_details() -> None:
     assert "Recent Events" in html
     assert "Plan comment" in html
     assert "Writing tests" in html
+
+
+def test_render_dashboard_recent_events_show_preview_and_expand_full_message() -> None:
+    long_message = (
+        "Updated orchestrator.py to include richer retry metadata and keep the full "
+        "runtime payload available in the event history for later inspection.\n"
+        "Added follow-up notes about the reconciliation path."
+    )
+    html = _render_dashboard(
+        {
+            "generated_at": "2026-03-28T12:00:00+00:00",
+            "summary": {
+                "running": 1,
+                "retrying": 0,
+                "ready": 0,
+                "waiting": 0,
+                "needs_attention": 0,
+                "capacity_in_use": "1/2",
+            },
+            "totals": {},
+            "controls": {"dispatch_paused": False, "shutdown_requested": False, "recent_actions": []},
+            "running": [
+                {
+                    "issue_id": "issue-1",
+                    "issue_identifier": "BAP-170",
+                    "issue_title": "Per-issue drill-down",
+                    "issue_url": "https://linear.app/bandeira/issue/BAP-170",
+                    "issue_description": "Inspect runtime state",
+                    "issue_labels": ["Feature"],
+                    "issue_comments": [],
+                    "state": "In Progress",
+                    "run_status": "StreamingTurn",
+                    "session_id": "sess-123",
+                    "turn_count": 3,
+                    "last_event": "notification",
+                    "last_message": long_message,
+                    "started_at": "2026-03-28T11:00:00+00:00",
+                    "last_event_at": "2026-03-28T11:05:00+00:00",
+                    "retry_attempt": None,
+                    "workspace_path": "/tmp/BAP-170",
+                    "plan_comment_id": "comment-1",
+                    "latest_plan": "**Agent Plan**\n- [ ] Add drill-down",
+                    "recent_events": [
+                        {
+                            "event": "notification",
+                            "timestamp": "2026-03-28T11:05:00+00:00",
+                            "message": long_message,
+                            "usage": {"input_tokens": 321, "output_tokens": 123},
+                        }
+                    ],
+                    "tokens": {
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "total_tokens": 150,
+                    },
+                }
+            ],
+            "retrying": [],
+            "ready": [],
+            "waiting": [],
+            "blocked": [],
+            "recently_completed": [],
+            "waiting_reasons": [],
+            "recent_problems": [],
+            "skipped": [],
+        }
+    )
+
+    assert "Notification" in html
+    assert "Full message" in html
+    assert "tokens 321 in / 123 out" in html
+    assert "keep the full runtime payload available" in html
 
 
 def test_render_dashboard_includes_js_refresh_and_toast() -> None:

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from cymphony.models import ReviewDecision
-from cymphony.review import REVIEW_RESULT_FILENAME, parse_review_result
+from cymphony.review import REVIEW_RESULT_FILENAME, is_review_result_missing, parse_review_result
 
 
 @pytest.fixture
@@ -41,6 +41,7 @@ def test_missing_file_returns_error(workspace: str) -> None:
     result = parse_review_result(workspace)
     assert result.decision is None
     assert "not found" in (result.error or "")
+    assert is_review_result_missing(result.error) is True
 
 
 def test_invalid_json_returns_error(workspace: str) -> None:
@@ -56,3 +57,4 @@ def test_invalid_decision_returns_error(workspace: str) -> None:
     result = parse_review_result(workspace)
     assert result.decision is None
     assert "approved" in (result.error or "")
+    assert is_review_result_missing(result.error) is False

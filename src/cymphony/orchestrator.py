@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -35,7 +36,7 @@ from .models import (
     WorkflowError,
 )
 from .preflight import PreflightResult, run_preflight_checks
-from .review import parse_review_result
+from .review import is_review_result_missing, parse_review_result
 from .state import StateManager
 from .workflow import WorkflowWatcher, load_workflow, render_plan_prompt, render_prompt, render_review_prompt
 from .workspace import WorkspaceManager
@@ -58,6 +59,7 @@ _CONTINUATION_RETRY_DELAY_MS = 1000.0
 _MAX_RECENT_PROBLEMS = 25
 _CONTROL_HISTORY_LIMIT = 50
 _MAX_TRANSITION_HISTORY = 50
+_DEFAULT_BASE_BRANCH = "main"
 
 
 class Orchestrator:
@@ -1749,6 +1751,43 @@ class Orchestrator:
                 else:
                     target = qa.failure if qa.enabled else None
             else:
+                if qa.enabled:
+                    review_ready, review_error = await self._validate_review_handoff(identifier)
+                    if not review_ready:
+                        entry.status = RunStatus.FAILED
+                        self._state.completed.discard(issue_id)
+                        self._record_problem(
+                            kind="qa_review_not_ready",
+                            summary="Build finished without a reviewable GitHub PR",
+                            detail=review_error,
+                            issue_id=issue_id,
+                            issue_identifier=identifier,
+                        )
+                        issue_log(
+                            logger, logging.WARNING,
+                            "qa_review_handoff_blocked",
+                            issue_id, identifier,
+                            error=review_error,
+                        )
+                        failure_target = self._config.transitions.resolve("failure")
+                        if failure_target:
+                            active_lower = [s.lower() for s in self._config.tracker.active_states]
+                            if entry.issue.state.lower() in active_lower:
+                                await self._transition_issue_state(
+                                    issue_id,
+                                    failure_target,
+                                    trigger="failure",
+                                    issue_identifier=identifier,
+                                    from_state=entry.issue.state,
+                                )
+                        await self._schedule_retry(
+                            issue_id,
+                            identifier,
+                            attempt=_next_attempt(entry.retry_attempt),
+                            error=review_error,
+                            entry=entry,
+                        )
+                        return
                 target = qa.dispatch if qa.enabled else self._config.transitions.resolve("success")
             transition_succeeded = False
             if target:
@@ -1877,9 +1916,14 @@ class Orchestrator:
             result = parse_review_result(workspace_path)
 
         if result.decision is None:
+            missing_result = is_review_result_missing(result.error)
             self._record_problem(
-                kind="qa_review_parse_error",
-                summary="QA review result could not be parsed",
+                kind="qa_review_result_missing" if missing_result else "qa_review_parse_error",
+                summary=(
+                    "QA review result file was not produced"
+                    if missing_result
+                    else "QA review result could not be parsed"
+                ),
                 detail=result.error or "unknown parse error",
                 issue_id=issue_id,
                 issue_identifier=identifier,
@@ -1936,6 +1980,92 @@ class Orchestrator:
             attempt=attempt,
             error=error,
             entry=entry,
+        )
+
+    async def _validate_review_handoff(self, identifier: str) -> tuple[bool, str]:
+        """Verify that build-mode work produced a reviewable PR before QA dispatch."""
+        workspace_path = WorkspaceManager(self._config).get_path(identifier)
+        if not workspace_path.exists():
+            return False, f"Workspace path does not exist: {workspace_path}"
+
+        base_branch = (self._config.preflight.base_branch or _DEFAULT_BASE_BRANCH).strip()
+        if not base_branch:
+            base_branch = _DEFAULT_BASE_BRANCH
+
+        rc, stdout, stderr = await self._run_workspace_command(
+            workspace_path,
+            "git", "branch", "--show-current",
+        )
+        if rc != 0:
+            return False, f"Failed to detect current branch: {stderr or stdout or 'unknown git error'}"
+        branch = stdout.strip()
+        if not branch:
+            return False, "Workspace is not on a named branch after the build run"
+        if branch == base_branch:
+            return False, (
+                f"Workspace is still on {base_branch!r}; "
+                "after_run did not leave a review branch checked out"
+            )
+
+        rc, stdout, stderr = await self._run_workspace_command(
+            workspace_path,
+            "git", "status", "--porcelain",
+        )
+        if rc != 0:
+            return False, f"Failed to inspect workspace status: {stderr or stdout or 'unknown git error'}"
+        dirty_lines = [line for line in stdout.splitlines() if line.strip()]
+        if dirty_lines:
+            sample = "; ".join(dirty_lines[:5])
+            return False, f"Workspace still has uncommitted changes after the build run: {sample}"
+
+        rc, stdout, stderr = await self._run_workspace_command(
+            workspace_path,
+            "gh", "pr", "list",
+            "--head", branch,
+            "--json", "url,state",
+            "--limit", "1",
+        )
+        if rc != 0:
+            return False, (
+                "Failed to confirm a GitHub PR for the review branch: "
+                f"{stderr or stdout or 'unknown gh error'}"
+            )
+
+        try:
+            prs = json.loads(stdout or "[]")
+        except json.JSONDecodeError as exc:
+            return False, f"Failed to parse GitHub PR lookup output: {exc}"
+
+        if not prs:
+            return False, f"No GitHub PR exists for branch {branch!r}"
+
+        pr_url = str(prs[0].get("url") or "").strip()
+        if not pr_url:
+            return False, f"GitHub PR lookup for branch {branch!r} returned no URL"
+
+        return True, pr_url
+
+    async def _run_workspace_command(
+        self,
+        workspace_path: Path,
+        *args: str,
+    ) -> tuple[int, str, str]:
+        """Run a command inside a workspace and capture its output."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                cwd=str(workspace_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            return 127, "", str(exc)
+
+        stdout, stderr = await proc.communicate()
+        return (
+            proc.returncode or 0,
+            (stdout or b"").decode(errors="replace").strip(),
+            (stderr or b"").decode(errors="replace").strip(),
         )
 
     def _clear_qa_review_cycle_state(self, issue_id: str) -> None:

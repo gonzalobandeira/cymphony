@@ -195,13 +195,17 @@ def _summarize_codex_item(item: dict) -> str | None:
     """Extract a short operator-facing summary from a completed Codex item."""
     item_type = item.get("type")
     if item_type == "agent_message":
-        return str(item.get("text") or "")[:300] or None
+        text = str(item.get("text") or "").strip()
+        if not text:
+            return None
+        return text[:3999].rstrip() + "…" if len(text) > 4000 else text
     if item_type == "command_execution":
         command = str(item.get("command") or "?")
         status = str(item.get("status") or "")
         exit_code = item.get("exit_code")
         suffix = f" exit={exit_code}" if exit_code is not None else ""
-        return f"[command:{status}] {command}{suffix}"[:300]
+        summary = f"[command:{status}] {command}{suffix}".strip()
+        return summary[:3999].rstrip() + "…" if len(summary) > 4000 else summary
     return None
 
 

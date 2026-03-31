@@ -181,14 +181,17 @@ def parse_claude_stream_event(
 def _summarize_content(content: list) -> str:
     """Extract a short text summary from assistant message content."""
     parts = []
-    for block in content[:3]:  # limit to first 3 blocks
+    for block in content[:8]:
         if isinstance(block, dict):
             if block.get("type") == "text":
-                text = str(block.get("text", ""))[:200]
+                text = str(block.get("text", "")).strip()
                 parts.append(text)
             elif block.get("type") == "tool_use":
                 parts.append(f"[tool: {block.get('name', '?')}]")
-    return " ".join(parts)[:300]
+    summary = " ".join(part for part in parts if part)
+    if len(summary) > 4000:
+        return summary[:3999].rstrip() + "…"
+    return summary
 
 
 def _extract_usage(msg: dict) -> dict[str, int] | None:

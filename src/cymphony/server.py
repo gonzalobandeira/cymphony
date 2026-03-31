@@ -164,29 +164,74 @@ def _render_issue_comments(comments: list[dict]) -> str:
     return f"<ul class='event-list'>{''.join(items)}</ul>"
 
 
+def _event_label(event_name: str | None) -> str:
+    label = str(event_name or "unknown").replace("_", " ").strip()
+    return label.title() if label else "Unknown"
+
+
+def _compact_event_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return " ".join(str(value).split())
+
+
+def _event_preview(message: str, *, limit: int = 160) -> str:
+    compact = _compact_event_text(message)
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip() + "…"
+
+
 def _render_recent_events(events: list[dict]) -> str:
     if not events:
         return "<p class='empty small'>No recent runtime events yet.</p>"
 
     items = []
-    for event in reversed(events):
-        label = escape(str(event.get("event") or "unknown"))
+    for index, event in enumerate(reversed(events)):
+        label = escape(_event_label(event.get("event")))
         timestamp = _format_timestamp(str(event.get("timestamp") or ""))
-        message = escape(str(event.get("message") or ""))
+        message = str(event.get("message") or "")
+        preview = _event_preview(message)
+        preview_html = (
+            f"<div class='event-preview'>{escape(preview)}</div>"
+            if preview else ""
+        )
+
         usage = event.get("usage") or {}
         usage_text = ""
         if usage:
             usage_text = (
-                f"tokens in/out: {usage.get('input_tokens', 0)}/"
-                f"{usage.get('output_tokens', 0)}"
+                f"tokens {usage.get('input_tokens', 0)} in / "
+                f"{usage.get('output_tokens', 0)} out"
             )
-        details = " · ".join(part for part in [timestamp, message, usage_text] if part)
+        details = " · ".join(part for part in [timestamp, escape(usage_text)] if part)
+
+        full_message_html = ""
+        if message and _compact_event_text(message) != preview:
+            event_id = f"event-{index}"
+            full_message_html = (
+                f"<details class='event-message'>"
+                f"<summary id='{event_id}'>Full message</summary>"
+                f"<pre>{escape(message)}</pre>"
+                f"</details>"
+            )
+        elif message and ("\n" in message or len(message) > 160):
+            full_message_html = (
+                f"<details class='event-message'>"
+                f"<summary>Full message</summary>"
+                f"<pre>{escape(message)}</pre>"
+                f"</details>"
+            )
+
         items.append(
-            f"<li><strong>{label}</strong>"
-            f"{f'<div class=\"muted\">{details}</div>' if details else ''}"
-            f"</li>"
+            "<li class='event-item'>"
+            f"<div class='event-head'><strong>{label}</strong></div>"
+            f"{preview_html}"
+            f"{f'<div class=\"muted event-meta\">{details}</div>' if details else ''}"
+            f"{full_message_html}"
+            "</li>"
         )
-    return f"<ul class='event-list'>{''.join(items)}</ul>"
+    return f"<ul class='event-list recent-events'>{''.join(items)}</ul>"
 
 
 def _render_issue_drilldown(entry: dict, retry_due: str | None = None) -> str:
@@ -1262,7 +1307,7 @@ def _render_problems_panel(problems: list[dict[str, object]]) -> str:
         kind = escape(str(problem.get("kind") or ""))
         summary = escape(str(problem.get("summary") or ""))
         detail = escape(str(problem.get("detail") or ""))
-        observed_at = escape(_format_timestamp(problem.get("observed_at")))
+        observed_at = _format_timestamp(problem.get("observed_at"))
         issue_identifier = problem.get("issue_identifier")
 
         issue_cell = "-"
@@ -1810,6 +1855,49 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     margin: 0;
     padding-left: 18px;
     font-family: "Avenir Next", "Segoe UI", sans-serif;
+  }}
+  .recent-events {{
+    padding-left: 0;
+    list-style: none;
+    display: grid;
+    gap: 10px;
+  }}
+  .event-item {{
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+  }}
+  .event-item:last-child {{
+    border-bottom: 0;
+    padding-bottom: 0;
+  }}
+  .event-head {{
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 4px;
+  }}
+  .event-preview {{
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.96rem;
+    line-height: 1.4;
+    word-break: break-word;
+  }}
+  .event-meta {{
+    margin-top: 4px;
+    font-size: 0.86rem;
+  }}
+  .event-message {{
+    margin-top: 8px;
+  }}
+  .event-message summary {{
+    cursor: pointer;
+    color: var(--accent);
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.88rem;
+    font-weight: 600;
+  }}
+  .event-message pre {{
+    margin-top: 8px;
   }}
   pre {{
     white-space: pre-wrap;

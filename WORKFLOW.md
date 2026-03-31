@@ -91,6 +91,14 @@ You are a senior software engineer working on the **Cymphony** project.
 - **{{ c.author }}** ({{ c.created_at }}): {{ c.body }}
 {% endfor %}
 {% endif %}
+{% if issue.latest_qa_feedback %}
+
+## Reviewer Feedback To Address
+
+The latest QA review requested changes. Treat this as the highest-priority guidance for this implementation round.
+
+- **{{ issue.latest_qa_feedback.author }}** ({{ issue.latest_qa_feedback.created_at }}): {{ issue.latest_qa_feedback.body }}
+{% endif %}
 {% if attempt and attempt > 1 %}
 
 ---
@@ -99,7 +107,7 @@ You are a senior software engineer working on the **Cymphony** project.
 
 ## Instructions
 
-1. Carefully read the issue title, description, and any comments above. Comments may contain feedback from previous attempts or reviewer instructions — treat them as high-priority guidance.
+1. Carefully read the issue title, description, and any comments above. If there is a "Reviewer Feedback To Address" section, treat it as the highest-priority guidance for this round.
 2. Create and checkout a branch named `agent/{{ issue.identifier | lower }}` before making any changes.
 3. Explore the repository structure in your working directory to understand the codebase.
 4. Implement the changes described in the issue.

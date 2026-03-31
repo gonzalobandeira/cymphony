@@ -163,6 +163,21 @@ class TestClaudeStreamParsing:
         assert event.event == AgentEventType.NOTIFICATION
         assert "[tool: bash]" in (event.message or "")
 
+    def test_parse_assistant_message_preserves_longer_context(self) -> None:
+        long_text = "line " * 500
+        msg = (
+            '{"type": "assistant", "message": {"content": ['
+            '{"type": "text", "text": "' + long_text + '"},'
+            '{"type": "tool_use", "name": "Edit"}'
+            "]}}"
+        )
+        event, sid, ok, err = parse_claude_stream_event(msg, "s1", "iss", "ID-1", 1)
+        assert event is not None
+        assert event.event == AgentEventType.NOTIFICATION
+        assert "[tool: Edit]" in (event.message or "")
+        assert len(event.message or "") > 300
+        assert len(event.message or "") <= 4000
+
     def test_parse_unknown_type(self) -> None:
         event, sid, ok, err = parse_claude_stream_event(
             '{"type": "something_else"}',

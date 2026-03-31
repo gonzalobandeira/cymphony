@@ -202,8 +202,8 @@ class TestCodexStreamParsing:
         assert event.event == AgentEventType.SESSION_STARTED
         assert sid == "s1"
 
-    def test_parse_agent_message_truncation(self) -> None:
-        long_content = "x" * 500
+    def test_parse_agent_message_keeps_more_context(self) -> None:
+        long_content = "x" * 1200
         msg = (
             '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"'
             + long_content
@@ -211,7 +211,7 @@ class TestCodexStreamParsing:
         )
         event, sid, ok, err = parse_codex_stream_event(msg, "s1", "iss", "ID-1", 1)
         assert event is not None
-        assert len(event.message or "") <= 300
+        assert event.message == long_content
 
 
 # ---------------------------------------------------------------------------

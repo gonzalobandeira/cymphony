@@ -493,7 +493,8 @@ class TestWorkerDoneTransitions:
         assert f"{issue.identifier}/REVIEW_RESULT.json" in retries[0][2]
         assert comments and "not found" in comments[0]
         assert len(orch._state.recent_problems) == 1
-        assert orch._state.recent_problems[0].kind == "qa_review_parse_error"
+        assert orch._state.recent_problems[0].kind == "qa_review_result_missing"
+        assert orch._state.recent_problems[0].summary == "QA review result file was not produced"
 
     @pytest.mark.asyncio
     async def test_review_uses_cached_result_after_file_is_removed(
@@ -557,6 +558,11 @@ class TestWorkerDoneTransitions:
             AsyncMock(side_effect=lambda iid, state, **kwargs: (transitions.append((iid, state)) or True)),
         )
         monkeypatch.setattr(
+            orch,
+            "_validate_review_handoff",
+            AsyncMock(return_value=(True, "https://github.test/pr/201")),
+        )
+        monkeypatch.setattr(
             orch, "_schedule_retry",
             AsyncMock(),
         )
@@ -595,6 +601,60 @@ class TestWorkerDoneTransitions:
         await orch._on_worker_done(issue.id, issue.identifier, entry, task)
 
         assert transitions == [(issue.id, "In Review")]
+
+    @pytest.mark.asyncio
+    async def test_build_success_without_reviewable_pr_retries_instead_of_entering_qa_review(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch = _build_orchestrator()
+        issue = _build_issue(state="In Progress", identifier="BAP-201")
+        entry = _build_running_entry(issue, mode=ExecutionMode.BUILD)
+        orch._state.running[issue.id] = entry
+
+        async def noop():
+            pass
+
+        task = asyncio.ensure_future(noop())
+        await task
+        entry.task = task
+
+        transitions: list[tuple[str, str]] = []
+        retries: list[tuple[str, int, str | None, ExecutionMode | None]] = []
+        monkeypatch.setattr(
+            orch, "_transition_issue_state",
+            AsyncMock(side_effect=lambda iid, state, **kwargs: (transitions.append((iid, state)) or True)),
+        )
+        monkeypatch.setattr(
+            orch,
+            "_validate_review_handoff",
+            AsyncMock(return_value=(False, "No GitHub PR exists for branch 'agent/bap-201'")),
+        )
+
+        async def fake_schedule_retry(
+            issue_id: str,
+            identifier: str,
+            attempt: int,
+            delay_ms: float | None = None,
+            error: str | None = None,
+            entry: RunningEntry | None = None,
+        ) -> None:
+            retries.append((issue_id, attempt, error, entry.mode if entry else None))
+
+        monkeypatch.setattr(orch, "_schedule_retry", fake_schedule_retry)
+
+        await orch._on_worker_done(issue.id, issue.identifier, entry, task)
+
+        assert transitions == []
+        assert retries == [(
+            issue.id,
+            1,
+            "No GitHub PR exists for branch 'agent/bap-201'",
+            ExecutionMode.BUILD,
+        )]
+        assert entry.status == RunStatus.FAILED
+        assert issue.id not in orch._state.completed
+        assert orch._state.recent_problems[0].kind == "qa_review_not_ready"
+        assert "reviewable GitHub PR" in orch._state.recent_problems[0].summary
 
     @pytest.mark.asyncio
     async def test_review_changes_requested_holds_issue_after_bounce_limit(

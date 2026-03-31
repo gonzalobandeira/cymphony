@@ -11,6 +11,7 @@ from .models import ReviewDecision, ReviewResult
 logger = logging.getLogger(__name__)
 
 REVIEW_RESULT_FILENAME = "REVIEW_RESULT.json"
+_MISSING_FILE_PREFIX = "Review result file not found: "
 
 _VALID_DECISIONS = {d.value for d in ReviewDecision}
 
@@ -20,7 +21,7 @@ def parse_review_result(workspace_path: str) -> ReviewResult:
     result_path = Path(workspace_path) / REVIEW_RESULT_FILENAME
 
     if not result_path.exists():
-        error = f"Review result file not found: {result_path}"
+        error = f"{_MISSING_FILE_PREFIX}{result_path}"
         logger.warning(f"action=review_result_missing path={result_path}")
         return ReviewResult(decision=None, error=error)
 
@@ -81,3 +82,8 @@ def parse_review_result(workspace_path: str) -> ReviewResult:
         f"decision={decision.value} has_summary={summary is not None}"
     )
     return ReviewResult(decision=decision, summary=summary, raw_output=raw_text)
+
+
+def is_review_result_missing(error: str | None) -> bool:
+    """Return whether a review-result error means the artifact was never written."""
+    return bool(error and error.startswith(_MISSING_FILE_PREFIX))

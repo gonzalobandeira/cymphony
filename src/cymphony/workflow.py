@@ -154,8 +154,9 @@ def render_prompt(
             f"Template syntax error: {exc}",
         ) from exc
 
-    # Convert issue to dict with string keys for template compatibility
+    # Convert issue to dict with string keys for template compatibility.
     issue_dict = _issue_to_dict(issue)
+    issue_dict["latest_qa_feedback"] = _extract_latest_qa_feedback(issue_dict)
 
     try:
         return tmpl.render(issue=issue_dict, attempt=attempt)
@@ -296,6 +297,27 @@ def _issue_to_dict(issue: Any) -> dict[str, Any]:
                 result[f.name] = val
         return result
     return issue
+
+
+def _extract_latest_qa_feedback(issue: dict[str, Any]) -> dict[str, str] | None:
+    """Return the latest QA changes-requested comment for the build prompt."""
+    comments = issue.get("comments")
+    if not isinstance(comments, list):
+        return None
+
+    for comment in reversed(comments):
+        if not isinstance(comment, dict):
+            continue
+        body = str(comment.get("body") or "").strip()
+        if not body.startswith("**QA review requested changes**"):
+            continue
+        return {
+            "author": str(comment.get("author") or "Unknown"),
+            "created_at": str(comment.get("created_at") or ""),
+            "body": body,
+        }
+
+    return None
 
 
 # ---------------------------------------------------------------------------
