@@ -717,12 +717,16 @@ def _render_setup_page(
     toggleEl.onclick = function() {{
       useManual = !useManual;
       if (useManual) {{
+        inputEl.value = selectEl.value;
         hide(selectEl);
         show(inputEl);
         inputEl.name = name;
         selectEl.name = "";
         toggleEl.textContent = "Switch to selector";
       }} else {{
+        if (inputEl.value) {{
+          selectEl.value = inputEl.value;
+        }}
         show(selectEl);
         hide(inputEl);
         selectEl.name = name;
@@ -811,7 +815,7 @@ def _render_setup_page(
     var toggle = qs("#assignee_toggle");
     if (!sel || !members.length) return;
 
-    // Keep the first empty option
+    sel.innerHTML = '<option value="">No filter (all assignees)</option>';
     members.forEach(function(m) {{
       var opt = document.createElement("option");
       opt.value = m.displayName;
@@ -844,16 +848,18 @@ def _render_setup_page(
       var projData = results[0];
       var membData = results[1];
       var stateData = results[2];
+      var currentProject = qs("#project_slug_select").value || qs("#project_slug").value;
+      var currentAssignee = qs("#assignee_select").value || qs("#assignee").value;
 
       var errors = [];
       if (projData.ok && projData.projects.length) {{
-        populateProjectSelect(projData.projects, qs("#project_slug").value);
+        populateProjectSelect(projData.projects, currentProject);
       }} else if (!projData.ok) {{
         errors.push("Projects: " + (projData.error || "unknown error"));
       }}
 
       if (membData.ok && membData.members.length) {{
-        populateAssigneeSelect(membData.members, qs("#assignee").value);
+        populateAssigneeSelect(membData.members, currentAssignee);
       }} else if (!membData.ok) {{
         errors.push("Members: " + (membData.error || "unknown error"));
       }}

@@ -1513,3 +1513,25 @@ async def test_setup_page_marks_required_and_optional_fields(tmp_path: Path) -> 
     response = await server._handle_setup_get(request)
     assert "field-required" in response.text
     assert "field-optional" in response.text
+
+
+@pytest.mark.asyncio
+async def test_setup_page_selector_script_preserves_values_and_resets_assignees(
+    tmp_path: Path,
+) -> None:
+    request = _FakeRequest(
+        app={
+            "orchestrator": None,
+            "workflow_path": tmp_path / "WORKFLOW.md",
+            "setup_mode": True,
+            "setup_error": None,
+        }
+    )
+
+    response = await server._handle_setup_get(request)
+
+    assert 'inputEl.value = selectEl.value;' in response.text
+    assert 'selectEl.value = inputEl.value;' in response.text
+    assert 'sel.innerHTML = \'<option value="">No filter (all assignees)</option>\';' in response.text
+    assert 'var currentProject = qs("#project_slug_select").value || qs("#project_slug").value;' in response.text
+    assert 'var currentAssignee = qs("#assignee_select").value || qs("#assignee").value;' in response.text
