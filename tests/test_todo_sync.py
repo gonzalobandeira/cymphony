@@ -28,11 +28,17 @@ from cymphony.models import (
     HooksConfig,
 )
 from cymphony.orchestrator import Orchestrator
+from cymphony.workflows.execution import ExecutionWorkflow
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _build_execution_workflow() -> ExecutionWorkflow:
+    """Build an ExecutionWorkflow with stub dependencies (render_plan_comment needs none)."""
+    return ExecutionWorkflow(linear=None, workspaces=None, prs=None)  # type: ignore[arg-type]
+
 
 def _build_orchestrator() -> Orchestrator:
     config = ServiceConfig(
@@ -150,38 +156,47 @@ def _make_todowrite_event(todos: list[dict]) -> AgentEvent:
 
 
 # ---------------------------------------------------------------------------
-# _render_todo_checklist tests
+# render_plan_comment tests (ExecutionWorkflow)
 # ---------------------------------------------------------------------------
+
+def _build_execution_workflow() -> ExecutionWorkflow:
+    from unittest.mock import MagicMock
+    return ExecutionWorkflow(
+        linear=MagicMock(),
+        workspaces=MagicMock(),
+        prs=MagicMock(),
+    )
+
 
 class TestRenderTodoChecklist:
     def test_completed_items(self) -> None:
-        orch = _build_orchestrator()
+        wf = _build_execution_workflow()
         todos = [{"content": "Set up project", "status": "completed"}]
-        result = orch._render_todo_checklist(todos)
+        result = wf.render_plan_comment(todos)
         assert "- [x] Set up project" in result
 
     def test_in_progress_items(self) -> None:
-        orch = _build_orchestrator()
+        wf = _build_execution_workflow()
         todos = [{"content": "Write tests", "status": "in_progress"}]
-        result = orch._render_todo_checklist(todos)
+        result = wf.render_plan_comment(todos)
         assert "- [ ] 🔄 Write tests *(in progress)*" in result
 
     def test_pending_items(self) -> None:
-        orch = _build_orchestrator()
+        wf = _build_execution_workflow()
         todos = [{"content": "Deploy", "status": "pending"}]
-        result = orch._render_todo_checklist(todos)
+        result = wf.render_plan_comment(todos)
         assert "- [ ] Deploy" in result
         assert "🔄" not in result
         assert "in progress" not in result
 
     def test_mixed_statuses(self) -> None:
-        orch = _build_orchestrator()
+        wf = _build_execution_workflow()
         todos = [
             {"content": "Step 1", "status": "completed"},
             {"content": "Step 2", "status": "in_progress"},
             {"content": "Step 3", "status": "pending"},
         ]
-        result = orch._render_todo_checklist(todos)
+        result = wf.render_plan_comment(todos)
         lines = result.split("\n")
         # First line is the heading
         assert "**Agent Plan**" in lines[0]
@@ -190,14 +205,14 @@ class TestRenderTodoChecklist:
         assert "- [ ] Step 3" in result
 
     def test_empty_todos(self) -> None:
-        orch = _build_orchestrator()
-        result = orch._render_todo_checklist([])
+        wf = _build_execution_workflow()
+        result = wf.render_plan_comment([])
         assert "**Agent Plan**" in result
 
     def test_missing_status_defaults_to_pending(self) -> None:
-        orch = _build_orchestrator()
+        wf = _build_execution_workflow()
         todos = [{"content": "Unknown status"}]
-        result = orch._render_todo_checklist(todos)
+        result = wf.render_plan_comment(todos)
         assert "- [ ] Unknown status" in result
         assert "[x]" not in result
 
@@ -418,3 +433,176 @@ class TestTodoWriteSync:
             await asyncio.sleep(0.05)
 
         instance.create_comment.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Codex provider: TodoWrite detection via item.completed/function_call
+# ---------------------------------------------------------------------------
+
+def _make_codex_todowrite_event(todos: list[dict]) -> AgentEvent:
+    """Build an AgentEvent with Codex function_call raw payload for TodoWrite."""
+    import json
+    return AgentEvent(
+        event=AgentEventType.NOTIFICATION,
+        timestamp=datetime.now(timezone.utc),
+        session_id="sess-1",
+        raw={
+            "type": "item.completed",
+            "item": {
+                "id": "item_1",
+                "type": "function_call",
+                "name": "TodoWrite",
+                "arguments": json.dumps({"todos": todos}),
+                "call_id": "call_1",
+            },
+        },
+    )
+
+
+class TestCodexTodoWriteSync:
+    @pytest.mark.asyncio
+    async def test_codex_todowrite_creates_comment(self) -> None:
+        orch = _build_orchestrator()
+        entry = _build_entry()
+        assert entry.session.plan_comment_id is None
+
+        todos = [{"content": "Do the thing", "status": "pending"}]
+        event = _make_codex_todowrite_event(todos)
+
+        mock_create = AsyncMock(return_value="comment-codex-1")
+        mock_update = AsyncMock(return_value=True)
+
+        with patch("cymphony.orchestrator.LinearClient") as MockClient:
+            instance = MockClient.return_value
+            instance.create_comment = mock_create
+            instance.update_comment = mock_update
+
+            await orch._handle_agent_event("issue-1", entry, event)
+            await asyncio.sleep(0.05)
+
+        mock_create.assert_awaited_once()
+        call_args = mock_create.call_args
+        assert call_args[0][0] == "issue-1"
+        assert "Do the thing" in call_args[0][1]
+        assert entry.session.plan_comment_id == "comment-codex-1"
+
+    @pytest.mark.asyncio
+    async def test_codex_todowrite_updates_existing_comment(self) -> None:
+        orch = _build_orchestrator()
+        entry = _build_entry()
+        entry.session.plan_comment_id = "comment-existing"
+
+        todos = [
+            {"content": "Step 1", "status": "completed"},
+            {"content": "Step 2", "status": "in_progress"},
+        ]
+        event = _make_codex_todowrite_event(todos)
+
+        mock_update = AsyncMock(return_value=True)
+
+        with patch("cymphony.orchestrator.LinearClient") as MockClient:
+            instance = MockClient.return_value
+            instance.create_comment = AsyncMock()
+            instance.update_comment = mock_update
+
+            await orch._handle_agent_event("issue-1", entry, event)
+            await asyncio.sleep(0.05)
+
+        mock_update.assert_awaited_once()
+        assert "Step 1" in mock_update.call_args[0][1]
+        assert entry.session.plan_comment_id == "comment-existing"
+
+    @pytest.mark.asyncio
+    async def test_codex_non_todowrite_function_call_ignored(self) -> None:
+        orch = _build_orchestrator()
+        entry = _build_entry()
+
+        event = AgentEvent(
+            event=AgentEventType.NOTIFICATION,
+            timestamp=datetime.now(timezone.utc),
+            session_id="sess-1",
+            raw={
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "function_call",
+                    "name": "Edit",
+                    "arguments": "{}",
+                    "call_id": "call_2",
+                },
+            },
+        )
+
+        with patch("cymphony.orchestrator.LinearClient") as MockClient:
+            instance = MockClient.return_value
+            instance.create_comment = AsyncMock()
+
+            await orch._handle_agent_event("issue-1", entry, event)
+            await asyncio.sleep(0.05)
+
+        instance.create_comment.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_codex_empty_todos_not_synced(self) -> None:
+        orch = _build_orchestrator()
+        entry = _build_entry()
+
+        event = _make_codex_todowrite_event([])
+
+        with patch("cymphony.orchestrator.LinearClient") as MockClient:
+            instance = MockClient.return_value
+            instance.create_comment = AsyncMock()
+
+            await orch._handle_agent_event("issue-1", entry, event)
+            await asyncio.sleep(0.05)
+
+        instance.create_comment.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_codex_malformed_arguments_ignored(self) -> None:
+        orch = _build_orchestrator()
+        entry = _build_entry()
+
+        event = AgentEvent(
+            event=AgentEventType.NOTIFICATION,
+            timestamp=datetime.now(timezone.utc),
+            session_id="sess-1",
+            raw={
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "function_call",
+                    "name": "TodoWrite",
+                    "arguments": "not valid json",
+                    "call_id": "call_3",
+                },
+            },
+        )
+
+        with patch("cymphony.orchestrator.LinearClient") as MockClient:
+            instance = MockClient.return_value
+            instance.create_comment = AsyncMock()
+
+            await orch._handle_agent_event("issue-1", entry, event)
+            await asyncio.sleep(0.05)
+
+        instance.create_comment.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_codex_latest_plan_stored(self) -> None:
+        orch = _build_orchestrator()
+        entry = _build_entry()
+        entry.session.plan_comment_id = "comment-x"
+
+        todos = [{"content": "Important codex step", "status": "in_progress"}]
+        event = _make_codex_todowrite_event(todos)
+
+        with patch("cymphony.orchestrator.LinearClient") as MockClient:
+            instance = MockClient.return_value
+            instance.update_comment = AsyncMock(return_value=True)
+
+            await orch._handle_agent_event("issue-1", entry, event)
+            await asyncio.sleep(0.05)
+
+        assert entry.session.latest_plan is not None
+        assert "Important codex step" in entry.session.latest_plan

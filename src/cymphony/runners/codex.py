@@ -206,6 +206,10 @@ def _summarize_codex_item(item: dict) -> str | None:
         suffix = f" exit={exit_code}" if exit_code is not None else ""
         summary = f"[command:{status}] {command}{suffix}".strip()
         return summary[:3999].rstrip() + "…" if len(summary) > 4000 else summary
+    if item_type == "function_call":
+        name = str(item.get("name") or "?")
+        summary = f"[tool: {name}]"
+        return summary
     return None
 
 

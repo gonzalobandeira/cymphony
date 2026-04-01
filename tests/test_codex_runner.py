@@ -113,6 +113,16 @@ class TestCodexStreamParsing:
         assert "pytest" in (event.message or "")
         assert "exit=0" in (event.message or "")
 
+    def test_parse_function_call_item(self) -> None:
+        msg = (
+            '{"type":"item.completed","item":{"id":"item_2","type":"function_call",'
+            '"name":"TodoWrite","arguments":"{\\"todos\\": []}","call_id":"call_1"}}'
+        )
+        event, sid, ok, err = parse_codex_stream_event(msg, "s1", "iss", "ID-1", 1)
+        assert event is not None
+        assert event.event == AgentEventType.NOTIFICATION
+        assert "[tool: TodoWrite]" in (event.message or "")
+
     def test_parse_item_completed_ignores_unknown_item_types(self) -> None:
         msg = '{"type":"item.completed","item":{"id":"item_9","type":"reasoning"}}'
         event, sid, ok, err = parse_codex_stream_event(msg, "s1", "iss", "ID-1", 1)
