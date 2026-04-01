@@ -28,11 +28,17 @@ from cymphony.models import (
     HooksConfig,
 )
 from cymphony.orchestrator import Orchestrator
+from cymphony.workflows.execution import ExecutionWorkflow
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _build_execution_workflow() -> ExecutionWorkflow:
+    """Build an ExecutionWorkflow with stub dependencies (render_plan_comment needs none)."""
+    return ExecutionWorkflow(linear=None, workspaces=None, prs=None)  # type: ignore[arg-type]
+
 
 def _build_orchestrator() -> Orchestrator:
     config = ServiceConfig(
@@ -155,33 +161,33 @@ def _make_todowrite_event(todos: list[dict]) -> AgentEvent:
 
 class TestRenderTodoChecklist:
     def test_completed_items(self) -> None:
-        orch = _build_orchestrator()
+        wf = _build_execution_workflow()
         todos = [{"content": "Set up project", "status": "completed"}]
-        result = orch._render_todo_checklist(todos)
+        result = wf.render_plan_comment(todos)
         assert "- [x] Set up project" in result
 
     def test_in_progress_items(self) -> None:
-        orch = _build_orchestrator()
+        wf = _build_execution_workflow()
         todos = [{"content": "Write tests", "status": "in_progress"}]
-        result = orch._render_todo_checklist(todos)
+        result = wf.render_plan_comment(todos)
         assert "- [ ] 🔄 Write tests *(in progress)*" in result
 
     def test_pending_items(self) -> None:
-        orch = _build_orchestrator()
+        wf = _build_execution_workflow()
         todos = [{"content": "Deploy", "status": "pending"}]
-        result = orch._render_todo_checklist(todos)
+        result = wf.render_plan_comment(todos)
         assert "- [ ] Deploy" in result
         assert "🔄" not in result
         assert "in progress" not in result
 
     def test_mixed_statuses(self) -> None:
-        orch = _build_orchestrator()
+        wf = _build_execution_workflow()
         todos = [
             {"content": "Step 1", "status": "completed"},
             {"content": "Step 2", "status": "in_progress"},
             {"content": "Step 3", "status": "pending"},
         ]
-        result = orch._render_todo_checklist(todos)
+        result = wf.render_plan_comment(todos)
         lines = result.split("\n")
         # First line is the heading
         assert "**Agent Plan**" in lines[0]
@@ -190,14 +196,14 @@ class TestRenderTodoChecklist:
         assert "- [ ] Step 3" in result
 
     def test_empty_todos(self) -> None:
-        orch = _build_orchestrator()
-        result = orch._render_todo_checklist([])
+        wf = _build_execution_workflow()
+        result = wf.render_plan_comment([])
         assert "**Agent Plan**" in result
 
     def test_missing_status_defaults_to_pending(self) -> None:
-        orch = _build_orchestrator()
+        wf = _build_execution_workflow()
         todos = [{"content": "Unknown status"}]
-        result = orch._render_todo_checklist(todos)
+        result = wf.render_plan_comment(todos)
         assert "- [ ] Unknown status" in result
         assert "[x]" not in result
 
