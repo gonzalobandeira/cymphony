@@ -173,10 +173,17 @@ def test_execution_workflow_failure_outcome_includes_transition_and_retry() -> N
     assert outcome.retry.error == "agent crashed"
 
 
-def test_execution_workflow_success_outcome_requests_continuation_retry() -> None:
+def test_execution_workflow_success_outcome_skips_continuation_retry_when_qa_enabled() -> None:
     workflow = _build_workflow()
     outcome = workflow.resolve_success_outcome(_build_service_config(qa_enabled=True))
     assert outcome.target == "QA Review"
+    assert outcome.schedule_continuation_retry is False
+
+
+def test_execution_workflow_success_outcome_requests_continuation_retry_without_qa() -> None:
+    workflow = _build_workflow()
+    outcome = workflow.resolve_success_outcome(_build_service_config(qa_enabled=False))
+    assert outcome.target == "In Review"
     assert outcome.schedule_continuation_retry is True
 
 
@@ -416,7 +423,7 @@ async def test_execution_workflow_prepare_run_uses_before_run_hook() -> None:
         async def run_before_run_hook(self, ws):
             calls.append(ws.path)
 
-    await workflow.prepare_run(FakeManager(), workspace)
+    await workflow.prepare_run(FakeManager(), workspace, _build_issue())
     assert calls == ["/tmp/ws/BAP-204"]
 
 

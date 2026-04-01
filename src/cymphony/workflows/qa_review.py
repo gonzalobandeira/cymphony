@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -112,9 +113,55 @@ class QAReviewWorkflow:
         self,
         manager: WorkspaceManager,
         workspace: Workspace,
+        issue: Issue,
     ) -> None:
         """Run QA pre-run hooks inside the isolated review workspace."""
         await manager.run_before_run_hook(workspace)
+        await self._checkout_review_branch(workspace.path, issue)
+
+    def review_branch_name(self, issue: Issue) -> str:
+        """Return the branch that QA should review for an issue."""
+        return f"agent/{issue.identifier.lower()}"
+
+    async def _checkout_review_branch(self, workspace_path: str, issue: Issue) -> None:
+        """Check out the remote branch under review in a fresh QA workspace."""
+        branch_name = self.review_branch_name(issue)
+        fetch = await asyncio.create_subprocess_exec(
+            "git",
+            "fetch",
+            "origin",
+            branch_name,
+            cwd=workspace_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        fetch_stdout, fetch_stderr = await fetch.communicate()
+        if fetch.returncode != 0:
+            stderr_text = (fetch_stderr or b"").decode(errors="replace").strip()
+            stdout_text = (fetch_stdout or b"").decode(errors="replace").strip()
+            detail = stderr_text or stdout_text or "unknown git fetch failure"
+            raise RuntimeError(
+                f"Failed to fetch review branch {branch_name!r}: {detail}"
+            )
+
+        checkout = await asyncio.create_subprocess_exec(
+            "git",
+            "checkout",
+            "-B",
+            branch_name,
+            f"origin/{branch_name}",
+            cwd=workspace_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        checkout_stdout, checkout_stderr = await checkout.communicate()
+        if checkout.returncode != 0:
+            stderr_text = (checkout_stderr or b"").decode(errors="replace").strip()
+            stdout_text = (checkout_stdout or b"").decode(errors="replace").strip()
+            detail = stderr_text or stdout_text or "unknown git checkout failure"
+            raise RuntimeError(
+                f"Failed to check out review branch {branch_name!r}: {detail}"
+            )
 
     def build_review_prompt(self, workflow: WorkflowDefinition, issue: Issue) -> str:
         """Render the QA review prompt."""

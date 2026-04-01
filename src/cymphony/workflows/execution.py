@@ -70,9 +70,10 @@ class ExecutionWorkflow:
 
     def resolve_success_outcome(self, config: ServiceConfig) -> ExecutionSuccessOutcome:
         """Return the workflow-owned outcome for a successful execution run."""
+        target = self.resolve_success_target(config)
         return ExecutionSuccessOutcome(
-            target=self.resolve_success_target(config),
-            schedule_continuation_retry=True,
+            target=target,
+            schedule_continuation_retry=not config.transitions.qa_review.enabled,
         )
 
     def resolve_failure_target(self, config: ServiceConfig) -> str | None:
@@ -206,8 +207,10 @@ class ExecutionWorkflow:
         self,
         manager: WorkspaceManager,
         workspace: Workspace,
+        issue: Issue,
     ) -> None:
         """Run execution pre-run workspace hooks."""
+        del issue
         await manager.run_before_run_hook(workspace)
 
     def build_plan_prompt(self, workflow: WorkflowDefinition, issue: Issue) -> str:

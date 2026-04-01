@@ -363,6 +363,8 @@ class TestWorkerDoneTransitions:
         # Should use qa_review.success = "In Review"
         assert transitions == [(issue.id, "In Review")]
         assert comments == [(issue.id, issue.identifier, "Looks good")]
+        assert issue.id not in orch._state.claimed
+        assert issue.id not in orch._state.completed
         assert issue.id not in orch._state.qa_review_bounces
         assert issue.id not in orch._state.qa_review_comment_ids
 
@@ -453,6 +455,8 @@ class TestWorkerDoneTransitions:
 
         assert transitions == [(issue.id, "Todo")]
         assert comments == [(issue.id, "changes_requested")]
+        assert issue.id not in orch._state.claimed
+        assert issue.id not in orch._state.completed
         assert orch._state.qa_review_bounces[issue.id] == 1
         assert issue.id not in orch._state.qa_review_comment_ids
         schedule_retry.assert_not_awaited()
@@ -681,6 +685,8 @@ class TestWorkerDoneTransitions:
 
         # Build-mode success should hand off to the QA review lane when enabled.
         assert transitions == [(issue.id, "QA Review")]
+        assert issue.id not in orch._state.claimed
+        assert issue.id not in orch._state.completed
 
     @pytest.mark.asyncio
     async def test_build_success_uses_top_level_success_target_when_qa_review_disabled(

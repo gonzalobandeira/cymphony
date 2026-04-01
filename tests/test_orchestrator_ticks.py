@@ -20,6 +20,7 @@ from cymphony.models import (
     RetryEntry,
     RunningEntry,
     RunStatus,
+    QAReviewConfig,
     ServerConfig,
     ServiceConfig,
     TrackerConfig,
@@ -797,6 +798,85 @@ async def test_on_worker_done_waits_for_in_review_transition_before_retry(
     assert events == [
         f"transition:{issue.id}:In Review",
         f"retry:{issue.id}:1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_on_worker_done_skips_continuation_retry_after_qa_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    orchestrator._config.transitions = TransitionsConfig(
+        success="In Review",
+        qa_review=QAReviewConfig(
+            enabled=True,
+            dispatch="QA Review",
+            success="In Review",
+            failure="Todo",
+        ),
+    )
+    issue = _build_issue(state="In Progress")
+    entry = RunningEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        issue=issue,
+        task=None,
+        session=LiveSession(
+            session_id=None,
+            pid=None,
+            last_event=None,
+            last_event_timestamp=None,
+            last_message=None,
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            last_reported_input_tokens=0,
+            last_reported_output_tokens=0,
+            last_reported_total_tokens=0,
+            turn_count=0,
+        ),
+        retry_attempt=None,
+        started_at=datetime.now(timezone.utc),
+        workspace_path="/tmp/cymphony-tests/BAP-151",
+    )
+    events: list[str] = []
+
+    async def fake_transition(issue_id: str, state_name: str, **kw: object) -> bool:
+        events.append(f"transition:{issue_id}:{state_name}")
+        return True
+
+    async def fake_schedule_retry(
+        issue_id: str,
+        identifier: str,
+        attempt: int,
+        delay_ms: float | None = None,
+        error: str | None = None,
+        entry: RunningEntry | None = None,
+    ) -> None:
+        events.append(f"retry:{issue_id}:{attempt}")
+
+    async def fake_validate_review_handoff(
+        identifier: str,
+        *,
+        workspace_path: str | None,
+    ) -> tuple[bool, str | None]:
+        assert identifier == issue.identifier
+        assert workspace_path == entry.workspace_path
+        return True, None
+
+    async def fake_worker() -> None:
+        return None
+
+    monkeypatch.setattr(orchestrator, "_transition_issue_state", fake_transition)
+    monkeypatch.setattr(orchestrator, "_schedule_retry", fake_schedule_retry)
+    monkeypatch.setattr(orchestrator, "_validate_review_handoff", fake_validate_review_handoff)
+
+    task = asyncio.create_task(fake_worker())
+    await task
+    await orchestrator._on_worker_done(issue.id, issue.identifier, entry, task)
+
+    assert events == [
+        f"transition:{issue.id}:QA Review",
     ]
 
 

@@ -1452,7 +1452,7 @@ class Orchestrator:
 
         # before_run hook
         try:
-            await workflow_runtime.prepare_run(active_wm, workspace)
+            await workflow_runtime.prepare_run(active_wm, workspace, issue)
         except Exception as exc:
             entry.status = RunStatus.FAILED
             await active_wm.run_after_run_hook(workspace)
@@ -1806,6 +1806,9 @@ class Orchestrator:
                 retry_outcome,
                 entry=entry,
             )
+            return
+
+        self._release_completed_issue(issue_id)
 
     async def _handle_execution_review_handoff_failure(
         self,
@@ -1953,6 +1956,8 @@ class Orchestrator:
 
         if completion_outcome.should_cleanup_workspace:
             await self._cleanup_review_workspace(entry)
+
+        self._release_completed_issue(issue_id)
 
     async def _apply_worker_success_transition(
         self,
@@ -2511,6 +2516,11 @@ class Orchestrator:
         """Clear guards so a retry can be evaluated or released cleanly."""
         self._state.claimed.discard(issue_id)
         self._state.completed.discard(issue_id)
+
+    def _release_completed_issue(self, issue_id: str) -> None:
+        """Release local claim/completion bookkeeping after a finished run."""
+        self._release_retry_bookkeeping(issue_id)
+        self._persist_state()
 
     def _log_retry_release(
         self,

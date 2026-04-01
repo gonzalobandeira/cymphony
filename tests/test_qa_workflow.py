@@ -112,6 +112,11 @@ def test_qa_workflow_uses_issue_scoped_root() -> None:
     assert workflow.workspace_root_for(_build_issue()) == "/tmp/cymphony-tests/qa/BAP-204"
 
 
+def test_qa_workflow_uses_canonical_issue_branch_name() -> None:
+    workflow = _build_workflow()
+    assert workflow.review_branch_name(_build_issue()) == "agent/bap-204"
+
+
 def test_qa_workflow_uses_dedicated_qa_agent_when_configured() -> None:
     workflow = _build_workflow()
     config = _build_config()
@@ -382,6 +387,34 @@ async def test_qa_workflow_prepare_workspace_run_returns_manager_and_workspace()
         assert Path(workspace.path).exists()
         assert str(Path(workspace.path)).startswith(str((Path(tmp) / "qa" / "BAP-204").resolve()))
         assert manager is not None
+
+
+@pytest.mark.asyncio
+async def test_qa_workflow_prepare_run_uses_before_run_hook_and_checks_out_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = _build_workflow()
+    issue = _build_issue()
+    issue.branch_name = "agent/bap-204"
+    workspace = type("Workspace", (), {"path": "/tmp/ws/BAP-204"})()
+    calls: list[tuple[str, str]] = []
+
+    class FakeManager:
+        async def run_before_run_hook(self, ws):
+            calls.append(("before_run", ws.path))
+
+    async def fake_checkout(workspace_path: str, review_issue: Issue) -> None:
+        calls.append(("checkout", workspace_path))
+        assert review_issue is issue
+
+    monkeypatch.setattr(workflow, "_checkout_review_branch", fake_checkout)
+
+    await workflow.prepare_run(FakeManager(), workspace, issue)
+
+    assert calls == [
+        ("before_run", "/tmp/ws/BAP-204"),
+        ("checkout", "/tmp/ws/BAP-204"),
+    ]
 
 
 @pytest.mark.asyncio
