@@ -60,6 +60,8 @@ def test_render_prompt_highlights_latest_qa_feedback() -> None:
 
     prompt = render_prompt(workflow, issue, attempt=2)
 
+    assert "## System Instructions" in prompt
+    assert "implementation workflow agent inside Cymphony" in prompt
     assert "Reviewer Feedback To Address:" in prompt
     assert "Revert unrelated deletions." in prompt
     assert "**QA review requested changes**" in prompt
@@ -84,7 +86,25 @@ def test_render_prompt_omits_feedback_section_without_qa_comment() -> None:
 
     prompt = render_prompt(workflow, issue, attempt=1)
 
-    assert prompt == "NO FEEDBACK"
+    assert prompt.endswith("NO FEEDBACK")
+
+
+def test_render_review_prompt_prepends_non_editable_system_rules() -> None:
+    from cymphony.workflow import render_review_prompt
+
+    workflow = WorkflowDefinition(
+        config={},
+        prompt_template="unused",
+        review_prompt_template="Review {{ issue.identifier }} carefully.",
+    )
+    issue = _build_issue(comments=[])
+
+    prompt = render_review_prompt(workflow, issue)
+
+    assert "## System Instructions" in prompt
+    assert "QA workflow agent inside Cymphony" in prompt
+    assert "Review BAP-155 carefully." in prompt
+    assert "REVIEW_RESULT.json" in prompt
 
 
 def test_load_workflow_reads_split_yaml_and_prompt_files(tmp_path: Path) -> None:

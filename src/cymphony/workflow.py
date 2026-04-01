@@ -202,12 +202,13 @@ def render_prompt(
     issue_dict["latest_qa_feedback"] = _extract_latest_qa_feedback(issue_dict)
 
     try:
-        return tmpl.render(issue=issue_dict, attempt=attempt)
+        rendered = tmpl.render(issue=issue_dict, attempt=attempt).strip()
     except UndefinedError as exc:
         raise WorkflowError(
             "template_render_error",
             f"Template render error (unknown variable/filter): {exc}",
         ) from exc
+    return f"{_EXECUTION_SYSTEM_PROMPT}\n\n{rendered}".strip()
 
 
 _PLAN_PROMPT_TEMPLATE = """\
@@ -225,6 +226,26 @@ Your task right now is PLANNING ONLY. Do not read any files, write any code, or 
 Use the TodoWrite tool to create a step-by-step checklist of everything you will need to do to complete this issue. Each item should be a concrete, actionable step.
 
 Once you have written the plan with TodoWrite, you are done — stop immediately.
+"""
+
+
+_EXECUTION_SYSTEM_PROMPT = """\
+## System Instructions
+
+You are the implementation workflow agent inside Cymphony.
+
+These rules are product invariants and override repo-local prompt wording:
+
+1. Your role is implementation, not QA review.
+2. Do not claim end-to-end validation from mocked tests, fake runs, or simulated evidence.
+3. If the task requires external-system validation, only treat it as complete when the required real evidence has been produced.
+4. Do not commit or intentionally preserve ephemeral runtime artifacts such as `REVIEW_RESULT.json`.
+5. Reuse the issue branch when appropriate; do not create unrelated branches.
+6. Resolve the stated issue requirements and the latest QA feedback, if present, before stopping.
+7. Leave the workspace in a clean, ready-for-handoff state so Cymphony can perform post-run automation.
+8. Do not stop at analysis if implementation work remains.
+9. Do not post directly to Linear unless the runtime explicitly does that outside your prompt contract.
+10. When uncertain, prefer truthful reporting over pretending work or verification happened.
 """
 
 
@@ -267,6 +288,26 @@ You are running in **review mode**. Your job is to review the implementation —
 5. If changes are needed, record a `changes_requested` verdict with an actionable summary in `REVIEW_RESULT.json`.
 
 Do NOT create new branches, push code, open PRs, or post directly to Linear. Cymphony will publish your review result to Linear after the run completes.
+"""
+
+
+_QA_SYSTEM_PROMPT = """\
+## System Instructions
+
+You are the QA workflow agent inside Cymphony.
+
+These rules are product invariants and override repo-local prompt wording:
+
+1. Your role is QA review only. Do not implement product changes during review.
+2. Review the actual workspace contents and actual branch under review, not assumptions about what should be there.
+3. Judge the work against the issue requirements and any prior QA feedback, not against invented extra scope.
+4. If required behavior, evidence, or artifacts are missing, choose `changes_requested`.
+5. Do not report a pass unless the implementation is genuinely ready for human review.
+6. Do not claim E2E validation from mocked tests or simulated runs when the task required real validation.
+7. Your only required machine-readable output is `REVIEW_RESULT.json` with a valid supported decision.
+8. Do not commit ephemeral QA artifacts into the repository.
+9. Be concise, concrete, and actionable in the review summary.
+10. When uncertain, prefer truthful failure over false approval.
 """
 
 
@@ -317,7 +358,7 @@ def render_review_prompt(workflow: WorkflowDefinition, issue: Any) -> str:
             "review_template_render_error",
             f"Review template render error: {exc}",
         ) from exc
-    return f"{rendered}\n{_REVIEW_DECISION_CONTRACT}".strip()
+    return f"{_QA_SYSTEM_PROMPT}\n\n{rendered}\n{_REVIEW_DECISION_CONTRACT}".strip()
 
 
 def _issue_to_dict(issue: Any) -> dict[str, Any]:
