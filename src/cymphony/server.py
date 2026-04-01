@@ -1272,45 +1272,6 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         for row in recent_controls[:10]
     ]
 
-    # --- Workflow config section ---
-    wf_config = groups.get("workflow_config") or {}
-    wf_transitions = wf_config.get("transitions") or {}
-    wf_qa = wf_transitions.get("qa_review") or {}
-    wf_active = ", ".join(str(s) for s in (wf_config.get("active_states") or []))
-    wf_terminal = ", ".join(str(s) for s in (wf_config.get("terminal_states") or []))
-    transition_rule_rows = []
-    for event_name in ("dispatch", "success", "failure", "blocked", "cancelled"):
-        target = wf_transitions.get(event_name)
-        transition_rule_rows.append([
-            escape(event_name),
-            escape(str(target)) if target else "<span class='muted'>not configured</span>",
-        ])
-    for event_name in ("dispatch", "success", "failure"):
-        target = wf_qa.get(event_name)
-        transition_rule_rows.append([
-            escape(f"qa_review.{event_name}"),
-            escape(str(target)) if target else "<span class='muted'>not configured</span>",
-        ])
-
-    workflow_config_section = (
-        "<section class='panel'>"
-        "<div class='panel-head'><h2>Workflow Configuration</h2>"
-        "<p>Active states, terminal states, and transition rules from the active workflow config.</p></div>"
-        "<div class='kv'><span class='k'>Active states</span>"
-        f"<span class='v'>{escape(wf_active) or '<span class=\"muted\">none</span>'}</span></div>"
-        "<div class='kv'><span class='k'>Terminal states</span>"
-        f"<span class='v'>{escape(wf_terminal) or '<span class=\"muted\">none</span>'}</span></div>"
-        "<div class='kv'><span class='k'>QA review lane</span>"
-        f"<span class='v'>{'enabled' if wf_qa.get('enabled') else 'disabled'}</span></div>"
-        "<div class='table-wrap' style='margin-top: 10px'>"
-        "<table><thead><tr><th>Event</th><th>Target state</th></tr></thead><tbody>"
-        + "".join(
-            f"<tr><td>{row[0]}</td><td>{row[1]}</td></tr>"
-            for row in transition_rule_rows
-        )
-        + "</tbody></table></div></section>"
-    )
-
     # --- Recent transitions section ---
     transition_history = list(groups.get("transition_history") or [])[:20]
     transition_rows = [
@@ -1327,7 +1288,6 @@ def _render_dashboard(groups: dict[str, object]) -> str:
 
     queue_sections = []
 
-    queue_sections.append(workflow_config_section)
     queue_sections.append(
         _render_table(
             f"Recent Transitions ({len(transition_rows)})",

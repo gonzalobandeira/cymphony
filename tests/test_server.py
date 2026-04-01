@@ -948,7 +948,7 @@ async def test_settings_get_redirects_to_setup_when_in_setup_mode(tmp_path: Path
     assert exc_info.value.location == "/setup"
 
 
-def test_render_dashboard_shows_workflow_configuration_section() -> None:
+def test_render_dashboard_does_not_show_workflow_configuration_section() -> None:
     html = _render_dashboard(
         {
             "generated_at": "2026-03-29T12:00:00+00:00",
@@ -992,17 +992,7 @@ def test_render_dashboard_shows_workflow_configuration_section() -> None:
         }
     )
 
-    assert "Workflow Configuration" in html
-    assert "Todo, In Progress" in html
-    assert "Done, Cancelled" in html
-    assert "dispatch" in html
-    assert "In Progress" in html
-    assert "In Review" in html
-    assert "QA review lane" in html
-    assert "enabled" in html
-    assert "qa_review.dispatch" in html
-    assert "QA Review" in html
-    assert "not configured" in html
+    assert "Workflow Configuration" not in html
 
 
 @pytest.mark.asyncio
@@ -1127,7 +1117,7 @@ def test_render_dashboard_shows_recent_transitions() -> None:
 
 
 def test_render_dashboard_handles_empty_workflow_config_gracefully() -> None:
-    """Dashboard should not crash when workflow_config is missing or empty."""
+    """Dashboard should still render when workflow_config is missing or empty."""
     html = _render_dashboard(
         {
             "generated_at": None,
@@ -1155,7 +1145,7 @@ def test_render_dashboard_handles_empty_workflow_config_gracefully() -> None:
         }
     )
 
-    assert "Workflow Configuration" in html
+    assert "Workflow Configuration" not in html
     assert "No transitions recorded yet." in html
 
 # ---- Timezone selector tests ----
