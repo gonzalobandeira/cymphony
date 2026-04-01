@@ -159,15 +159,6 @@ def _make_todowrite_event(todos: list[dict]) -> AgentEvent:
 # render_plan_comment tests (ExecutionWorkflow)
 # ---------------------------------------------------------------------------
 
-def _build_execution_workflow() -> ExecutionWorkflow:
-    from unittest.mock import MagicMock
-    return ExecutionWorkflow(
-        linear=MagicMock(),
-        workspaces=MagicMock(),
-        prs=MagicMock(),
-    )
-
-
 class TestRenderTodoChecklist:
     def test_completed_items(self) -> None:
         wf = _build_execution_workflow()

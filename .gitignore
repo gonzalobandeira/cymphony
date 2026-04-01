@@ -37,3 +37,6 @@ htmlcov/
 
 # Local Claude/Codex nested worktrees
 .claude/worktrees/
+
+# Ephemeral QA artifacts
+REVIEW_RESULT.json
