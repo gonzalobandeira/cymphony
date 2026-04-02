@@ -121,6 +121,8 @@ class QAReviewWorkflow:
 
     def review_branch_name(self, issue: Issue) -> str:
         """Return the branch that QA should review for an issue."""
+        if issue.branch_name and issue.branch_name.strip():
+            return issue.branch_name.strip()
         return f"agent/{issue.identifier.lower()}"
 
     async def _checkout_review_branch(self, workspace_path: str, issue: Issue) -> None:

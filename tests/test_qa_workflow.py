@@ -117,6 +117,13 @@ def test_qa_workflow_uses_canonical_issue_branch_name() -> None:
     assert workflow.review_branch_name(_build_issue()) == "agent/bap-204"
 
 
+def test_qa_workflow_prefers_issue_branch_name_when_available() -> None:
+    workflow = _build_workflow()
+    issue = _build_issue()
+    issue.branch_name = "feature/bap-204-real-branch"
+    assert workflow.review_branch_name(issue) == "feature/bap-204-real-branch"
+
+
 def test_qa_workflow_uses_dedicated_qa_agent_when_configured() -> None:
     workflow = _build_workflow()
     config = _build_config()
