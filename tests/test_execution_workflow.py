@@ -275,7 +275,8 @@ def test_execution_workflow_renders_execution_prompt() -> None:
         issue,
         attempt=2,
     )
-    assert rendered == "Issue BAP-204 attempt 2"
+    assert rendered.endswith("Issue BAP-204 attempt 2")
+    assert "System Instructions" in rendered
 
 
 def test_execution_workflow_build_turn_prompt_uses_initial_prompt_on_first_turn() -> None:
@@ -290,7 +291,8 @@ def test_execution_workflow_build_turn_prompt_uses_initial_prompt_on_first_turn(
         attempt=2,
         first_turn=True,
     )
-    assert rendered == "Issue BAP-204 attempt 2"
+    assert rendered.endswith("Issue BAP-204 attempt 2")
+    assert "System Instructions" in rendered
 
 
 def test_execution_workflow_build_turn_prompt_uses_continuation_after_first_turn() -> None:

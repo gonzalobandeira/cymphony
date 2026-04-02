@@ -1049,6 +1049,38 @@ class Orchestrator:
             return
         await self._cleanup_entry_workspace(entry)
 
+    def _detect_todo_write(self, raw: dict, issue_id: str, entry: RunningEntry) -> None:
+        """Detect TodoWrite tool calls from either Claude or Codex raw events."""
+        raw_type = raw.get("type", "")
+
+        # Claude: {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "TodoWrite", "input": {...}}]}}
+        if raw_type == "assistant":
+            message = raw.get("message") or {}
+            content = message.get("content") or []
+            for block in content:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "tool_use"
+                    and block.get("name") == "TodoWrite"
+                ):
+                    todos = (block.get("input") or {}).get("todos") or []
+                    if todos:
+                        self._sync_todo_comment(issue_id, entry, todos)
+
+        # Codex: {"type": "item.completed", "item": {"type": "function_call", "name": "TodoWrite", "arguments": "{...}"}}
+        elif raw_type == "item.completed":
+            item = raw.get("item") or {}
+            if item.get("type") == "function_call" and item.get("name") == "TodoWrite":
+                args_raw = item.get("arguments", "")
+                try:
+                    args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                except (json.JSONDecodeError, TypeError):
+                    return
+                if isinstance(args, dict):
+                    todos = args.get("todos") or []
+                    if todos:
+                        self._sync_todo_comment(issue_id, entry, todos)
+
     def _sync_todo_comment(self, issue_id: str, entry: RunningEntry, todos: list[dict]) -> None:
         """Fire-and-forget: sync TodoWrite todos to a Linear comment; never raises."""
         body = self._execution_workflow.render_plan_comment(todos)
@@ -1662,20 +1694,12 @@ class Orchestrator:
         if len(session.recent_events) > _MAX_RECENT_EVENTS:
             session.recent_events = session.recent_events[-_MAX_RECENT_EVENTS:]
 
-        # Detect TodoWrite tool calls in raw assistant events and sync to Linear
+        # Detect TodoWrite tool calls in raw events and sync to Linear.
+        # Claude emits {"type": "assistant", "message": {"content": [{"type": "tool_use", ...}]}}
+        # Codex emits {"type": "item.completed", "item": {"type": "function_call", "name": "...", "arguments": "..."}}
         raw = event.raw
-        if raw and raw.get("type") == "assistant":
-            message = raw.get("message") or {}
-            content = message.get("content") or []
-            for block in content:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "tool_use"
-                    and block.get("name") == "TodoWrite"
-                ):
-                    todos = (block.get("input") or {}).get("todos") or []
-                    if todos:
-                        self._sync_todo_comment(issue_id, entry, todos)
+        if raw:
+            self._detect_todo_write(raw, issue_id, entry)
 
         # Token accounting (spec §13.5)
         if event.usage:
