@@ -16,6 +16,37 @@ from ..workflow import WorkflowDefinition, render_plan_prompt, render_prompt
 from ..workspace import WorkspaceManager
 
 
+_IGNORED_HANDOFF_STATUS_PATHS = {
+    ".cymphony",
+    ".cymphony/",
+    ".cymphony/pr_body.md",
+}
+
+
+def _status_entry_path(status_line: str) -> str | None:
+    """Extract the path portion from a ``git status --porcelain`` line."""
+    if len(status_line) < 4:
+        return None
+    payload = status_line[3:].strip()
+    if not payload:
+        return None
+    if " -> " in payload:
+        payload = payload.split(" -> ", 1)[1].strip()
+    return payload or None
+
+
+def _should_ignore_handoff_status(status_line: str) -> bool:
+    """Return whether a dirty status line is a Cymphony-owned runtime artifact."""
+    path = _status_entry_path(status_line)
+    if path is None:
+        return False
+    if path in _IGNORED_HANDOFF_STATUS_PATHS:
+        return True
+    if path.startswith(".cymphony/"):
+        return True
+    return path.startswith(".cymphony/artifacts/")
+
+
 @dataclass(frozen=True)
 class ExecutionSuccessOutcome:
     """Workflow-owned decision for a successful execution run."""
@@ -290,7 +321,11 @@ class ExecutionWorkflow:
         )
         if rc != 0:
             return False, f"Failed to inspect workspace status: {stderr or stdout or 'unknown git error'}"
-        dirty_lines = [line for line in stdout.splitlines() if line.strip()]
+        dirty_lines = [
+            line
+            for line in stdout.splitlines()
+            if line.strip() and not _should_ignore_handoff_status(line)
+        ]
         if dirty_lines:
             sample = "; ".join(dirty_lines[:5])
             return False, f"Workspace still has uncommitted changes after the build run: {sample}"

@@ -506,3 +506,53 @@ async def test_execution_workflow_validate_review_handoff_accepts_reviewable_pr(
     )
     assert ok is True
     assert detail == "https://example.test/pr/1"
+
+
+@pytest.mark.asyncio
+async def test_execution_workflow_validate_review_handoff_ignores_cymphony_pr_body_artifact(
+    tmp_path: Path,
+) -> None:
+    workflow = _build_workflow()
+    tmp_path.mkdir(exist_ok=True)
+
+    async def fake_run_command(workspace_path: Path, *args: str):
+        if args[:3] == ("git", "branch", "--show-current"):
+            return 0, "feature/bap-204-real-branch\n", ""
+        if args[:3] == ("git", "status", "--porcelain"):
+            return 0, "?? .cymphony/pr_body.md\n", ""
+        if args[:3] == ("gh", "pr", "list"):
+            return 0, json.dumps([{"url": "https://example.test/pr/1", "state": "OPEN"}]), ""
+        raise AssertionError(f"unexpected command: {args}")
+
+    ok, detail = await workflow.validate_review_handoff(
+        tmp_path,
+        base_branch="main",
+        run_command=fake_run_command,
+    )
+    assert ok is True
+    assert detail == "https://example.test/pr/1"
+
+
+@pytest.mark.asyncio
+async def test_execution_workflow_validate_review_handoff_ignores_cymphony_runtime_directory(
+    tmp_path: Path,
+) -> None:
+    workflow = _build_workflow()
+    tmp_path.mkdir(exist_ok=True)
+
+    async def fake_run_command(workspace_path: Path, *args: str):
+        if args[:3] == ("git", "branch", "--show-current"):
+            return 0, "feature/bap-204-real-branch\n", ""
+        if args[:3] == ("git", "status", "--porcelain"):
+            return 0, "?? .cymphony/\n", ""
+        if args[:3] == ("gh", "pr", "list"):
+            return 0, json.dumps([{"url": "https://example.test/pr/1", "state": "OPEN"}]), ""
+        raise AssertionError(f"unexpected command: {args}")
+
+    ok, detail = await workflow.validate_review_handoff(
+        tmp_path,
+        base_branch="main",
+        run_command=fake_run_command,
+    )
+    assert ok is True
+    assert detail == "https://example.test/pr/1"
