@@ -141,9 +141,8 @@ class QAReviewConfig:
         Todo -> In Progress -> QA Review -> (Todo | In Review)
 
     Instead of transitioning directly to ``success`` after implementation,
-    the issue moves to ``dispatch`` (the QA review state).  A separate QA
-    agent run then transitions the issue to ``success`` (QA passed) or
-    ``failure`` (QA failed, back to development).
+    the issue moves to the fixed QA review state. A separate QA agent run
+    then transitions the issue to the fixed pass/fail targets.
     """
     enabled: bool = False
     dispatch: str | None = "QA Review"
@@ -156,11 +155,11 @@ class QAReviewConfig:
 
 @dataclass
 class TransitionsConfig:
-    """Declarative workflow state transitions (spec §4.1.9).
+    """Opinionated workflow transitions (spec §4.1.9).
 
-    Each field maps a lifecycle event to the Linear workflow state name
-    the issue should be moved to.  A ``None`` value means "do not
-    transition" for that event.
+    Main execution transitions are intentionally fixed to the product's
+    default Linear workflow. The nested QA review settings only control
+    whether the QA lane is enabled and how its safeguards behave.
     """
     dispatch: str | None = "In Progress"
     success: str | None = "In Review"

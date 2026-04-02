@@ -25,7 +25,7 @@ server:
 
 transitions:
   qa_review:
-    enabled: true
+    enabled: true # fixed flow: Todo -> In Progress -> QA Review -> (Todo | In Review)
 
 prompts:
   execution: prompts.example/execution.md

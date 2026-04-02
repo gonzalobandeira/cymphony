@@ -181,9 +181,12 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
 
     tracker_raw: dict[str, Any] = raw.get("tracker") or {}
     polling_raw: dict[str, Any] = raw.get("polling") or {}
+    workspace_raw: dict[str, Any] = raw.get("workspace") or {}
+    hooks_raw: dict[str, Any] = raw.get("hooks") or {}
     agent_raw: dict[str, Any] = raw.get("agent") or {}
     runner_raw: dict[str, Any] = raw.get("runner") or {}
     server_raw: dict[str, Any] = raw.get("server") or {}
+    preflight_raw: dict[str, Any] = raw.get("preflight") or {}
 
     # --- tracker ---
     kind = _to_str(tracker_raw.get("kind"), "")
@@ -198,8 +201,12 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
         endpoint=endpoint,
         api_key=api_key,
         project_slug=project_slug,
-        active_states=list(_DEFAULT_ACTIVE_STATES),
-        terminal_states=list(_DEFAULT_TERMINAL_STATES),
+        active_states=_to_str_list(
+            tracker_raw.get("active_states"), list(_DEFAULT_ACTIVE_STATES)
+        ),
+        terminal_states=_to_str_list(
+            tracker_raw.get("terminal_states"), list(_DEFAULT_TERMINAL_STATES)
+        ),
         assignee=assignee,
     )
 
@@ -209,8 +216,30 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
     )
 
     # --- workspace / repo lifecycle ---
-    workspace = WorkspaceConfig(root=_default_workspace_root_for_project(project_slug))
-    hooks = _default_hooks(project_slug)
+    workspace_root = _to_str(
+        workspace_raw.get("root"),
+        _default_workspace_root_for_project(project_slug),
+    )
+    workspace = WorkspaceConfig(root=_expand_path(workspace_root))
+
+    default_hooks = _default_hooks(project_slug)
+    hooks = HooksConfig(
+        after_create=_to_optional_str(
+            hooks_raw.get("after_create", _MISSING), default_hooks.after_create
+        ),
+        before_run=_to_optional_str(
+            hooks_raw.get("before_run", _MISSING), default_hooks.before_run
+        ),
+        after_run=_to_optional_str(
+            hooks_raw.get("after_run", _MISSING), default_hooks.after_run
+        ),
+        before_remove=_to_optional_str(
+            hooks_raw.get("before_remove", _MISSING), default_hooks.before_remove
+        ),
+        timeout_ms=_to_int(
+            hooks_raw.get("timeout_ms"), default_hooks.timeout_ms
+        ),
+    )
 
     # --- agent ---
     per_state_raw: Any = agent_raw.get("max_concurrent_agents_by_state") or {}
@@ -273,11 +302,19 @@ def build_config(workflow: WorkflowDefinition, server_port_override: int | None 
 
     # --- preflight ---
     preflight = PreflightConfig(
-        enabled=True,
-        required_clis=["git", "gh"],
-        required_env_vars=[],
-        expect_clean_worktree=False,
-        base_branch=_default_base_branch(),
+        enabled=bool(preflight_raw.get("enabled", True)),
+        required_clis=_to_str_list(
+            preflight_raw.get("required_clis"), ["git", "gh"]
+        ),
+        required_env_vars=_to_str_list(
+            preflight_raw.get("required_env_vars"), []
+        ),
+        expect_clean_worktree=bool(
+            preflight_raw.get("expect_clean_worktree", False)
+        ),
+        base_branch=_to_str(
+            preflight_raw.get("base_branch"), _default_base_branch()
+        ),
     )
 
     # --- transitions ---

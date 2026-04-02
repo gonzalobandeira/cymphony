@@ -4,7 +4,7 @@ An autonomous orchestration service that polls [Linear](https://linear.app) issu
 
 ## How it works
 
-1. Cymphony polls your Linear project for issues in configured active states (e.g. `Todo`, `In Progress`, and optionally `QA Review`)
+1. Cymphony polls your Linear project for issues in its opinionated active states: `Todo`, `In Progress`, and optionally `QA Review`
 2. For each eligible issue, it creates an isolated workspace directory and runs a `before_run` hook (e.g. clone the repo, reset to `main`)
 3. A Claude Code agent is launched with a rendered prompt containing the issue title, description, comments, labels, and blocking issues
 4. After the agent completes its turn, an `after_run` hook runs (e.g. push branch, open PR)
@@ -149,11 +149,8 @@ server:
   port: 8080                   # omit to disable the HTTP server
 
 transitions:
-  dispatch: In Progress        # default: move issue when work starts
-  success: In Review           # default: move issue after a clean worker exit
-  failure: null                # optional: move issue after an abnormal worker exit
-  blocked: Blocked             # optional: move issue when dependencies block dispatch
-  cancelled: null              # optional: move issue when reconciliation cancels a worker
+  qa_review:
+    enabled: true              # fixed flow: Todo -> In Progress -> QA Review -> (Todo | In Review)
 prompts:
   execution: prompts/execution.md
   qa_review: prompts/qa_review.md
@@ -215,21 +212,18 @@ Leave your decision in `REVIEW_RESULT.json`.
 
 ### Workflow transitions
 
-`.cymphony/config.yml` can define a `transitions` block that maps orchestrator lifecycle events to Linear workflow state names:
+Cymphony uses an opinionated hardcoded workflow instead of configurable transition targets.
 
-- `dispatch`: state to apply when an issue is claimed and a worker starts
-- `success`: state to apply after a clean worker exit, before the continuation retry is scheduled
-- `failure`: state to apply after an abnormal worker exit
-- `blocked`: state to apply when dispatch is skipped because dependencies are unresolved
-- `cancelled`: state to apply when reconciliation cancels a running worker
+Execution always uses:
 
-Defaults are backward-compatible with the previous hardcoded behavior:
+- `Todo -> In Progress`
+- clean implementation exit -> `In Review` when QA review is disabled
 
-- `dispatch: In Progress`
-- `success: In Review`
-- `failure`, `blocked`, `cancelled`: no transition
+When QA review is enabled, Cymphony always uses:
 
-Set a transition to `null`, `false`, or `""` to disable it explicitly. Omitting a key keeps the default for that event.
+- `Todo -> In Progress -> QA Review -> (Todo | In Review)`
+
+This keeps setup simple and avoids per-project transition drift. The `transitions` block exists only to enable the QA lane and tune its safeguards.
 
 ### Agent-driven QA review
 
@@ -249,29 +243,24 @@ When `transitions.qa_review.enabled: true`, the lifecycle becomes:
 Behavior:
 
 - Implementation runs in `Todo` and `In Progress`.
-- A successful implementation run transitions to `transitions.qa_review.dispatch` instead of directly to `transitions.success`.
-- Review-mode runs only in the QA review dispatch state.
-- A review decision of `pass` transitions to `transitions.qa_review.success`.
-- A review decision of `changes_requested` transitions to `transitions.qa_review.failure`.
+- A successful implementation run transitions to `QA Review`.
+- Review-mode runs only in `QA Review`.
+- A review decision of `pass` transitions to `In Review`.
+- A review decision of `changes_requested` transitions to `Todo`.
 
 Example:
 
 ```yaml
 transitions:
-  dispatch: In Progress
-  success: In Review
   qa_review:
     enabled: true
-    dispatch: QA Review
-    success: In Review
-    failure: Todo
 ```
 
 Notes:
 
 - `QA Review` must exist in Linear before you enable the feature.
-- You do not need to add `QA Review` to `tracker.active_states` manually when it matches `qa_review.dispatch`; Cymphony adds it automatically.
-- The setup/settings UI exposes the QA review toggle, state targets, and an optional dedicated review prompt template.
+- You do not need to add `QA Review` to `tracker.active_states` manually; Cymphony adds it automatically.
+- The setup/settings UI exposes the QA review toggle, retry/bounce safeguards, and an optional dedicated review prompt template.
 
 ### QA review safeguards
 

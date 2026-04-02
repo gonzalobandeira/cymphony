@@ -15,11 +15,11 @@ The product supports exactly two autonomous workflows:
 
 The normal lifecycle is:
 
-`To Do -> In Progress -> QA Review -> In Review`
+`Todo -> In Progress -> QA Review -> In Review`
 
 With one QA rejection loop:
 
-`QA Review -> To Do`
+`QA Review -> Todo`
 
 ## Core Principles
 
@@ -34,24 +34,24 @@ With one QA rejection loop:
 
 Required states:
 
-- `To Do`
+- `Todo`
 - `In Progress`
 - `QA Review`
 - `In Review`
 
 State meanings:
 
-- `To Do`: issue is ready for implementation pickup
+- `Todo`: issue is ready for implementation pickup
 - `In Progress`: execution agent currently owns the issue
 - `QA Review`: implementation is complete and awaiting QA review
 - `In Review`: QA passed and issue is ready for human review
 
 Allowed automated transitions:
 
-- `To Do -> In Progress`
+- `Todo -> In Progress`
 - `In Progress -> QA Review`
 - `QA Review -> In Review`
-- `QA Review -> To Do`
+- `QA Review -> Todo`
 
 No other automatic transitions should be part of the default product contract.
 
@@ -59,7 +59,7 @@ No other automatic transitions should be part of the default product contract.
 
 ### Trigger
 
-An issue enters `To Do` and has label `cymphony`.
+An issue enters `Todo` and has label `cymphony`.
 
 ### Purpose
 
@@ -99,7 +99,7 @@ Required context:
 
 Rework context:
 
-- if the issue was returned from `QA Review` to `To Do`, the latest QA changes-requested feedback must be injected into the execution context
+- if the issue was returned from `QA Review` to `Todo`, the latest QA changes-requested feedback must be injected into the execution context
 - the new execution plan should explicitly account for that feedback
 
 ### Execution Outputs
@@ -341,4 +341,3 @@ Cymphony should be designed as a focused Linear-driven implementation and QA pip
 - execution writes code
 - QA reviews code
 - humans perform final approval
-
