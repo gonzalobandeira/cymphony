@@ -223,9 +223,9 @@ You are about to work on the following Linear issue:
 
 Your task right now is PLANNING ONLY. Do not read any files, write any code, or make any changes.
 
-Use the TodoWrite tool to create a step-by-step checklist of everything you will need to do to complete this issue. Each item should be a concrete, actionable step.
+Use the planning checklist mechanism available in your runtime to create a step-by-step checklist of everything you will need to do to complete this issue. Each item should be a concrete, actionable step.
 
-Once you have written the plan with TodoWrite, you are done — stop immediately.
+If your runtime exposes a native todo or planning list, use that. If it exposes TodoWrite, use TodoWrite. Once you have written the plan, you are done — stop immediately.
 """
 
 

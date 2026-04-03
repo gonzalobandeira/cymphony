@@ -960,7 +960,9 @@ class TestPromptRenderingParity:
         workflow = WorkflowDefinition(config={}, prompt_template="")
         issue = _build_issue()
         result = render_plan_prompt(workflow, issue)
+        assert "planning checklist mechanism" in result
         assert "TodoWrite" in result
+        assert "native todo or planning list" in result
         assert "E2E test issue" in result
 
     @pytest.mark.parametrize("provider", _PROVIDERS)

@@ -1,4 +1,4 @@
-"""Tests for TodoWrite → Linear comment sync (BAP-70)."""
+"""Tests for planning checklist to Linear comment sync (BAP-70)."""
 
 from __future__ import annotations
 
@@ -150,6 +150,27 @@ def _make_todowrite_event(todos: list[dict]) -> AgentEvent:
                         "input": {"todos": todos},
                     }
                 ]
+            },
+        },
+    )
+
+
+def _make_codex_todo_list_event(
+    items: list[dict],
+    *,
+    raw_type: str = "item.started",
+) -> AgentEvent:
+    """Build an AgentEvent whose raw payload contains a Codex todo_list item."""
+    return AgentEvent(
+        event=AgentEventType.OTHER_MESSAGE,
+        timestamp=datetime.now(timezone.utc),
+        session_id="sess-1",
+        raw={
+            "type": raw_type,
+            "item": {
+                "id": "item_1",
+                "type": "todo_list",
+                "items": items,
             },
         },
     )
@@ -597,3 +618,76 @@ class TestCodexTodoWriteSync:
 
         assert entry.session.latest_plan is not None
         assert "Important codex step" in entry.session.latest_plan
+
+
+class TestCodexTodoListSync:
+    @pytest.mark.asyncio
+    async def test_codex_todo_list_started_creates_comment(self) -> None:
+        orch = _build_orchestrator()
+        entry = _build_entry()
+
+        event = _make_codex_todo_list_event(
+            [
+                {"text": "Inspect the failing area", "completed": False},
+                {"text": "Implement the fix", "completed": False},
+            ]
+        )
+
+        mock_create = AsyncMock(return_value="comment-codex-list-1")
+        with patch("cymphony.orchestrator.LinearClient") as MockClient:
+            instance = MockClient.return_value
+            instance.create_comment = mock_create
+            instance.update_comment = AsyncMock(return_value=True)
+
+            await orch._handle_agent_event("issue-1", entry, event)
+            await asyncio.sleep(0.05)
+
+        mock_create.assert_awaited_once()
+        body = mock_create.call_args[0][1]
+        assert "Inspect the failing area" in body
+        assert "Implement the fix" in body
+        assert entry.session.plan_comment_id == "comment-codex-list-1"
+
+    @pytest.mark.asyncio
+    async def test_codex_todo_list_completed_updates_comment(self) -> None:
+        orch = _build_orchestrator()
+        entry = _build_entry()
+        entry.session.plan_comment_id = "comment-existing"
+
+        event = _make_codex_todo_list_event(
+            [
+                {"text": "Inspect the failing area", "completed": True},
+                {"text": "Implement the fix", "completed": False},
+            ],
+            raw_type="item.completed",
+        )
+
+        mock_update = AsyncMock(return_value=True)
+        with patch("cymphony.orchestrator.LinearClient") as MockClient:
+            instance = MockClient.return_value
+            instance.create_comment = AsyncMock()
+            instance.update_comment = mock_update
+
+            await orch._handle_agent_event("issue-1", entry, event)
+            await asyncio.sleep(0.05)
+
+        mock_update.assert_awaited_once()
+        body = mock_update.call_args[0][1]
+        assert "- [x] Inspect the failing area" in body
+        assert "- [ ] Implement the fix" in body
+
+    @pytest.mark.asyncio
+    async def test_codex_todo_list_empty_items_not_synced(self) -> None:
+        orch = _build_orchestrator()
+        entry = _build_entry()
+
+        event = _make_codex_todo_list_event([])
+
+        with patch("cymphony.orchestrator.LinearClient") as MockClient:
+            instance = MockClient.return_value
+            instance.create_comment = AsyncMock()
+
+            await orch._handle_agent_event("issue-1", entry, event)
+            await asyncio.sleep(0.05)
+
+        instance.create_comment.assert_not_awaited()

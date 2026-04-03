@@ -68,6 +68,54 @@ _MAX_TRANSITION_HISTORY = 50
 _DEFAULT_BASE_BRANCH = "main"
 
 
+def _normalize_plan_todos(raw: dict) -> list[dict]:
+    """Extract a normalized checklist from provider-specific planning events."""
+    raw_type = raw.get("type", "")
+
+    if raw_type == "assistant":
+        message = raw.get("message") or {}
+        content = message.get("content") or []
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and block.get("name") == "TodoWrite"
+            ):
+                todos = (block.get("input") or {}).get("todos") or []
+                if isinstance(todos, list):
+                    return [todo for todo in todos if isinstance(todo, dict)]
+        return []
+
+    if raw_type in {"item.started", "item.completed"}:
+        item = raw.get("item") or {}
+        item_type = item.get("type")
+
+        if item_type == "function_call" and item.get("name") == "TodoWrite":
+            args_raw = item.get("arguments", "")
+            try:
+                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+            except (json.JSONDecodeError, TypeError):
+                return []
+            todos = args.get("todos") if isinstance(args, dict) else []
+            if isinstance(todos, list):
+                return [todo for todo in todos if isinstance(todo, dict)]
+            return []
+
+        if item_type == "todo_list":
+            todos: list[dict] = []
+            for todo in item.get("items") or []:
+                if not isinstance(todo, dict):
+                    continue
+                content = str(todo.get("text") or "").strip()
+                if not content:
+                    continue
+                status = "completed" if bool(todo.get("completed")) else "pending"
+                todos.append({"content": content, "status": status})
+            return todos
+
+    return []
+
+
 class Orchestrator:
     """Main orchestrator daemon (spec §7, §8, §16)."""
 
@@ -1050,36 +1098,10 @@ class Orchestrator:
         await self._cleanup_entry_workspace(entry)
 
     def _detect_todo_write(self, raw: dict, issue_id: str, entry: RunningEntry) -> None:
-        """Detect TodoWrite tool calls from either Claude or Codex raw events."""
-        raw_type = raw.get("type", "")
-
-        # Claude: {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "TodoWrite", "input": {...}}]}}
-        if raw_type == "assistant":
-            message = raw.get("message") or {}
-            content = message.get("content") or []
-            for block in content:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "tool_use"
-                    and block.get("name") == "TodoWrite"
-                ):
-                    todos = (block.get("input") or {}).get("todos") or []
-                    if todos:
-                        self._sync_todo_comment(issue_id, entry, todos)
-
-        # Codex: {"type": "item.completed", "item": {"type": "function_call", "name": "TodoWrite", "arguments": "{...}"}}
-        elif raw_type == "item.completed":
-            item = raw.get("item") or {}
-            if item.get("type") == "function_call" and item.get("name") == "TodoWrite":
-                args_raw = item.get("arguments", "")
-                try:
-                    args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
-                except (json.JSONDecodeError, TypeError):
-                    return
-                if isinstance(args, dict):
-                    todos = args.get("todos") or []
-                    if todos:
-                        self._sync_todo_comment(issue_id, entry, todos)
+        """Detect provider planning events and sync their checklist to Linear."""
+        todos = _normalize_plan_todos(raw)
+        if todos:
+            self._sync_todo_comment(issue_id, entry, todos)
 
     def _sync_todo_comment(self, issue_id: str, entry: RunningEntry, todos: list[dict]) -> None:
         """Fire-and-forget: sync TodoWrite todos to a Linear comment; never raises."""

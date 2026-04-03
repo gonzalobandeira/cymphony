@@ -123,6 +123,17 @@ class TestCodexStreamParsing:
         assert event.event == AgentEventType.NOTIFICATION
         assert "[tool: TodoWrite]" in (event.message or "")
 
+    def test_parse_todo_list_item_completed_preserves_raw_event(self) -> None:
+        msg = (
+            '{"type":"item.completed","item":{"id":"item_2","type":"todo_list",'
+            '"items":[{"text":"Step 1","completed":false}]}}'
+        )
+        event, sid, ok, err = parse_codex_stream_event(msg, "s1", "iss", "ID-1", 1)
+        assert event is not None
+        assert event.event == AgentEventType.OTHER_MESSAGE
+        assert event.raw is not None
+        assert event.raw["item"]["type"] == "todo_list"
+
     def test_parse_item_completed_ignores_unknown_item_types(self) -> None:
         msg = '{"type":"item.completed","item":{"id":"item_9","type":"reasoning"}}'
         event, sid, ok, err = parse_codex_stream_event(msg, "s1", "iss", "ID-1", 1)

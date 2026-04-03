@@ -143,6 +143,14 @@ def parse_codex_stream_event(
                 message=summary,
                 raw=msg,
             )
+        elif item.get("type") == "todo_list":
+            event = AgentEvent(
+                event=AgentEventType.OTHER_MESSAGE,
+                timestamp=_now(),
+                session_id=current_session_id,
+                pid=pid,
+                raw=msg,
+            )
 
     elif msg_type == "turn.completed":
         turn_succeeded = True
