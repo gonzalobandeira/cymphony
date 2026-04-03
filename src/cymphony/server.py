@@ -230,8 +230,12 @@ def _render_issue_drilldown(entry: dict, retry_due: str | None = None) -> str:
     tokens = entry.get("tokens") or {}
     latest_plan = entry.get("latest_plan")
 
+    # Human-readable status
+    status_label, status_css = _agent_status(entry)
+    summary_text = _fallback_summary(entry)
+
     summary_bits = [
-        f"status: {entry.get('run_status') or entry.get('status') or 'unknown'}",
+        status_label,
         f"last event: {entry.get('last_event') or 'n/a'}",
     ]
     if retry_due:
@@ -248,9 +252,14 @@ def _render_issue_drilldown(entry: dict, retry_due: str | None = None) -> str:
         else "<span class='empty small'>No labels</span>"
     )
 
+    mode = str(entry.get("mode") or "build")
+    qa_bounces = int(entry.get("qa_review_bounce_count") or 0)
+
     sections = [
         _render_key_value("Issue", entry.get("issue_identifier")),
         _render_key_value("State", entry.get("state")),
+        _render_key_value("Activity", f"<span class='activity-status activity-status-{escape(status_css)}'>{escape(status_label)}</span>", escape_value=False),
+        _render_key_value("Mode", mode.title()),
         _render_key_value("Run status", entry.get("run_status") or entry.get("status")),
         _render_key_value("Session", entry.get("session_id")),
         _render_key_value("Workspace", entry.get("workspace_path")),
@@ -261,22 +270,29 @@ def _render_issue_drilldown(entry: dict, retry_due: str | None = None) -> str:
         _render_key_value("Plan comment", entry.get("plan_comment_id")),
         _render_key_value("Last error", entry.get("error") or entry.get("last_error")),
     ]
+    if qa_bounces:
+        sections.append(_render_key_value("QA bounces", str(qa_bounces)))
 
     return f"""
 <details class="issue-drilldown" data-id="{escape(str(entry.get('issue_identifier') or ''), quote=True)}">
-  <summary>{escape(str(entry.get("issue_identifier") or ""))} <span class="muted">{escape(" · ".join(summary_bits))}</span></summary>
+  <summary>
+    {escape(str(entry.get("issue_identifier") or ""))}
+    <span class='activity-status activity-status-{escape(status_css)}' style='margin-left:6px'>{escape(status_label)}</span>
+    <span class="muted">{escape(" · ".join(summary_bits[1:]))}</span>
+  </summary>
   <div class="drill-grid">
     <section class="detail-card detail-wide">
       <h3>{issue_link}</h3>
       <div class="tag-row">{labels_html}</div>
+      <div class='activity-summary' style='margin-bottom:8px'>{escape(summary_text)}</div>
       <pre>{escape(str(entry.get("issue_description") or "No issue description available."))}</pre>
     </section>
     <section class="detail-card">
       <h3>Runtime</h3>
       {''.join(sections)}
       <div class='kv'><span class='k'>Turns</span><span class='v'>{int(entry.get("turn_count") or 0)}</span></div>
-      <div class='kv'><span class='k'>Tokens</span><span class='v'>{int(tokens.get("input_tokens", 0))}/{int(tokens.get("output_tokens", 0))}/{int(tokens.get("total_tokens", 0))} in/out/total</span></div>
-      <div class='kv'><span class='k'>Last message</span><span class='v'>{escape(str(entry.get("last_message") or "")) or "—"}</span></div>
+      <div class='kv'><span class='k'>Tokens</span><span class='v'>{int(tokens.get("input_tokens", 0)):,} in / {int(tokens.get("output_tokens", 0)):,} out / {int(tokens.get("total_tokens", 0)):,} total</span></div>
+      <div class='kv'><span class='k'>Summary</span><span class='v'>{escape(str(entry.get("last_message") or "")) or "—"}</span></div>
     </section>
     <section class="detail-card">
       <h3>Latest Plan</h3>
@@ -866,6 +882,89 @@ def _render_setup_page(
 </html>"""
 
 
+# ---------------------------------------------------------------------------
+# Agent activity helpers
+# ---------------------------------------------------------------------------
+
+_RUN_STATUS_LABELS: dict[str, tuple[str, str]] = {
+    # run_status -> (human label, css class suffix)
+    "PreparingWorkspace": ("Setting up", "setup"),
+    "Planning": ("Planning", "planning"),
+    "BuildingPrompt": ("Preparing", "setup"),
+    "LaunchingAgent": ("Launching", "setup"),
+    "InitializingSession": ("Initializing", "setup"),
+    "StreamingTurn": ("Coding", "coding"),
+    "Finishing": ("Finishing", "finishing"),
+    "Succeeded": ("Done", "done"),
+    "Failed": ("Failed", "failed"),
+    "TimedOut": ("Timed out", "failed"),
+    "Stalled": ("Stalled", "failed"),
+    "Canceled": ("Cancelled", "failed"),
+}
+
+
+def _agent_status(entry: dict) -> tuple[str, str]:
+    """Return (human-readable label, css class suffix) for an agent entry."""
+    run_status = str(entry.get("run_status") or "")
+    last_event = str(entry.get("last_event") or "")
+    mode = str(entry.get("mode") or "build")
+
+    # Check retry status first
+    if entry.get("attempt") is not None:
+        return ("Retrying", "retrying")
+
+    label, css = _RUN_STATUS_LABELS.get(run_status, ("Unknown", "unknown"))
+
+    # Refine StreamingTurn based on context
+    if run_status == "StreamingTurn":
+        if mode == "review":
+            return ("Reviewing", "reviewing")
+        if last_event == "turn_input_required":
+            return ("Waiting for input", "blocked")
+        # Check last message for testing signals
+        last_msg = str(entry.get("last_message") or "").lower()
+        if any(kw in last_msg for kw in ("test", "pytest", "jest", "npm test", "running test")):
+            return ("Testing", "testing")
+        return ("Coding", "coding")
+
+    return (label, css)
+
+
+def _fallback_summary(entry: dict) -> str:
+    """Generate a meaningful summary when last_message is empty or low-signal."""
+    last_message = str(entry.get("last_message") or "").strip()
+
+    # If there's a useful message, return a compact preview
+    if last_message and len(last_message) > 5:
+        return _event_preview(last_message, limit=120)
+
+    # Otherwise, generate from run_status and turn count
+    run_status = str(entry.get("run_status") or "")
+    turn_count = int(entry.get("turn_count") or 0)
+    mode = str(entry.get("mode") or "build")
+
+    if run_status == "Planning":
+        return "Generating implementation plan..."
+    if run_status in ("PreparingWorkspace", "BuildingPrompt", "LaunchingAgent"):
+        return "Preparing workspace and agent..."
+    if run_status == "InitializingSession":
+        return "Agent session starting..."
+    if run_status == "StreamingTurn":
+        mode_label = "review" if mode == "review" else "implementation"
+        return f"Agent is working on {mode_label} (turn {turn_count})..."
+    if run_status == "Finishing":
+        return "Wrapping up agent run..."
+    if run_status == "Succeeded":
+        return f"Completed successfully after {turn_count} turn{'s' if turn_count != 1 else ''}."
+    if run_status in ("Failed", "TimedOut", "Stalled"):
+        error = str(entry.get("error") or entry.get("last_error") or "")
+        if error:
+            return f"Failed: {_event_preview(error, limit=100)}"
+        return f"Agent {run_status.lower()} after {turn_count} turn{'s' if turn_count != 1 else ''}."
+
+    return "Waiting for agent activity..."
+
+
 def _format_timestamp(raw: str | None) -> str:
     """Return an HTML ``<time>`` element with a ``data-utc`` attribute.
 
@@ -1239,36 +1338,81 @@ def _render_config_section(groups: dict[str, object]) -> str:
         return "<p class='empty'>No configuration data available.</p>"
 
     sections: list[str] = []
-    for section_key, section_label in [
-        ("tracker", "Tracker"),
-        ("polling", "Polling"),
-        ("agent", "Agent"),
-        ("runner", "Runner"),
-        ("server", "Server"),
-    ]:
-        block = config.get(section_key)
-        if not block or not isinstance(block, dict):
-            continue
-        rows = "".join(
-            _render_key_value(str(k), str(v))
-            for k, v in block.items()
-            if v is not None
-        )
-        if rows:
-            sections.append(
-                f"<section class='detail-card'>"
-                f"<h3>{escape(section_label)}</h3>{rows}</section>"
-            )
 
-    # Active/terminal states
+    # Project & Tracker
+    tracker = config.get("tracker") or {}
+    project_slug = tracker.get("project_slug")
+    assignee = tracker.get("assignee")
+    tracker_rows = ""
+    if project_slug:
+        tracker_rows += _render_key_value("Project", str(project_slug))
+    if assignee:
+        tracker_rows += _render_key_value("Assignee filter", str(assignee))
+    else:
+        tracker_rows += _render_key_value("Assignee filter", "All (no filter)")
+    if tracker_rows:
+        sections.append(f"<section class='detail-card'><h3>Project</h3>{tracker_rows}</section>")
+
+    # Agent & Provider
+    agent = config.get("agent") or {}
+    provider = agent.get("provider")
+    agent_rows = ""
+    if provider:
+        agent_rows += _render_key_value("AI provider", str(provider).upper())
+    max_concurrent = agent.get("max_concurrent_agents")
+    if max_concurrent is not None:
+        agent_rows += _render_key_value("Max concurrency", str(max_concurrent))
+    by_state = agent.get("max_concurrent_agents_by_state")
+    if by_state:
+        agent_rows += _render_key_value("Concurrency by state", ", ".join(f"{k}: {v}" for k, v in by_state.items()))
+    max_turns = agent.get("max_turns")
+    if max_turns is not None:
+        agent_rows += _render_key_value("Max turns", str(max_turns))
+    max_backoff = agent.get("max_retry_backoff_ms")
+    if max_backoff is not None:
+        agent_rows += _render_key_value("Max retry backoff", f"{int(max_backoff) // 1000}s")
+    if agent_rows:
+        sections.append(f"<section class='detail-card'><h3>Agent</h3>{agent_rows}</section>")
+
+    # Polling
+    polling = config.get("polling") or {}
+    polling_rows = ""
+    interval = polling.get("interval_ms")
+    if interval is not None:
+        secs = int(interval) / 1000
+        polling_rows += _render_key_value("Poll interval", f"{secs:.0f}s ({interval}ms)")
+    if polling_rows:
+        sections.append(f"<section class='detail-card'><h3>Polling</h3>{polling_rows}</section>")
+
+    # Runner
+    runner = config.get("runner") or {}
+    runner_rows = ""
+    cmd = runner.get("command")
+    if cmd:
+        runner_rows += _render_key_value("Command", str(cmd))
+    turn_timeout = runner.get("turn_timeout_ms")
+    if turn_timeout is not None:
+        runner_rows += _render_key_value("Turn timeout", f"{int(turn_timeout) // 1000}s")
+    stall_timeout = runner.get("stall_timeout_ms")
+    if stall_timeout is not None:
+        runner_rows += _render_key_value("Stall timeout", f"{int(stall_timeout) // 1000}s")
+    skip_perms = runner.get("dangerously_skip_permissions")
+    if skip_perms is not None:
+        runner_rows += _render_key_value("Skip permissions", "Yes" if skip_perms else "No")
+    if runner_rows:
+        sections.append(f"<section class='detail-card'><h3>Runner</h3>{runner_rows}</section>")
+
+    # States
     active_states = config.get("active_states")
     terminal_states = config.get("terminal_states")
     if active_states or terminal_states:
         state_rows = ""
         if active_states:
-            state_rows += _render_key_value("Active states", ", ".join(str(s) for s in active_states))
+            state_pills = " ".join(f"<span class='tag'>{escape(str(s))}</span>" for s in active_states)
+            state_rows += f"<div class='kv'><span class='k'>Active states</span><span class='v'>{state_pills}</span></div>"
         if terminal_states:
-            state_rows += _render_key_value("Terminal states", ", ".join(str(s) for s in terminal_states))
+            state_pills = " ".join(f"<span class='tag'>{escape(str(s))}</span>" for s in terminal_states)
+            state_rows += f"<div class='kv'><span class='k'>Terminal states</span><span class='v'>{state_pills}</span></div>"
         sections.append(f"<section class='detail-card'><h3>States</h3>{state_rows}</section>")
 
     # Transitions
@@ -1276,13 +1420,52 @@ def _render_config_section(groups: dict[str, object]) -> str:
     if transitions and isinstance(transitions, dict):
         t_rows = ""
         for tk, tv in transitions.items():
-            if tk == "qa_review" and isinstance(tv, dict):
-                for qk, qv in tv.items():
-                    t_rows += _render_key_value(f"qa_review.{qk}", str(qv))
-            elif tv is not None:
-                t_rows += _render_key_value(str(tk), str(tv))
+            if tk == "qa_review":
+                continue
+            if tv is not None:
+                t_rows += _render_key_value(str(tk).replace("_", " ").title(), str(tv))
         if t_rows:
             sections.append(f"<section class='detail-card'><h3>Transitions</h3>{t_rows}</section>")
+
+    # QA Review Lane
+    qa_review = (transitions or {}).get("qa_review") or {}
+    if qa_review:
+        qa_enabled = qa_review.get("enabled", False)
+        qa_rows = _render_key_value("Enabled", "Yes" if qa_enabled else "No")
+        if qa_enabled:
+            qa_dispatch = qa_review.get("dispatch")
+            if qa_dispatch:
+                qa_rows += _render_key_value("Dispatch state", str(qa_dispatch))
+            qa_success = qa_review.get("success")
+            if qa_success:
+                qa_rows += _render_key_value("Success state", str(qa_success))
+            qa_failure = qa_review.get("failure")
+            if qa_failure:
+                qa_rows += _render_key_value("Failure state", str(qa_failure))
+            qa_bounces = qa_review.get("max_bounces")
+            if qa_bounces is not None:
+                qa_rows += _render_key_value("Max bounces", str(qa_bounces))
+            qa_retries = qa_review.get("max_retries")
+            if qa_retries is not None:
+                qa_rows += _render_key_value("Max retries", str(qa_retries))
+            qa_agent = qa_review.get("agent")
+            if qa_agent and isinstance(qa_agent, dict):
+                qa_provider = qa_agent.get("provider")
+                if qa_provider:
+                    qa_rows += _render_key_value("QA agent provider", str(qa_provider).upper())
+                qa_cmd = qa_agent.get("command")
+                if qa_cmd:
+                    qa_rows += _render_key_value("QA agent command", str(qa_cmd))
+        sections.append(f"<section class='detail-card'><h3>QA Review Lane</h3>{qa_rows}</section>")
+
+    # Server
+    server = config.get("server") or {}
+    server_rows = ""
+    port = server.get("port")
+    if port:
+        server_rows += _render_key_value("Dashboard port", str(port))
+    if server_rows:
+        sections.append(f"<section class='detail-card'><h3>Server</h3>{server_rows}</section>")
 
     if not sections:
         return "<p class='empty'>No configuration data available.</p>"
@@ -1375,10 +1558,151 @@ def _render_overview_tab(
 """
 
 
+def _render_activity_tab(groups: dict[str, object]) -> str:
+    """Render the Agent Activity tab — high-signal view of what agents are doing."""
+    running = list(groups.get("running", []))
+    retrying = list(groups.get("retrying", []))
+    all_agents = []
+
+    for entry in running:
+        status_label, status_css = _agent_status(entry)
+        summary = _fallback_summary(entry)
+        all_agents.append({
+            **entry,
+            "_status_label": status_label,
+            "_status_css": status_css,
+            "_summary": summary,
+            "_kind": "running",
+        })
+
+    for entry in retrying:
+        status_label, status_css = _agent_status(entry)
+        summary = _fallback_summary(entry)
+        all_agents.append({
+            **entry,
+            "_status_label": status_label,
+            "_status_css": status_css,
+            "_summary": summary,
+            "_kind": "retrying",
+        })
+
+    if not all_agents:
+        return (
+            "<section class='panel'>"
+            "<div class='panel-head'><h2>Agent Activity</h2>"
+            "<p>Real-time view of what each agent is doing.</p></div>"
+            "<p class='empty'>No active or retrying agents at the moment.</p>"
+            "</section>"
+        )
+
+    cards: list[str] = []
+    for agent in all_agents:
+        identifier = escape(str(agent.get("issue_identifier") or ""))
+        title = escape(str(agent.get("issue_title") or ""))
+        url = agent.get("issue_url")
+        status_label = escape(str(agent["_status_label"]))
+        status_css = escape(str(agent["_status_css"]))
+        summary_text = escape(str(agent["_summary"]))
+        mode = escape(str(agent.get("mode") or "build"))
+        turn_count = int(agent.get("turn_count") or 0)
+        last_event_at = _format_timestamp(agent.get("last_event_at"))
+        retry_attempt = agent.get("retry_attempt")
+        error = agent.get("error") or agent.get("last_error")
+        workspace_path = agent.get("workspace_path")
+        tokens = agent.get("tokens") or {}
+
+        issue_link = (
+            f"<a href='{escape(str(url))}'>{identifier} - {title}</a>"
+            if url else f"{identifier} - {title}"
+        )
+
+        retry_html = ""
+        if retry_attempt is not None:
+            retry_reason = escape(str(error or "Continuation retry"))
+            retry_html = (
+                f"<div class='activity-retry'>"
+                f"<span class='activity-meta-label'>Retry</span> "
+                f"Attempt {int(retry_attempt)} &mdash; {retry_reason}"
+                f"</div>"
+            )
+
+        blocker_html = ""
+        if agent["_status_label"] == "Waiting for input":
+            blocker_html = (
+                "<div class='activity-blocker'>"
+                "Agent requires user input to continue."
+                "</div>"
+            )
+
+        action_html = _issue_controls(
+            str(agent.get("issue_identifier") or ""),
+            include_cancel=agent["_kind"] == "running",
+        )
+
+        cards.append(
+            f"<article class='activity-card'>"
+            f"<div class='activity-card-head'>"
+            f"<div class='activity-card-title'>{issue_link}</div>"
+            f"<span class='activity-status activity-status-{status_css}'>{status_label}</span>"
+            f"</div>"
+            f"<div class='activity-summary'>{summary_text}</div>"
+            f"{retry_html}{blocker_html}"
+            f"<div class='activity-meta'>"
+            f"<span><span class='activity-meta-label'>Mode</span> {mode}</span>"
+            f"<span><span class='activity-meta-label'>Turns</span> {turn_count}</span>"
+            f"<span><span class='activity-meta-label'>Tokens</span> {int(tokens.get('total_tokens', 0)):,}</span>"
+            f"<span><span class='activity-meta-label'>Last event</span> {last_event_at}</span>"
+            f"{'<span><span class=\"activity-meta-label\">Workspace</span> <code>' + escape(str(workspace_path)) + '</code></span>' if workspace_path else ''}"
+            f"</div>"
+            f"<div class='activity-actions'>{action_html}</div>"
+            f"</article>"
+        )
+
+    return (
+        "<section class='panel'>"
+        f"<div class='panel-head'><h2>Agent Activity ({len(all_agents)})</h2>"
+        "<p>Real-time view of what each agent is doing.</p></div>"
+        f"<div class='activity-card-list'>{''.join(cards)}</div>"
+        "</section>"
+    )
+
+
 def _render_tasks_tab(groups: dict[str, object]) -> str:
-    """Render the Tasks tab content."""
+    """Render the Tasks tab content with search, filtering, and sorting."""
     controls = groups.get("controls", {})
     recent_controls = list(controls.get("recent_actions", []))
+
+    # Count items per category for filter badges
+    ready_count = len(list(groups.get("ready", [])))
+    waiting_count = len(list(groups.get("waiting", [])))
+    blocked_count = len(list(groups.get("blocked", [])))
+    completed_count = len(list(groups.get("recently_completed", [])))
+    skipped_count = len(list(groups.get("skipped", [])))
+
+    # Search and filter toolbar
+    search_html = (
+        "<div class='task-toolbar'>"
+        "<input type='text' id='task-search' class='task-search' placeholder='Search tasks by identifier, title, state...' "
+        "oninput='cym.filterTasks()' autocomplete='off'>"
+        "<div class='task-filters'>"
+        f"<button class='task-filter-btn active' data-filter='all' onclick='cym.setTaskFilter(\"all\")'>All</button>"
+        f"<button class='task-filter-btn' data-filter='ready' onclick='cym.setTaskFilter(\"ready\")'>Ready ({ready_count})</button>"
+        f"<button class='task-filter-btn' data-filter='waiting' onclick='cym.setTaskFilter(\"waiting\")'>Waiting ({waiting_count})</button>"
+        f"<button class='task-filter-btn' data-filter='blocked' onclick='cym.setTaskFilter(\"blocked\")'>Blocked ({blocked_count})</button>"
+        f"<button class='task-filter-btn' data-filter='completed' onclick='cym.setTaskFilter(\"completed\")'>Completed ({completed_count})</button>"
+        f"<button class='task-filter-btn' data-filter='skipped' onclick='cym.setTaskFilter(\"skipped\")'>Skipped ({skipped_count})</button>"
+        "</div>"
+        "<div class='task-sort'>"
+        "<label class='activity-meta-label'>Sort by</label>"
+        "<select id='task-sort' onchange='cym.sortTasks()'>"
+        "<option value='default'>Default</option>"
+        "<option value='identifier'>Identifier</option>"
+        "<option value='state'>State</option>"
+        "<option value='updated'>Last Updated</option>"
+        "</select>"
+        "</div>"
+        "</div>"
+    )
 
     skipped_rows = [
         [
@@ -1423,7 +1747,7 @@ def _render_tasks_tab(groups: dict[str, object]) -> str:
         for row in transition_history
     ]
 
-    sections: list[str] = []
+    sections: list[str] = [search_html]
 
     # Issue queue cards for ready/waiting/blocked
     for key, title, subtitle, empty_msg in [
@@ -1434,7 +1758,7 @@ def _render_tasks_tab(groups: dict[str, object]) -> str:
         items = list(groups.get(key, []))
         if not items:
             sections.append(
-                f"<section class='panel'>"
+                f"<section class='panel task-section' data-category='{key}'>"
                 f"<div class='panel-head'><h2>{escape(title)}</h2><p>{escape(subtitle)}</p></div>"
                 f"<p class='empty'>{escape(empty_msg)}</p></section>"
             )
@@ -1446,8 +1770,10 @@ def _render_tasks_tab(groups: dict[str, object]) -> str:
                 priority = escape(_render_priority(item.get("priority")) if "priority" in item else "-")
                 reason = escape(str(item.get("reason") or ""))
                 updated = _format_timestamp(item.get("updated_at"))
+                searchable = escape(f"{item['identifier']} {item['title']} {item.get('state', '')} {item.get('reason', '')}".lower())
+                action_html = _issue_controls(str(item.get("identifier", "")))
                 cards.append(
-                    f"<div class='task-card'>"
+                    f"<div class='task-card task-item' data-category='{key}' data-searchable='{searchable}'>"
                     f"<div class='task-card-head'>"
                     f"<span class='task-card-id'>{link}</span>"
                     f"<span class='pill task-state'>{state}</span>"
@@ -1457,10 +1783,11 @@ def _render_tasks_tab(groups: dict[str, object]) -> str:
                     f"<span class='muted'>{reason}</span>"
                     f"<span class='muted'>{updated}</span>"
                     f"</div>"
+                    f"<div class='task-card-actions'>{action_html}</div>"
                     f"</div>"
                 )
             sections.append(
-                f"<section class='panel'>"
+                f"<section class='panel task-section' data-category='{key}'>"
                 f"<div class='panel-head'><h2>{escape(title)} ({len(items)})</h2><p>{escape(subtitle)}</p></div>"
                 f"<div class='task-card-list'>{''.join(cards)}</div></section>"
             )
@@ -1474,8 +1801,9 @@ def _render_tasks_tab(groups: dict[str, object]) -> str:
             state = escape(str(item.get("state") or ""))
             project = escape(str(item.get("project") or "-"))
             last_worked = _format_timestamp(item.get("last_worked_on"))
+            searchable = escape(f"{item['identifier']} {item['title']} {item.get('state', '')} {item.get('project', '')}".lower())
             cards.append(
-                f"<div class='task-card'>"
+                f"<div class='task-card task-item' data-category='completed' data-searchable='{searchable}'>"
                 f"<div class='task-card-head'>"
                 f"<span class='task-card-id'>{link}</span>"
                 f"<span class='pill task-state'>{state}</span>"
@@ -1487,14 +1815,14 @@ def _render_tasks_tab(groups: dict[str, object]) -> str:
                 f"</div>"
             )
         sections.append(
-            f"<section class='panel'>"
+            f"<section class='panel task-section' data-category='completed'>"
             f"<div class='panel-head'><h2>Recently Completed ({len(completed_items)})</h2>"
             f"<p>Recent terminal-state work for quick operator confirmation.</p></div>"
             f"<div class='task-card-list'>{''.join(cards)}</div></section>"
         )
     else:
         sections.append(
-            "<section class='panel'>"
+            "<section class='panel task-section' data-category='completed'>"
             "<div class='panel-head'><h2>Recently Completed</h2>"
             "<p>Recent terminal-state work for quick operator confirmation.</p></div>"
             "<p class='empty'>No recent completions found.</p></section>"
@@ -1565,6 +1893,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         groups, summary, totals, generated_at,
         dispatch_paused, shutdown_requested,
     )
+    activity_html = _render_activity_tab(groups)
     tasks_html = _render_tasks_tab(groups)
     config_html = _render_config_tab(groups)
 
@@ -2233,6 +2562,218 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     gap: 14px;
   }}
 
+  /* ---- Activity cards ---- */
+  .activity-card-list {{
+    display: grid;
+    gap: 10px;
+  }}
+  .activity-card {{
+    padding: 16px 18px;
+    border-radius: var(--radius);
+    border: 1px solid var(--line);
+    background: var(--panel-strong);
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }}
+  .activity-card:hover {{
+    border-color: rgba(37, 99, 235, 0.2);
+    box-shadow: var(--shadow);
+  }}
+  .activity-card-head {{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }}
+  .activity-card-title {{
+    font-weight: 600;
+    font-size: 0.88rem;
+    flex: 1;
+    min-width: 0;
+  }}
+  .activity-card-title a {{
+    color: var(--ink);
+  }}
+  .activity-card-title a:hover {{
+    color: var(--accent);
+  }}
+  .activity-status {{
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }}
+  .activity-status-coding {{
+    background: rgba(37, 99, 235, 0.1);
+    color: var(--accent);
+  }}
+  .activity-status-planning {{
+    background: rgba(139, 92, 246, 0.1);
+    color: #7c3aed;
+  }}
+  .activity-status-testing {{
+    background: rgba(5, 150, 105, 0.1);
+    color: var(--good);
+  }}
+  .activity-status-reviewing {{
+    background: rgba(6, 182, 212, 0.1);
+    color: #0891b2;
+  }}
+  .activity-status-setup, .activity-status-finishing {{
+    background: rgba(100, 116, 139, 0.1);
+    color: var(--muted);
+  }}
+  .activity-status-retrying {{
+    background: rgba(217, 119, 6, 0.1);
+    color: var(--warn);
+  }}
+  .activity-status-blocked {{
+    background: rgba(220, 38, 38, 0.1);
+    color: var(--danger);
+  }}
+  .activity-status-failed {{
+    background: rgba(220, 38, 38, 0.1);
+    color: var(--danger);
+  }}
+  .activity-status-done {{
+    background: rgba(5, 150, 105, 0.1);
+    color: var(--good);
+  }}
+  .activity-status-unknown {{
+    background: rgba(100, 116, 139, 0.1);
+    color: var(--muted);
+  }}
+  .activity-summary {{
+    font-size: 0.88rem;
+    color: var(--ink);
+    line-height: 1.5;
+    margin-bottom: 8px;
+  }}
+  .activity-retry, .activity-blocker {{
+    font-size: 0.82rem;
+    padding: 6px 10px;
+    border-radius: 6px;
+    margin-bottom: 8px;
+  }}
+  .activity-retry {{
+    background: rgba(217, 119, 6, 0.06);
+    border: 1px solid rgba(217, 119, 6, 0.15);
+    color: #92400e;
+  }}
+  .activity-blocker {{
+    background: rgba(220, 38, 38, 0.06);
+    border: 1px solid rgba(220, 38, 38, 0.15);
+    color: var(--danger);
+  }}
+  .activity-meta {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }}
+  .activity-meta code {{
+    font-size: 0.75rem;
+    background: var(--panel);
+    padding: 1px 5px;
+    border-radius: 4px;
+    border: 1px solid var(--line);
+  }}
+  .activity-meta-label {{
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }}
+  .activity-actions {{
+    display: flex;
+    justify-content: flex-end;
+  }}
+
+  /* ---- Task toolbar ---- */
+  .task-toolbar {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }}
+  .task-search {{
+    flex: 1;
+    min-width: 200px;
+    border: 1px solid var(--line);
+    background: var(--bg);
+    color: var(--ink);
+    border-radius: var(--radius-sm);
+    padding: 8px 14px;
+    font: inherit;
+    font-size: 0.85rem;
+    transition: border-color 0.15s;
+    outline: none;
+  }}
+  .task-search:focus {{
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1);
+  }}
+  .task-filters {{
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }}
+  .task-filter-btn {{
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--muted);
+    border-radius: 999px;
+    padding: 4px 12px;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+  }}
+  .task-filter-btn:hover {{
+    border-color: var(--accent);
+    color: var(--accent);
+  }}
+  .task-filter-btn.active {{
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }}
+  .task-sort {{
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }}
+  .task-sort select {{
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink);
+    border-radius: var(--radius-sm);
+    padding: 4px 10px;
+    font: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }}
+  .task-card-actions {{
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 6px;
+  }}
+
   /* ---- Misc ---- */
   .small {{ font-size: 0.82rem; }}
   .muted {{ color: var(--muted); }}
@@ -2284,6 +2825,9 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     .topbar {{ padding: 0 16px; gap: 12px; }}
     .tab-nav a {{ padding: 12px 12px; font-size: 0.82rem; }}
     main {{ padding: 20px 16px; }}
+    .activity-card-head {{ flex-direction: column; align-items: flex-start; gap: 6px; }}
+    .activity-meta {{ gap: 8px; }}
+    .task-toolbar {{ flex-direction: column; }}
   }}
   @media (max-width: 700px) {{
     main {{ padding: 14px 12px; }}
@@ -2464,6 +3008,66 @@ window.cym = {{
     var sel = document.getElementById("tz-select");
     if (sel) sel.value = tz;
     cym.applyTimezone(tz);
+  }},
+
+  /** Task filter state. */
+  _taskFilter: "all",
+
+  /** Set the active task category filter. */
+  setTaskFilter: function(filter) {{
+    cym._taskFilter = filter;
+    document.querySelectorAll(".task-filter-btn").forEach(function(btn) {{
+      btn.classList.toggle("active", btn.getAttribute("data-filter") === filter);
+    }});
+    cym.filterTasks();
+  }},
+
+  /** Filter tasks by search text and category. */
+  filterTasks: function() {{
+    var search = (document.getElementById("task-search") || {{}}).value || "";
+    var query = search.toLowerCase().trim();
+    var filter = cym._taskFilter || "all";
+
+    // Filter individual task items
+    document.querySelectorAll(".task-item").forEach(function(item) {{
+      var category = item.getAttribute("data-category") || "";
+      var searchable = item.getAttribute("data-searchable") || "";
+      var matchesCategory = (filter === "all" || category === filter);
+      var matchesSearch = (!query || searchable.indexOf(query) !== -1);
+      item.style.display = (matchesCategory && matchesSearch) ? "" : "none";
+    }});
+
+    // Show/hide section panels based on filter
+    document.querySelectorAll(".task-section").forEach(function(section) {{
+      var category = section.getAttribute("data-category") || "";
+      if (filter === "all") {{
+        section.style.display = "";
+      }} else {{
+        section.style.display = (category === filter) ? "" : "none";
+      }}
+    }});
+  }},
+
+  /** Sort task items within their lists. */
+  sortTasks: function() {{
+    var sortBy = (document.getElementById("task-sort") || {{}}).value || "default";
+    document.querySelectorAll(".task-card-list").forEach(function(list) {{
+      var items = Array.from(list.querySelectorAll(".task-item"));
+      if (!items.length) return;
+      items.sort(function(a, b) {{
+        var sa = a.getAttribute("data-searchable") || "";
+        var sb = b.getAttribute("data-searchable") || "";
+        if (sortBy === "identifier") {{
+          return sa.localeCompare(sb);
+        }} else if (sortBy === "state") {{
+          var stateA = (a.querySelector(".task-state") || {{}}).textContent || "";
+          var stateB = (b.querySelector(".task-state") || {{}}).textContent || "";
+          return stateA.localeCompare(stateB);
+        }}
+        return 0;
+      }});
+      items.forEach(function(item) {{ list.appendChild(item); }});
+    }});
   }}
 }};
 document.addEventListener("DOMContentLoaded", function() {{
@@ -2483,6 +3087,7 @@ document.addEventListener("DOMContentLoaded", function() {{
   <span class="topbar-brand">Cymphony</span>
   <ul class="tab-nav">
     <li><a href="#overview" data-tab="overview" class="active" onclick="cym.switchTab('overview');return false;">Overview</a></li>
+    <li><a href="#activity" data-tab="activity" onclick="cym.switchTab('activity');return false;">Activity</a></li>
     <li><a href="#tasks" data-tab="tasks" onclick="cym.switchTab('tasks');return false;">Tasks</a></li>
     <li><a href="#config" data-tab="config" onclick="cym.switchTab('config');return false;">Config</a></li>
   </ul>
@@ -2494,6 +3099,9 @@ document.addEventListener("DOMContentLoaded", function() {{
 <main>
   <div id="tab-overview" class="tab-content active">
     {overview_html}
+  </div>
+  <div id="tab-activity" class="tab-content">
+    {activity_html}
   </div>
   <div id="tab-tasks" class="tab-content">
     {tasks_html}
