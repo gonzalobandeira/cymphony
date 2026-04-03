@@ -388,6 +388,24 @@ def test_qa_workflow_stops_when_review_result_exists(tmp_path: Path) -> None:
     assert reason == "review_result_ready"
 
 
+def test_qa_workflow_does_not_stop_on_completion_marker_without_result_file(
+    tmp_path: Path,
+) -> None:
+    workflow = _build_workflow()
+    workspace_path = tmp_path / "qa-run"
+    workspace_path.mkdir()
+    should_continue, reason = workflow.should_continue(
+        _build_issue(),
+        active_states=["To Do", "In Progress", "QA Review"],
+        turn_number=2,
+        max_turns=5,
+        workspace_path=str(workspace_path),
+        last_message="CYMPHONY_REVIEW_COMPLETE",
+    )
+    assert should_continue is True
+    assert reason is None
+
+
 @pytest.mark.asyncio
 async def test_qa_workflow_prepare_workspace_uses_fresh_run_key() -> None:
     workflow = _build_workflow()

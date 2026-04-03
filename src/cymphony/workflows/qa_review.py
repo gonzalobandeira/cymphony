@@ -227,12 +227,15 @@ class QAReviewWorkflow:
     ) -> tuple[bool, str | None]:
         """Return whether review should continue after a turn."""
         active_lower = {state.lower() for state in active_states}
+        has_review_result = bool(
+            workspace_path and (Path(workspace_path) / REVIEW_RESULT_FILENAME).exists()
+        )
         if issue.state.lower() not in active_lower:
             return False, "inactive_state"
-        if workspace_path and (Path(workspace_path) / REVIEW_RESULT_FILENAME).exists():
+        if has_review_result:
             return False, "review_result_ready"
         normalized_message = (last_message or "").strip()
-        if normalized_message == self.completion_marker():
+        if normalized_message == self.completion_marker() and has_review_result:
             return False, "review_complete"
         if turn_number >= max_turns:
             return False, "max_turns"
