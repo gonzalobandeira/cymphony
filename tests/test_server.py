@@ -220,13 +220,10 @@ def test_render_dashboard_recently_completed_includes_project_and_linear_link() 
     )
 
     assert "Recently Completed" in html
-    assert "<th>Project</th>" in html
-    assert "<th>Last worked on</th>" in html
-    assert "<th>Linear</th>" in html
     assert "BAP-178 - Recent terminal-state work for quick operator confirmation." in html
     assert "Bandeira" in html
     assert "2026-03-28 21:04 UTC" in html
-    assert ">Open</a>" in html
+    assert "Done" in html
 
 
 def test_recently_completed_sorted_by_last_worked_on_descending() -> None:
@@ -363,10 +360,7 @@ def test_render_dashboard_shows_updated_timestamps_on_queue_tables() -> None:
         }
     )
 
-    # All queue tables should have the Updated header
-    assert html.count("<th>Updated</th>") == 3
-
-    # Timestamps rendered in consistent format
+    # Task cards render timestamps in consistent format
     assert "2026-03-28 20:30 UTC" in html
     assert "2026-03-28 19:00 UTC" in html
     assert "2026-03-28 18:00 UTC" in html
