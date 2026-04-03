@@ -229,6 +229,46 @@ def test_render_dashboard_recently_completed_includes_project_and_linear_link() 
     assert ">Open</a>" in html
 
 
+def test_render_dashboard_uses_top_level_information_architecture_sections() -> None:
+    html = _render_dashboard(
+        {
+            "generated_at": "2026-03-29T12:00:00+00:00",
+            "summary": {
+                "running": 1,
+                "retrying": 1,
+                "ready": 2,
+                "waiting": 3,
+                "needs_attention": 4,
+                "blocked": 1,
+                "capacity_in_use": "1/2",
+            },
+            "totals": {"total_tokens": 10, "input_tokens": 7, "output_tokens": 3},
+            "controls": {"recent_actions": []},
+            "running": [],
+            "retrying": [],
+            "ready": [],
+            "waiting": [],
+            "blocked": [],
+            "recently_completed": [],
+            "waiting_reasons": [],
+            "recent_problems": [],
+            "skipped": [],
+            "transition_history": [],
+        }
+    )
+
+    assert 'href="#overview"' in html
+    assert 'href="#tasks"' in html
+    assert 'href="#settings"' in html
+    assert 'id="overview"' in html
+    assert 'id="tasks"' in html
+    assert 'id="settings"' in html
+    assert "Overview" in html
+    assert "Tasks" in html
+    assert "Settings &amp; Config" in html
+    assert "Open Workflow Settings" in html
+
+
 def test_recently_completed_sorted_by_last_worked_on_descending() -> None:
     snapshot = {
         "generated_at": "2026-03-28T21:05:00+00:00",

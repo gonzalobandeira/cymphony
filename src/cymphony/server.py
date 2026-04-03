@@ -1236,7 +1236,6 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     summary = groups["summary"]
     totals = groups["totals"]
     generated_at = _format_timestamp(groups.get("generated_at"))
-    now = _now_utc()
     controls = groups.get("controls", {})
     dispatch_paused = bool(controls.get("dispatch_paused"))
     shutdown_requested = bool(controls.get("shutdown_requested"))
@@ -1286,9 +1285,11 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         for row in transition_history
     ]
 
-    queue_sections = []
+    overview_sections = []
+    task_sections = []
+    settings_sections = []
 
-    queue_sections.append(
+    overview_sections.append(
         _render_table(
             f"Recent Transitions ({len(transition_rows)})",
             "State transitions applied to issues by the orchestrator.",
@@ -1299,9 +1300,6 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     )
 
     for key, title, subtitle, empty in [
-        ("ready", "Ready To Dispatch", "Work that can start as soon as capacity is available.", "No immediately dispatchable issues."),
-        ("waiting", "Waiting", "Eligible work that is queued behind current capacity limits.", "No queued work is waiting for slots."),
-        ("blocked", "Blocked", "Issues still gated by unresolved dependencies or tracker state.", "No active blockers."),
         ("recently_completed", "Recently Completed", "Recent terminal-state work for quick operator confirmation.", "No recent completions found."),
     ]:
         headers = (
@@ -1327,7 +1325,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
                     escape(str(item.get("reason") or "")),
                     _format_timestamp(item.get("updated_at")),
                 ])
-        queue_sections.append(
+        overview_sections.append(
             _render_table(
                 title,
                 subtitle,
@@ -1336,7 +1334,33 @@ def _render_dashboard(groups: dict[str, object]) -> str:
                 empty,
             )
         )
-    queue_sections.append(
+
+    for key, title, subtitle, empty in [
+        ("ready", "Ready To Dispatch", "Work that can start as soon as capacity is available.", "No immediately dispatchable issues."),
+        ("waiting", "Waiting", "Eligible work that is queued behind current capacity limits.", "No queued work is waiting for slots."),
+        ("blocked", "Blocked", "Issues still gated by unresolved dependencies or tracker state.", "No active blockers."),
+    ]:
+        rows = [
+            [
+                _render_issue_link(item["identifier"], item["title"], item.get("url")),
+                escape(str(item.get("state") or "")),
+                escape(_render_priority(item.get("priority")) if "priority" in item else "-"),
+                escape(str(item.get("reason") or "")),
+                _format_timestamp(item.get("updated_at")),
+            ]
+            for item in groups[key]
+        ]
+        task_sections.append(
+            _render_table(
+                title,
+                subtitle,
+                ["Issue", "State", "Priority", "Reason", "Updated"],
+                rows,
+                empty,
+            )
+        )
+
+    task_sections.append(
         _render_table(
             f"Waiting Reasons ({len(waiting_reason_rows)})",
             "Snapshot-level explanations for issues that are not dispatching yet.",
@@ -1345,7 +1369,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
             "No waiting reasons captured in the latest snapshot.",
         )
     )
-    queue_sections.append(
+    task_sections.append(
         _render_table(
             f"Skipped ({len(skipped_rows)})",
             "Issues manually skipped by an operator until they are requeued.",
@@ -1354,7 +1378,19 @@ def _render_dashboard(groups: dict[str, object]) -> str:
             "No issues are currently skipped.",
         )
     )
-    queue_sections.append(
+    settings_sections.append(
+        "<section class='panel config-panel'>"
+        "<div class='panel-head'>"
+        "<h2>Configuration Surface</h2>"
+        "<p>Workflow changes live outside the live operations area so the dashboard stays focused on execution.</p>"
+        "</div>"
+        "<div class='config-actions'>"
+        "<a class='config-link' href='/settings'>Open Workflow Settings</a>"
+        "<a class='config-link config-link-secondary' href='/api/v1/state'>Inspect JSON State</a>"
+        "</div>"
+        "</section>"
+    )
+    settings_sections.append(
         _render_table(
             f"Recent Controls ({len(recent_control_rows)})",
             "Recent operator actions and their outcomes.",
@@ -1372,18 +1408,20 @@ def _render_dashboard(groups: dict[str, object]) -> str:
 <title>Cymphony Operator Dashboard</title>
 <style>
   :root {{
-    --bg: #f3efe6;
-    --bg-accent: radial-gradient(circle at top right, rgba(22, 163, 74, 0.12), transparent 28%), radial-gradient(circle at left top, rgba(14, 116, 144, 0.14), transparent 24%), #f3efe6;
-    --panel: rgba(255, 252, 246, 0.92);
-    --panel-strong: #fffaf0;
+    --bg: #f4efe7;
+    --bg-accent: radial-gradient(circle at top right, rgba(8, 145, 178, 0.12), transparent 28%), radial-gradient(circle at left top, rgba(234, 88, 12, 0.12), transparent 22%), linear-gradient(180deg, #fbf7f0 0%, #f4efe7 100%);
+    --panel: rgba(255, 252, 246, 0.94);
+    --panel-strong: #fff9f0;
+    --panel-muted: rgba(251, 246, 238, 0.92);
     --ink: #1f2933;
-    --muted: #4a5568;
-    --line: rgba(31, 41, 51, 0.22);
+    --muted: #52606d;
+    --line: rgba(31, 41, 51, 0.16);
     --good: #166534;
     --warn: #b45309;
     --danger: #b91c1c;
     --accent: #0f766e;
-    --shadow: 0 18px 40px rgba(31, 41, 51, 0.08);
+    --accent-strong: #155e75;
+    --shadow: 0 24px 54px rgba(31, 41, 51, 0.08);
   }}
   * {{ box-sizing: border-box; }}
   body {{
@@ -1395,22 +1433,36 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   a {{ color: var(--accent); text-decoration: none; }}
   a:hover {{ text-decoration: underline; }}
   form {{ display: inline; margin: 0; }}
-  main {{ max-width: 1440px; margin: 0 auto; padding: 32px; }}
+  main {{ max-width: 1480px; margin: 0 auto; padding: 28px 32px 40px; }}
+  .shell {{
+    display: grid;
+    gap: 22px;
+  }}
   .hero {{
     display: grid;
-    grid-template-columns: 2.2fr 1fr;
+    grid-template-columns: minmax(0, 1.8fr) minmax(280px, 0.95fr);
     gap: 18px;
-    margin-bottom: 20px;
   }}
-  .hero-card, .meta-card, .panel, .stat {{
+  .hero-card, .meta-card, .panel, .stat, .section-shell {{
     background: var(--panel);
     border: 1px solid var(--line);
-    border-radius: 14px;
+    border-radius: 18px;
     box-shadow: var(--shadow);
   }}
   .hero-card {{
-    padding: 28px;
-    background: linear-gradient(135deg, rgba(15, 118, 110, 0.08), rgba(255, 250, 240, 0.96));
+    padding: 30px;
+    background: linear-gradient(135deg, rgba(15, 118, 110, 0.1), rgba(255, 250, 240, 0.96));
+    position: relative;
+    overflow: hidden;
+  }}
+  .hero-card::after {{
+    content: "";
+    position: absolute;
+    inset: auto -40px -60px auto;
+    width: 220px;
+    height: 220px;
+    border-radius: 999px;
+    background: radial-gradient(circle, rgba(14, 116, 144, 0.16), transparent 68%);
   }}
   .hero-card h1 {{
     margin: 0 0 10px;
@@ -1429,6 +1481,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     flex-direction: column;
     gap: 12px;
     justify-content: center;
+    background: linear-gradient(180deg, rgba(255, 252, 246, 0.98), rgba(247, 241, 231, 0.9));
   }}
   .meta-label {{
     font-size: 0.84rem;
@@ -1445,7 +1498,6 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     display: grid;
     grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: 14px;
-    margin-bottom: 20px;
   }}
   .stat {{
     padding: 18px;
@@ -1505,10 +1557,91 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   .stat.ready strong {{ color: var(--good); }}
   .stat.waiting strong {{ color: var(--warn); }}
   .stat.running strong {{ color: var(--accent); }}
-  .layout {{
+  .shell-nav {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+  }}
+  .shell-nav a {{
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-radius: 999px;
+    border: 1px solid rgba(15, 118, 110, 0.15);
+    background: rgba(255, 252, 246, 0.78);
+    color: var(--ink);
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.9rem;
+    font-weight: 600;
+    box-shadow: 0 8px 18px rgba(31, 41, 51, 0.04);
+  }}
+  .shell-nav a:hover {{
+    text-decoration: none;
+    border-color: rgba(15, 118, 110, 0.35);
+    transform: translateY(-1px);
+  }}
+  .shell-nav-count {{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.65rem;
+    height: 1.65rem;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: rgba(15, 118, 110, 0.1);
+    color: var(--accent);
+    font-size: 0.78rem;
+  }}
+  .section-shell {{
+    padding: 22px;
+    background: linear-gradient(180deg, rgba(255, 252, 246, 0.98), rgba(248, 243, 234, 0.92));
+  }}
+  .section-header {{
+    display: flex;
+    justify-content: space-between;
+    align-items: end;
+    gap: 16px;
+    margin-bottom: 18px;
+  }}
+  .section-header h2 {{
+    margin: 0 0 6px;
+    font-size: 1.45rem;
+    letter-spacing: -0.03em;
+  }}
+  .section-header p {{
+    margin: 0;
+    color: var(--muted);
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+  }}
+  .section-badge {{
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: 999px;
+    background: rgba(15, 118, 110, 0.08);
+    color: var(--accent-strong);
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.84rem;
+    font-weight: 700;
+    white-space: nowrap;
+  }}
+  .overview-grid,
+  .task-layout,
+  .settings-layout {{
     display: grid;
-    grid-template-columns: 1.4fr 1fr;
     gap: 18px;
+  }}
+  .overview-grid {{
+    grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.95fr);
+  }}
+  .task-layout {{
+    grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.95fr);
+  }}
+  .settings-layout {{
+    grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
   }}
   .stack {{
     display: grid;
@@ -1599,6 +1732,36 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   .issue-actions {{
     min-width: 180px;
     justify-content: flex-end;
+  }}
+  .glance-grid {{
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }}
+  .glance-card {{
+    padding: 16px;
+    border-radius: 16px;
+    border: 1px solid var(--line);
+    background: var(--panel-muted);
+  }}
+  .glance-card h3 {{
+    margin: 0 0 8px;
+    font-size: 0.95rem;
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+  }}
+  .glance-card p {{
+    margin: 0;
+    color: var(--muted);
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.9rem;
+    line-height: 1.45;
+  }}
+  .glance-card strong {{
+    display: inline-block;
+    margin-bottom: 4px;
+    font-size: 1.65rem;
+    line-height: 1;
+    color: var(--accent-strong);
   }}
   .small {{ font-size: 0.9rem; }}
   .muted {{ color: var(--muted); }}
@@ -1882,6 +2045,34 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   .panel-head p {{
     font-size: 0.84rem;
   }}
+  .config-panel {{
+    background: linear-gradient(135deg, rgba(14, 116, 144, 0.08), rgba(255, 252, 246, 0.96));
+  }}
+  .config-actions {{
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }}
+  .config-link {{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    padding: 9px 14px;
+    border: 1px solid rgba(15, 118, 110, 0.25);
+    background: rgba(255, 252, 246, 0.88);
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--accent-strong);
+  }}
+  .config-link:hover {{
+    text-decoration: none;
+    border-color: rgba(15, 118, 110, 0.42);
+  }}
+  .config-link-secondary {{
+    color: var(--ink);
+  }}
   table {{
     width: 100%;
     min-width: 640px;
@@ -1909,18 +2100,19 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     font-family: "Avenir Next", "Segoe UI", sans-serif;
   }}
   .footer {{
-    margin-top: 18px;
     color: var(--muted);
     font-family: "Avenir Next", "Segoe UI", sans-serif;
     font-size: 0.9rem;
   }}
   @media (max-width: 1100px) {{
-    .hero, .layout {{ grid-template-columns: 1fr; }}
+    .hero, .overview-grid, .task-layout, .settings-layout {{ grid-template-columns: 1fr; }}
     .stats {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    .glance-grid {{ grid-template-columns: 1fr; }}
     .operator-card-head {{ flex-direction: column; }}
     .issue-actions {{ justify-content: flex-start; }}
     .control-toolbar {{ flex-direction: column; align-items: flex-start; gap: 8px; }}
     .control-group + .control-group {{ border-left: none; padding-left: 0; margin-left: 0; border-top: 1px solid var(--line); padding-top: 8px; }}
+    .section-header {{ flex-direction: column; align-items: flex-start; }}
   }}
   @media (max-width: 700px) {{
     main {{ padding: 18px; }}
@@ -2103,107 +2295,179 @@ document.addEventListener("DOMContentLoaded", function() {{
 </head>
 <body>
 <main>
-  <section class="hero">
-    <div class="hero-card">
-      <h1>Cymphony Operator Board</h1>
-      <p>Scan the live system by operator intent: what is moving, what is ready next, what is blocked, and what needs intervention.</p>
-    </div>
-    <aside class="meta-card">
-      <div>
-        <div class="meta-label">Snapshot</div>
-        <div class="meta-value">{generated_at}</div>
+  <div class="shell">
+    <section class="hero">
+      <div class="hero-card">
+        <h1>Cymphony Operator Board</h1>
+        <p>Scan the live system by operator intent with a shell that separates live health, task flow, and control surfaces.</p>
       </div>
-      <div>
-        <div class="meta-label">Capacity</div>
-        <div class="meta-value">{escape(str(summary["capacity_in_use"]))}</div>
-      </div>
-      <div>
-        <div class="meta-label">Runtime</div>
-        <div class="meta-value">{escape(_format_elapsed_seconds(totals.get("seconds_running")))}</div>
-      </div>
-      <div>
-        <div class="meta-label">Dispatch</div>
-        <div class="meta-value">{'Paused' if dispatch_paused else 'Active'}</div>
-      </div>
-    </aside>
-  </section>
-
-  <section class="stats">
-    <div class="stat running"><strong>{summary["running"]}</strong><span>Running now</span></div>
-    <div class="stat"><strong>{summary["retrying"]}</strong><span>Retrying</span></div>
-    <div class="stat ready"><strong>{summary["ready"]}</strong><span>Ready next</span></div>
-    <div class="stat waiting"><strong>{summary["waiting"]}</strong><span>Waiting</span></div>
-    <div class="stat attention"><strong>{summary["needs_attention"]}</strong><span>Needs attention</span></div>
-    <div class="stat"><strong>{totals.get("total_tokens", 0):,}</strong><span>Total tokens</span></div>
-  </section>
-
-  {_render_problems_panel(list(groups.get("recent_problems", [])))}
-
-  <section class="layout">
-    <div class="stack">
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Operator Controls</h2>
+      <aside class="meta-card">
+        <div>
+          <div class="meta-label">Snapshot</div>
+          <div class="meta-value">{generated_at}</div>
         </div>
-        <div class="control-toolbar">
-          <div class="control-group">
-            <span class="control-group-label">Status</span>
-            <span class="pill {'paused' if dispatch_paused else 'active'}" title="Current dispatch state" data-tooltip="Current dispatch state">{'Paused' if dispatch_paused else 'Active'}</span>
-          </div>
-          <div class="control-group">
-            <span class="control-group-label">View</span>
-            {_post_button("/api/v1/refresh", "Refresh Now", tooltip="Fetch the latest orchestration state immediately.")}
-            <button type="button" id="pause-refresh" title="Pause the automatic 15-second dashboard refresh" data-tooltip="Pause the automatic 15-second dashboard refresh" onclick="cym.toggleAutoRefresh()">Pause Auto-Refresh</button>
-            <select id="tz-select" title="Display timestamps in this timezone" onchange="cym.setTimezone(this.value)">
-              <option value="UTC">UTC</option>
-              <option value="Europe/London">Europe/London</option>
-              <option value="Europe/Berlin">Europe/Berlin</option>
-              <option value="Europe/Paris">Europe/Paris</option>
-              <option value="Europe/Madrid">Europe/Madrid</option>
-              <option value="Europe/Rome">Europe/Rome</option>
-              <option value="Europe/Amsterdam">Europe/Amsterdam</option>
-              <option value="Europe/Zurich">Europe/Zurich</option>
-              <option value="Europe/Athens">Europe/Athens</option>
-              <option value="Europe/Helsinki">Europe/Helsinki</option>
-              <option value="Europe/Moscow">Europe/Moscow</option>
-              <option value="Asia/Dubai">Asia/Dubai</option>
-              <option value="Asia/Kolkata">Asia/Kolkata</option>
-              <option value="Asia/Shanghai">Asia/Shanghai</option>
-              <option value="Asia/Tokyo">Asia/Tokyo</option>
-              <option value="Australia/Sydney">Australia/Sydney</option>
-              <option value="Pacific/Auckland">Pacific/Auckland</option>
-              <option value="America/New_York">America/New_York</option>
-              <option value="America/Chicago">America/Chicago</option>
-              <option value="America/Denver">America/Denver</option>
-              <option value="America/Los_Angeles">America/Los_Angeles</option>
-              <option value="America/Sao_Paulo">America/Sao_Paulo</option>
-            </select>
-          </div>
-          <div class="control-group">
-            <span class="control-group-label">Dispatch</span>
-            {_post_button("/api/v1/dispatch/pause", "Pause", tooltip="Stop launching new work; active agents continue.", css_class="caution-button")}
-            {_post_button("/api/v1/dispatch/resume", "Resume", tooltip="Allow the orchestrator to start queued work again.")}
-          </div>
-          <div class="control-group">
-            <span class="control-group-label">Shutdown</span>
-            {_kill_app_switch(shutdown_requested)}
-          </div>
+        <div>
+          <div class="meta-label">Capacity</div>
+          <div class="meta-value">{escape(str(summary["capacity_in_use"]))}</div>
         </div>
+        <div>
+          <div class="meta-label">Runtime</div>
+          <div class="meta-value">{escape(_format_elapsed_seconds(totals.get("seconds_running")))}</div>
+        </div>
+        <div>
+          <div class="meta-label">Dispatch</div>
+          <div class="meta-value">{'Paused' if dispatch_paused else 'Active'}</div>
+        </div>
+      </aside>
+    </section>
+
+    <nav class="shell-nav" aria-label="Dashboard sections">
+      <a href="#overview">Overview <span class="shell-nav-count">{summary["running"] + summary["retrying"] + summary["needs_attention"]}</span></a>
+      <a href="#tasks">Tasks <span class="shell-nav-count">{summary["ready"] + summary["waiting"] + summary.get("blocked", 0)}</span></a>
+      <a href="#settings">Settings &amp; Config <span class="shell-nav-count">{len(recent_control_rows)}</span></a>
+    </nav>
+
+    <section id="overview" class="section-shell">
+      <div class="section-header">
+        <div>
+          <h2>Overview</h2>
+          <p>Live orchestration status, active execution, and recent system movement.</p>
+        </div>
+        <div class="section-badge">System snapshot</div>
+      </div>
+
+      <section class="stats">
+        <div class="stat running"><strong>{summary["running"]}</strong><span>Running now</span></div>
+        <div class="stat"><strong>{summary["retrying"]}</strong><span>Retrying</span></div>
+        <div class="stat ready"><strong>{summary["ready"]}</strong><span>Ready next</span></div>
+        <div class="stat waiting"><strong>{summary["waiting"]}</strong><span>Waiting</span></div>
+        <div class="stat attention"><strong>{summary["needs_attention"]}</strong><span>Needs attention</span></div>
+        <div class="stat"><strong>{totals.get("total_tokens", 0):,}</strong><span>Total tokens</span></div>
       </section>
-      {_render_operator_cards("Running", "Active workers and current execution status.", list(groups["running"]), empty="No active agents.", mode="running")}
-      {_render_operator_cards("Retrying", "Retries scheduled after failures or continuation hand-offs.", list(groups["retrying"]), empty="No retries scheduled.", mode="retrying")}
-    </div>
-    <div class="stack">
-      {''.join(queue_sections)}
-    </div>
-  </section>
 
-  <p class="footer">
-    <a href="/api/v1/state">JSON state</a>
-    · Live refresh every 15 s (pausable)
-    · Input tokens {totals.get("input_tokens", 0):,}
-    · Output tokens {totals.get("output_tokens", 0):,}
-  </p>
+      <section class="glance-grid">
+        <article class="glance-card">
+          <h3>Throughput</h3>
+          <strong>{summary["running"] + summary["retrying"]}</strong>
+          <p>Workers are currently active or retrying. This is the fastest scan for live motion.</p>
+        </article>
+        <article class="glance-card">
+          <h3>Next Up</h3>
+          <strong>{summary["ready"]}</strong>
+          <p>Issues can start immediately once capacity opens. Use Tasks for the full queue context.</p>
+        </article>
+        <article class="glance-card">
+          <h3>Intervention</h3>
+          <strong>{summary["needs_attention"]}</strong>
+          <p>Blocked or failed work likely needs operator action before flow can recover cleanly.</p>
+        </article>
+      </section>
+
+      {_render_problems_panel(list(groups.get("recent_problems", [])))}
+
+      <div class="overview-grid">
+        <div class="stack">
+          {_render_operator_cards("Running", "Active workers and current execution status.", list(groups["running"]), empty="No active agents.", mode="running")}
+          {_render_operator_cards("Retrying", "Retries scheduled after failures or continuation hand-offs.", list(groups["retrying"]), empty="No retries scheduled.", mode="retrying")}
+        </div>
+        <div class="stack">
+          {''.join(overview_sections)}
+        </div>
+      </div>
+    </section>
+
+    <section id="tasks" class="section-shell">
+      <div class="section-header">
+        <div>
+          <h2>Tasks</h2>
+          <p>Dispatch-ready work, queued work, blockers, and manual queue interventions.</p>
+        </div>
+        <div class="section-badge">Execution queue</div>
+      </div>
+
+      <div class="task-layout">
+        <div class="stack">
+          {''.join(task_sections[:3])}
+        </div>
+        <div class="stack">
+          {''.join(task_sections[3:])}
+        </div>
+      </div>
+    </section>
+
+    <section id="settings" class="section-shell">
+      <div class="section-header">
+        <div>
+          <h2>Settings &amp; Config</h2>
+          <p>Operator controls, display preferences, and links to the underlying workflow configuration.</p>
+        </div>
+        <div class="section-badge">Control surface</div>
+      </div>
+
+      <div class="settings-layout">
+        <div class="stack">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Operator Controls</h2>
+            </div>
+            <div class="control-toolbar">
+              <div class="control-group">
+                <span class="control-group-label">Status</span>
+                <span class="pill {'paused' if dispatch_paused else 'active'}" title="Current dispatch state" data-tooltip="Current dispatch state">{'Paused' if dispatch_paused else 'Active'}</span>
+              </div>
+              <div class="control-group">
+                <span class="control-group-label">View</span>
+                {_post_button("/api/v1/refresh", "Refresh Now", tooltip="Fetch the latest orchestration state immediately.")}
+                <button type="button" id="pause-refresh" title="Pause the automatic 15-second dashboard refresh" data-tooltip="Pause the automatic 15-second dashboard refresh" onclick="cym.toggleAutoRefresh()">Pause Auto-Refresh</button>
+                <select id="tz-select" title="Display timestamps in this timezone" onchange="cym.setTimezone(this.value)">
+                  <option value="UTC">UTC</option>
+                  <option value="Europe/London">Europe/London</option>
+                  <option value="Europe/Berlin">Europe/Berlin</option>
+                  <option value="Europe/Paris">Europe/Paris</option>
+                  <option value="Europe/Madrid">Europe/Madrid</option>
+                  <option value="Europe/Rome">Europe/Rome</option>
+                  <option value="Europe/Amsterdam">Europe/Amsterdam</option>
+                  <option value="Europe/Zurich">Europe/Zurich</option>
+                  <option value="Europe/Athens">Europe/Athens</option>
+                  <option value="Europe/Helsinki">Europe/Helsinki</option>
+                  <option value="Europe/Moscow">Europe/Moscow</option>
+                  <option value="Asia/Dubai">Asia/Dubai</option>
+                  <option value="Asia/Kolkata">Asia/Kolkata</option>
+                  <option value="Asia/Shanghai">Asia/Shanghai</option>
+                  <option value="Asia/Tokyo">Asia/Tokyo</option>
+                  <option value="Australia/Sydney">Australia/Sydney</option>
+                  <option value="Pacific/Auckland">Pacific/Auckland</option>
+                  <option value="America/New_York">America/New_York</option>
+                  <option value="America/Chicago">America/Chicago</option>
+                  <option value="America/Denver">America/Denver</option>
+                  <option value="America/Los_Angeles">America/Los_Angeles</option>
+                  <option value="America/Sao_Paulo">America/Sao_Paulo</option>
+                </select>
+              </div>
+              <div class="control-group">
+                <span class="control-group-label">Dispatch</span>
+                {_post_button("/api/v1/dispatch/pause", "Pause", tooltip="Stop launching new work; active agents continue.", css_class="caution-button")}
+                {_post_button("/api/v1/dispatch/resume", "Resume", tooltip="Allow the orchestrator to start queued work again.")}
+              </div>
+              <div class="control-group">
+                <span class="control-group-label">Shutdown</span>
+                {_kill_app_switch(shutdown_requested)}
+              </div>
+            </div>
+          </section>
+          <p class="footer">
+            <a href="/api/v1/state">JSON state</a>
+            · Live refresh every 15 s (pausable)
+            · Input tokens {totals.get("input_tokens", 0):,}
+            · Output tokens {totals.get("output_tokens", 0):,}
+          </p>
+        </div>
+        <div class="stack">
+          {''.join(settings_sections)}
+        </div>
+      </div>
+    </section>
+  </div>
 </main>
 </body>
 </html>"""
