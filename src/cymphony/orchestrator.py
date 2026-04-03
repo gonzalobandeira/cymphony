@@ -999,7 +999,6 @@ class Orchestrator:
             return
 
         refreshed_by_id = {i.id: i for i in refreshed}
-        active_lower = [s.lower() for s in self._config.tracker.active_states]
         terminal_lower = [s.lower() for s in self._config.tracker.terminal_states]
 
         for issue_id in list(self._state.running.keys()):
@@ -1018,27 +1017,38 @@ class Orchestrator:
                         state=refreshed_issue.state,
                     )
                 await self._terminate_running_issue(issue_id, cleanup_workspace=True)
-            elif state_lower in active_lower:
-                if issue_id in self._state.running:
-                    self._state.running[issue_id].issue = refreshed_issue
             else:
                 entry = self._state.running.get(issue_id)
-                if entry:
-                    self._record_problem(
-                        kind="inactive_state",
-                        severity="warning",
-                        summary=f"Issue moved to inactive state {refreshed_issue.state!r}",
-                        detail="Work was stopped by reconciliation because the issue is no longer in an active workflow state.",
-                        issue_id=issue_id,
-                        issue_identifier=entry.identifier,
-                    )
-                    issue_log(
-                        logger, logging.INFO,
-                        "reconcile_inactive_stop",
-                        issue_id, entry.identifier,
-                        state=refreshed_issue.state,
-                    )
+                if not entry:
+                    continue
+                if state_lower in self._allowed_running_states(entry):
+                    self._state.running[issue_id].issue = refreshed_issue
+                    continue
+                self._record_problem(
+                    kind="inactive_state",
+                    severity="warning",
+                    summary=f"Issue moved to inactive state {refreshed_issue.state!r}",
+                    detail=(
+                        "Work was stopped by reconciliation because the issue is "
+                        "no longer in an allowed state for its current workflow mode."
+                    ),
+                    issue_id=issue_id,
+                    issue_identifier=entry.identifier,
+                )
+                issue_log(
+                    logger, logging.INFO,
+                    "reconcile_inactive_stop",
+                    issue_id, entry.identifier,
+                    state=refreshed_issue.state,
+                )
                 await self._terminate_running_issue(issue_id, cleanup_workspace=False)
+
+    def _allowed_running_states(self, entry: RunningEntry) -> set[str]:
+        """Return the Linear states that are valid while a worker is running."""
+        if entry.mode == ExecutionMode.REVIEW:
+            qa_dispatch = self._config.transitions.qa_review.dispatch
+            return {qa_dispatch.lower()} if qa_dispatch else set()
+        return {state.lower() for state in self._config.tracker.active_states}
 
     async def _terminate_running_issue(self, issue_id: str, cleanup_workspace: bool) -> None:
         """Cancel running task and optionally clean workspace."""
@@ -1355,6 +1365,8 @@ class Orchestrator:
         if issue.id in self._state.claimed:
             return False
         if issue.id in self._state.skipped:
+            return False
+        if self._state_machine.route(issue) is None:
             return False
 
         # Blocker check: do not dispatch issues with unresolved dependencies.

@@ -25,10 +25,17 @@ def _build_issue(state: str) -> Issue:
 
 def test_route_todo_issue_to_execution() -> None:
     machine = IssueStateMachine()
-    route = machine.route(_build_issue("To Do"))
+    route = machine.route(_build_issue("Todo"))
     assert route is not None
     assert route.workflow == "execution"
     assert route.target_state == "In Progress"
+
+
+def test_route_todo_issue_to_execution_case_insensitive() -> None:
+    machine = IssueStateMachine()
+    route = machine.route(_build_issue("toDo"))
+    assert route is not None
+    assert route.workflow == "execution"
 
 
 def test_route_qa_review_issue_to_qa_workflow() -> None:
@@ -43,4 +50,3 @@ def test_ignore_non_trigger_states() -> None:
     machine = IssueStateMachine()
     assert machine.route(_build_issue("In Progress")) is None
     assert machine.route(_build_issue("In Review")) is None
-

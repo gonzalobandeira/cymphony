@@ -18,7 +18,7 @@ class WorkflowRoute:
 class IssueStateMachine:
     """Select the workflow for an issue based on its current Linear state."""
 
-    execution_state: str = "To Do"
+    execution_state: str = "Todo"
     qa_review_state: str = "QA Review"
 
     def route(self, issue: Issue) -> WorkflowRoute | None:

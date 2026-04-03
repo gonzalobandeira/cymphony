@@ -240,6 +240,13 @@ class TestResolveExecutionMode:
         assert orch._resolve_execution_mode(issue) == ExecutionMode.BUILD
 
 
+class TestDispatchEligibility:
+    def test_in_progress_issue_is_not_dispatch_eligible_without_route(self) -> None:
+        orch = _build_orchestrator()
+        issue = _build_issue(state="In Progress")
+        assert orch._is_dispatch_eligible(issue) is False
+
+
 # ---------------------------------------------------------------------------
 # Dispatch: mode is set on RunningEntry
 # ---------------------------------------------------------------------------
@@ -1357,3 +1364,32 @@ class TestQAAgentConfig:
 
         assert entry.status == RunStatus.STALLED
         assert retries == [(issue.id, issue.identifier, 1, "stall_timeout")]
+
+    @pytest.mark.asyncio
+    async def test_reconcile_stops_review_worker_if_issue_leaves_qa_review(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch = _build_orchestrator()
+        issue = _build_issue(state="QA Review")
+        entry = _build_running_entry(issue, mode=ExecutionMode.REVIEW)
+        orch._state.running[issue.id] = entry
+
+        refreshed_issue = _build_issue(state="In Progress")
+        refreshed_issue.id = issue.id
+        refreshed_issue.identifier = issue.identifier
+
+        async def fake_fetch(ids: list[str]):
+            return [refreshed_issue]
+
+        terminated: list[tuple[str, bool]] = []
+
+        async def fake_terminate(issue_id: str, cleanup_workspace: bool = False) -> None:
+            terminated.append((issue_id, cleanup_workspace))
+            orch._state.running.pop(issue_id, None)
+
+        monkeypatch.setattr(orch._linear_service, "fetch_issue_states_by_ids", fake_fetch)
+        monkeypatch.setattr(orch, "_terminate_running_issue", fake_terminate)
+
+        await orch._reconcile_running_issues()
+
+        assert terminated == [(issue.id, False)]
