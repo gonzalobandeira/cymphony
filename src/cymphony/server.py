@@ -1290,14 +1290,94 @@ def _render_config_section(groups: dict[str, object]) -> str:
     return f"<div class='config-grid'>{''.join(sections)}</div>"
 
 
-def _render_dashboard(groups: dict[str, object]) -> str:
-    summary = groups["summary"]
-    totals = groups["totals"]
-    generated_at = _format_timestamp(groups.get("generated_at"))
-    now = _now_utc()
+def _render_overview_tab(
+    groups: dict[str, object],
+    summary: dict,
+    totals: dict,
+    generated_at: str,
+    dispatch_paused: bool,
+    shutdown_requested: bool,
+) -> str:
+    """Render the Overview tab content."""
+    return f"""
+    <section class="stats">
+      <div class="stat running"><strong>{summary["running"]}</strong><span>Running</span></div>
+      <div class="stat"><strong>{summary["retrying"]}</strong><span>Retrying</span></div>
+      <div class="stat ready"><strong>{summary["ready"]}</strong><span>Ready</span></div>
+      <div class="stat waiting"><strong>{summary["waiting"]}</strong><span>Waiting</span></div>
+      <div class="stat attention"><strong>{summary["needs_attention"]}</strong><span>Attention</span></div>
+      <div class="stat"><strong>{totals.get("total_tokens", 0):,}</strong><span>Tokens</span></div>
+    </section>
+
+    {_render_problems_panel(list(groups.get("recent_problems", [])))}
+
+    <div class="overview-grid">
+      <div class="overview-card">
+        <h3>System</h3>
+        <div class='kv'><span class='k'>Snapshot</span><span class='v'>{generated_at}</span></div>
+        <div class='kv'><span class='k'>Capacity</span><span class='v'>{escape(str(summary["capacity_in_use"]))}</span></div>
+        <div class='kv'><span class='k'>Runtime</span><span class='v'>{escape(_format_elapsed_seconds(totals.get("seconds_running")))}</span></div>
+        <div class='kv'><span class='k'>Dispatch</span><span class='v'>{'Paused' if dispatch_paused else 'Active'}</span></div>
+        <div class='kv'><span class='k'>Input tokens</span><span class='v'>{totals.get("input_tokens", 0):,}</span></div>
+        <div class='kv'><span class='k'>Output tokens</span><span class='v'>{totals.get("output_tokens", 0):,}</span></div>
+      </div>
+      <div class="overview-card">
+        <h3>Controls</h3>
+        <div class="control-toolbar">
+          <div class="control-group">
+            <span class="control-group-label">Status</span>
+            <span class="pill {'paused' if dispatch_paused else 'active'}" data-tooltip="Current dispatch state">{'Paused' if dispatch_paused else 'Active'}</span>
+          </div>
+          <div class="control-group">
+            <span class="control-group-label">View</span>
+            {_post_button("/api/v1/refresh", "Refresh Now", tooltip="Fetch the latest orchestration state immediately.")}
+            <button type="button" id="pause-refresh" title="Pause the automatic 15-second dashboard refresh" data-tooltip="Pause the automatic 15-second dashboard refresh" onclick="cym.toggleAutoRefresh()">Pause Auto-Refresh</button>
+            <select id="tz-select" title="Display timestamps in this timezone" onchange="cym.setTimezone(this.value)">
+              <option value="UTC">UTC</option>
+              <option value="Europe/London">Europe/London</option>
+              <option value="Europe/Berlin">Europe/Berlin</option>
+              <option value="Europe/Paris">Europe/Paris</option>
+              <option value="Europe/Madrid">Europe/Madrid</option>
+              <option value="Europe/Rome">Europe/Rome</option>
+              <option value="Europe/Amsterdam">Europe/Amsterdam</option>
+              <option value="Europe/Zurich">Europe/Zurich</option>
+              <option value="Europe/Athens">Europe/Athens</option>
+              <option value="Europe/Helsinki">Europe/Helsinki</option>
+              <option value="Europe/Moscow">Europe/Moscow</option>
+              <option value="Asia/Dubai">Asia/Dubai</option>
+              <option value="Asia/Kolkata">Asia/Kolkata</option>
+              <option value="Asia/Shanghai">Asia/Shanghai</option>
+              <option value="Asia/Tokyo">Asia/Tokyo</option>
+              <option value="Australia/Sydney">Australia/Sydney</option>
+              <option value="Pacific/Auckland">Pacific/Auckland</option>
+              <option value="America/New_York">America/New_York</option>
+              <option value="America/Chicago">America/Chicago</option>
+              <option value="America/Denver">America/Denver</option>
+              <option value="America/Los_Angeles">America/Los_Angeles</option>
+              <option value="America/Sao_Paulo">America/Sao_Paulo</option>
+            </select>
+          </div>
+          <div class="control-group">
+            <span class="control-group-label">Dispatch</span>
+            {_post_button("/api/v1/dispatch/pause", "Pause", tooltip="Stop launching new work; active agents continue.", css_class="caution-button")}
+            {_post_button("/api/v1/dispatch/resume", "Resume", tooltip="Allow the orchestrator to start queued work again.")}
+          </div>
+          <div class="control-group">
+            <span class="control-group-label">Shutdown</span>
+            {_kill_app_switch(shutdown_requested)}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {_render_operator_cards("Running", "Active workers and current execution status.", list(groups["running"]), empty="No active agents.", mode="running")}
+    {_render_operator_cards("Retrying", "Retries scheduled after failures or continuation hand-offs.", list(groups["retrying"]), empty="No retries scheduled.", mode="retrying")}
+"""
+
+
+def _render_tasks_tab(groups: dict[str, object]) -> str:
+    """Render the Tasks tab content."""
     controls = groups.get("controls", {})
-    dispatch_paused = bool(controls.get("dispatch_paused"))
-    shutdown_requested = bool(controls.get("shutdown_requested"))
     recent_controls = list(controls.get("recent_actions", []))
 
     skipped_rows = [
@@ -1330,7 +1410,6 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         for row in recent_controls[:10]
     ]
 
-    # --- Recent transitions section ---
     transition_history = list(groups.get("transition_history") or [])[:20]
     transition_rows = [
         [
@@ -1344,9 +1423,84 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         for row in transition_history
     ]
 
-    queue_sections = []
+    sections: list[str] = []
 
-    queue_sections.append(
+    # Issue queue cards for ready/waiting/blocked
+    for key, title, subtitle, empty_msg in [
+        ("ready", "Ready To Dispatch", "Work that can start as soon as capacity is available.", "No immediately dispatchable issues."),
+        ("waiting", "Waiting", "Eligible work queued behind current capacity limits.", "No queued work is waiting for slots."),
+        ("blocked", "Blocked", "Issues gated by unresolved dependencies or tracker state.", "No active blockers."),
+    ]:
+        items = list(groups.get(key, []))
+        if not items:
+            sections.append(
+                f"<section class='panel'>"
+                f"<div class='panel-head'><h2>{escape(title)}</h2><p>{escape(subtitle)}</p></div>"
+                f"<p class='empty'>{escape(empty_msg)}</p></section>"
+            )
+        else:
+            cards = []
+            for item in items:
+                link = _render_issue_link(item["identifier"], item["title"], item.get("url"))
+                state = escape(str(item.get("state") or ""))
+                priority = escape(_render_priority(item.get("priority")) if "priority" in item else "-")
+                reason = escape(str(item.get("reason") or ""))
+                updated = _format_timestamp(item.get("updated_at"))
+                cards.append(
+                    f"<div class='task-card'>"
+                    f"<div class='task-card-head'>"
+                    f"<span class='task-card-id'>{link}</span>"
+                    f"<span class='pill task-state'>{state}</span>"
+                    f"</div>"
+                    f"<div class='task-card-meta'>"
+                    f"<span>{priority}</span>"
+                    f"<span class='muted'>{reason}</span>"
+                    f"<span class='muted'>{updated}</span>"
+                    f"</div>"
+                    f"</div>"
+                )
+            sections.append(
+                f"<section class='panel'>"
+                f"<div class='panel-head'><h2>{escape(title)} ({len(items)})</h2><p>{escape(subtitle)}</p></div>"
+                f"<div class='task-card-list'>{''.join(cards)}</div></section>"
+            )
+
+    # Recently completed
+    completed_items = list(groups.get("recently_completed", []))
+    if completed_items:
+        cards = []
+        for item in completed_items:
+            link = _render_issue_link(item["identifier"], item["title"], item.get("url"))
+            state = escape(str(item.get("state") or ""))
+            project = escape(str(item.get("project") or "-"))
+            last_worked = _format_timestamp(item.get("last_worked_on"))
+            cards.append(
+                f"<div class='task-card'>"
+                f"<div class='task-card-head'>"
+                f"<span class='task-card-id'>{link}</span>"
+                f"<span class='pill task-state'>{state}</span>"
+                f"</div>"
+                f"<div class='task-card-meta'>"
+                f"<span>{project}</span>"
+                f"<span class='muted'>{last_worked}</span>"
+                f"</div>"
+                f"</div>"
+            )
+        sections.append(
+            f"<section class='panel'>"
+            f"<div class='panel-head'><h2>Recently Completed ({len(completed_items)})</h2>"
+            f"<p>Recent terminal-state work for quick operator confirmation.</p></div>"
+            f"<div class='task-card-list'>{''.join(cards)}</div></section>"
+        )
+    else:
+        sections.append(
+            "<section class='panel'>"
+            "<div class='panel-head'><h2>Recently Completed</h2>"
+            "<p>Recent terminal-state work for quick operator confirmation.</p></div>"
+            "<p class='empty'>No recent completions found.</p></section>"
+        )
+
+    sections.append(
         _render_table(
             f"Recent Transitions ({len(transition_rows)})",
             "State transitions applied to issues by the orchestrator.",
@@ -1355,46 +1509,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
             "No transitions recorded yet.",
         )
     )
-
-    for key, title, subtitle, empty in [
-        ("ready", "Ready To Dispatch", "Work that can start as soon as capacity is available.", "No immediately dispatchable issues."),
-        ("waiting", "Waiting", "Eligible work that is queued behind current capacity limits.", "No queued work is waiting for slots."),
-        ("blocked", "Blocked", "Issues still gated by unresolved dependencies or tracker state.", "No active blockers."),
-        ("recently_completed", "Recently Completed", "Recent terminal-state work for quick operator confirmation.", "No recent completions found."),
-    ]:
-        headers = (
-            ["Issue", "State", "Project", "Last worked on", "Linear"]
-            if key == "recently_completed"
-            else ["Issue", "State", "Priority", "Reason", "Updated"]
-        )
-        rows = []
-        for item in groups[key]:
-            if key == "recently_completed":
-                rows.append([
-                    _render_issue_link(item["identifier"], item["title"], item.get("url")),
-                    escape(str(item.get("state") or "")),
-                    escape(str(item.get("project") or "-")),
-                    _format_timestamp(item.get("last_worked_on")),
-                    _render_linear_link(item.get("url")),
-                ])
-            else:
-                rows.append([
-                    _render_issue_link(item["identifier"], item["title"], item.get("url")),
-                    escape(str(item.get("state") or "")),
-                    escape(_render_priority(item.get("priority")) if "priority" in item else "-"),
-                    escape(str(item.get("reason") or "")),
-                    _format_timestamp(item.get("updated_at")),
-                ])
-        queue_sections.append(
-            _render_table(
-                title,
-                subtitle,
-                headers,
-                rows,
-                empty,
-            )
-        )
-    queue_sections.append(
+    sections.append(
         _render_table(
             f"Waiting Reasons ({len(waiting_reason_rows)})",
             "Snapshot-level explanations for issues that are not dispatching yet.",
@@ -1403,7 +1518,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
             "No waiting reasons captured in the latest snapshot.",
         )
     )
-    queue_sections.append(
+    sections.append(
         _render_table(
             f"Skipped ({len(skipped_rows)})",
             "Issues manually skipped by an operator until they are requeued.",
@@ -1412,7 +1527,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
             "No issues are currently skipped.",
         )
     )
-    queue_sections.append(
+    sections.append(
         _render_table(
             f"Recent Controls ({len(recent_control_rows)})",
             "Recent operator actions and their outcomes.",
@@ -1422,6 +1537,37 @@ def _render_dashboard(groups: dict[str, object]) -> str:
         )
     )
 
+    return "".join(sections)
+
+
+def _render_config_tab(groups: dict[str, object]) -> str:
+    """Render the Config tab content."""
+    return (
+        "<section class='panel'>"
+        "<div class='panel-head'>"
+        "<h2>Active Config</h2>"
+        "<p><a href='/settings'>Edit settings</a></p>"
+        "</div>"
+        f"{_render_config_section(groups)}"
+        "</section>"
+    )
+
+
+def _render_dashboard(groups: dict[str, object]) -> str:
+    summary = groups["summary"]
+    totals = groups["totals"]
+    generated_at = _format_timestamp(groups.get("generated_at"))
+    controls = groups.get("controls", {})
+    dispatch_paused = bool(controls.get("dispatch_paused"))
+    shutdown_requested = bool(controls.get("shutdown_requested"))
+
+    overview_html = _render_overview_tab(
+        groups, summary, totals, generated_at,
+        dispatch_paused, shutdown_requested,
+    )
+    tasks_html = _render_tasks_tab(groups)
+    config_html = _render_config_tab(groups)
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1430,29 +1576,33 @@ def _render_dashboard(groups: dict[str, object]) -> str:
 <title>Cymphony Operator Dashboard</title>
 <style>
   :root {{
-    --bg: #f4f6f9;
+    --bg: #f8f9fb;
     --panel: #ffffff;
-    --panel-strong: #f9fafb;
-    --ink: #111827;
-    --muted: #6b7280;
-    --line: #e5e7eb;
+    --panel-strong: #f4f5f7;
+    --ink: #0f172a;
+    --muted: #64748b;
+    --line: #e2e8f0;
     --good: #059669;
     --warn: #d97706;
     --danger: #dc2626;
-    --accent: #0891b2;
-    --accent-soft: rgba(8, 145, 178, 0.08);
-    --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    --accent: #2563eb;
+    --accent-soft: rgba(37, 99, 235, 0.06);
+    --shadow: 0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.02);
+    --shadow-md: 0 2px 8px rgba(0,0,0,0.06);
     --shadow-lg: 0 4px 12px rgba(0,0,0,0.08);
-    --radius: 10px;
-    --sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --radius: 12px;
+    --radius-sm: 8px;
+    --sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
   }}
-  * {{ box-sizing: border-box; }}
+  *, *::before, *::after {{ box-sizing: border-box; }}
   body {{
     margin: 0;
     font-family: var(--sans);
     color: var(--ink);
     background: var(--bg);
     -webkit-font-smoothing: antialiased;
+    line-height: 1.5;
+    font-size: 14px;
   }}
   a {{ color: var(--accent); text-decoration: none; }}
   a:hover {{ text-decoration: underline; }}
@@ -1462,21 +1612,23 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   .topbar {{
     background: var(--panel);
     border-bottom: 1px solid var(--line);
-    padding: 0 24px;
+    padding: 0 28px;
     display: flex;
     align-items: center;
     gap: 24px;
     position: sticky;
     top: 0;
     z-index: 100;
-    box-shadow: var(--shadow);
+    box-shadow: var(--shadow-md);
+    min-height: 52px;
   }}
   .topbar-brand {{
     font-weight: 700;
-    font-size: 1.05rem;
+    font-size: 1rem;
     color: var(--ink);
     padding: 14px 0;
     white-space: nowrap;
+    letter-spacing: -0.01em;
   }}
   .tab-nav {{
     display: flex;
@@ -1491,8 +1643,8 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   .tab-nav a {{
     display: block;
-    padding: 14px 18px;
-    font-size: 0.9rem;
+    padding: 14px 16px;
+    font-size: 0.85rem;
     font-weight: 500;
     color: var(--muted);
     text-decoration: none;
@@ -1511,45 +1663,51 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   .topbar-meta {{
     display: flex;
-    gap: 16px;
+    gap: 12px;
     align-items: center;
-    font-size: 0.82rem;
+    font-size: 0.8rem;
     color: var(--muted);
     white-space: nowrap;
   }}
   .topbar-meta .pill {{
-    font-size: 0.75rem;
+    font-size: 0.72rem;
   }}
 
   /* ---- Main content ---- */
-  main {{ max-width: 1400px; margin: 0 auto; padding: 24px; }}
+  main {{ max-width: 1360px; margin: 0 auto; padding: 24px 28px; }}
   .tab-content {{ display: none; }}
-  .tab-content.active {{ display: block; }}
+  .tab-content.active {{ display: block; animation: fadeIn 0.15s ease; }}
+  @keyframes fadeIn {{ from {{ opacity: 0; }} to {{ opacity: 1; }} }}
 
   /* ---- Stats row ---- */
   .stats {{
     display: grid;
     grid-template-columns: repeat(6, minmax(0, 1fr));
-    gap: 12px;
-    margin-bottom: 24px;
+    gap: 10px;
+    margin-bottom: 20px;
   }}
   .stat {{
     background: var(--panel);
     border: 1px solid var(--line);
     border-radius: var(--radius);
-    padding: 16px;
+    padding: 16px 14px;
     box-shadow: var(--shadow);
+    transition: box-shadow 0.15s;
+  }}
+  .stat:hover {{
+    box-shadow: var(--shadow-md);
   }}
   .stat strong {{
     display: block;
-    font-size: 1.75rem;
+    font-size: 1.6rem;
     line-height: 1;
-    margin-bottom: 6px;
+    margin-bottom: 4px;
     font-weight: 700;
+    letter-spacing: -0.02em;
   }}
   .stat span {{
     color: var(--muted);
-    font-size: 0.82rem;
+    font-size: 0.78rem;
     font-weight: 500;
   }}
   .stat.attention strong {{ color: var(--danger); }}
@@ -1561,22 +1719,22 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   .overview-grid {{
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 16px;
-    margin-bottom: 24px;
+    gap: 14px;
+    margin-bottom: 20px;
   }}
   .overview-card {{
     background: var(--panel);
     border: 1px solid var(--line);
     border-radius: var(--radius);
-    padding: 20px;
+    padding: 18px 20px;
     box-shadow: var(--shadow);
   }}
   .overview-card h3 {{
-    margin: 0 0 12px;
-    font-size: 0.88rem;
+    margin: 0 0 10px;
+    font-size: 0.78rem;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.05em;
     color: var(--muted);
   }}
 
@@ -1586,16 +1744,16 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     border: 1px solid var(--line);
     border-radius: var(--radius);
     box-shadow: var(--shadow);
-    padding: 16px 20px;
+    padding: 18px 20px;
     overflow: hidden;
-    margin-bottom: 16px;
+    margin-bottom: 14px;
   }}
   .panel-head {{
     display: flex;
     justify-content: space-between;
     align-items: baseline;
     gap: 12px;
-    margin-bottom: 12px;
+    margin-bottom: 14px;
   }}
   .panel-head h2 {{
     margin: 0;
@@ -1698,13 +1856,13 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     border: 1px solid var(--line);
     background: var(--panel);
     color: var(--ink);
-    border-radius: 6px;
-    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    padding: 6px 14px;
     font: inherit;
-    font-size: 0.82rem;
+    font-size: 0.8rem;
     font-weight: 500;
     cursor: pointer;
-    transition: border-color 0.15s, background 0.15s;
+    transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
   }}
   button:disabled {{
     opacity: 0.4;
@@ -1713,6 +1871,7 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   button:hover:not(:disabled) {{
     border-color: var(--accent);
     background: var(--accent-soft);
+    box-shadow: var(--shadow);
   }}
   .danger-button {{
     border-color: rgba(220, 38, 38, 0.3);
@@ -1774,11 +1933,12 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     border: 1px solid var(--line);
     background: var(--panel);
     color: var(--ink);
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     padding: 6px 12px;
     font: inherit;
-    font-size: 0.82rem;
+    font-size: 0.8rem;
     cursor: pointer;
+    transition: border-color 0.15s;
   }}
   #tz-select:hover {{
     border-color: var(--accent);
@@ -1856,13 +2016,18 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   /* ---- Operator cards ---- */
   .operator-card-list {{
     display: grid;
-    gap: 12px;
+    gap: 10px;
   }}
   .operator-card {{
-    padding: 16px;
+    padding: 14px 16px;
     border-radius: var(--radius);
     border: 1px solid var(--line);
     background: var(--panel-strong);
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }}
+  .operator-card:hover {{
+    border-color: rgba(37, 99, 235, 0.2);
+    box-shadow: var(--shadow);
   }}
   .operator-card-head {{
     display: flex;
@@ -2020,11 +2185,52 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     font-size: 0.8rem;
   }}
 
+  /* ---- Task cards (Tasks tab) ---- */
+  .task-card-list {{
+    display: grid;
+    gap: 8px;
+  }}
+  .task-card {{
+    padding: 12px 16px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--line);
+    background: var(--panel-strong);
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }}
+  .task-card:hover {{
+    border-color: rgba(37, 99, 235, 0.25);
+    box-shadow: var(--shadow);
+  }}
+  .task-card-head {{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 6px;
+  }}
+  .task-card-id {{
+    font-weight: 600;
+    font-size: 0.85rem;
+  }}
+  .task-card-meta {{
+    display: flex;
+    gap: 16px;
+    font-size: 0.8rem;
+    color: var(--muted);
+    flex-wrap: wrap;
+  }}
+  .task-state {{
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 0.72rem;
+    padding: 2px 8px;
+  }}
+
   /* ---- Config grid ---- */
   .config-grid {{
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 16px;
+    gap: 14px;
   }}
 
   /* ---- Misc ---- */
@@ -2036,11 +2242,11 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     font-style: italic;
   }}
   .footer {{
-    margin-top: 24px;
-    padding-top: 16px;
+    margin-top: 20px;
+    padding-top: 14px;
     border-top: 1px solid var(--line);
     color: var(--muted);
-    font-size: 0.82rem;
+    font-size: 0.8rem;
   }}
 
   /* ---- Toast ---- */
@@ -2076,15 +2282,20 @@ def _render_dashboard(groups: dict[str, object]) -> str:
       border-top: 1px solid var(--line); padding-top: 8px;
     }}
     .topbar {{ padding: 0 16px; gap: 12px; }}
-    .tab-nav a {{ padding: 12px 12px; font-size: 0.84rem; }}
+    .tab-nav a {{ padding: 12px 12px; font-size: 0.82rem; }}
+    main {{ padding: 20px 16px; }}
   }}
   @media (max-width: 700px) {{
-    main {{ padding: 16px; }}
+    main {{ padding: 14px 12px; }}
     .stats {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-    table {{ font-size: 0.82rem; }}
+    .stat {{ padding: 12px 10px; }}
+    .stat strong {{ font-size: 1.3rem; }}
+    table {{ font-size: 0.8rem; }}
     .operator-meta {{ grid-template-columns: 1fr 1fr; }}
     .detail-wide {{ grid-column: span 1; }}
     .config-grid {{ grid-template-columns: 1fr; }}
+    .task-card-head {{ flex-direction: column; align-items: flex-start; gap: 4px; }}
+    .task-card-meta {{ flex-direction: column; gap: 4px; }}
     .kv {{
       flex-direction: column;
       gap: 2px;
@@ -2098,9 +2309,10 @@ def _render_dashboard(groups: dict[str, object]) -> str:
       gap: 0;
     }}
     .topbar-brand {{ padding: 10px 0; }}
-    .tab-nav {{ order: 3; width: 100%; border-top: 1px solid var(--line); }}
-    .tab-nav a {{ padding: 10px 12px; font-size: 0.82rem; }}
+    .tab-nav {{ order: 3; width: 100%; border-top: 1px solid var(--line); overflow-x: auto; }}
+    .tab-nav a {{ padding: 10px 12px; font-size: 0.8rem; }}
     .topbar-meta {{ display: none; }}
+    .panel {{ padding: 14px; }}
   }}
 </style>
 <script>
@@ -2280,98 +2492,15 @@ document.addEventListener("DOMContentLoaded", function() {{
   </div>
 </nav>
 <main>
-  <!-- ==================== OVERVIEW TAB ==================== -->
   <div id="tab-overview" class="tab-content active">
-    <section class="stats">
-      <div class="stat running"><strong>{summary["running"]}</strong><span>Running now</span></div>
-      <div class="stat"><strong>{summary["retrying"]}</strong><span>Retrying</span></div>
-      <div class="stat ready"><strong>{summary["ready"]}</strong><span>Ready next</span></div>
-      <div class="stat waiting"><strong>{summary["waiting"]}</strong><span>Waiting</span></div>
-      <div class="stat attention"><strong>{summary["needs_attention"]}</strong><span>Needs attention</span></div>
-      <div class="stat"><strong>{totals.get("total_tokens", 0):,}</strong><span>Total tokens</span></div>
-    </section>
-
-    {_render_problems_panel(list(groups.get("recent_problems", [])))}
-
-    <div class="overview-grid">
-      <div class="overview-card">
-        <h3>System</h3>
-        <div class='kv'><span class='k'>Snapshot</span><span class='v'>{generated_at}</span></div>
-        <div class='kv'><span class='k'>Capacity</span><span class='v'>{escape(str(summary["capacity_in_use"]))}</span></div>
-        <div class='kv'><span class='k'>Runtime</span><span class='v'>{escape(_format_elapsed_seconds(totals.get("seconds_running")))}</span></div>
-        <div class='kv'><span class='k'>Dispatch</span><span class='v'>{'Paused' if dispatch_paused else 'Active'}</span></div>
-        <div class='kv'><span class='k'>Input tokens</span><span class='v'>{totals.get("input_tokens", 0):,}</span></div>
-        <div class='kv'><span class='k'>Output tokens</span><span class='v'>{totals.get("output_tokens", 0):,}</span></div>
-      </div>
-      <div class="overview-card">
-        <h3>Controls</h3>
-        <div class="control-toolbar">
-          <div class="control-group">
-            <span class="control-group-label">Status</span>
-            <span class="pill {'paused' if dispatch_paused else 'active'}" title="Current dispatch state" data-tooltip="Current dispatch state">{'Paused' if dispatch_paused else 'Active'}</span>
-          </div>
-          <div class="control-group">
-            <span class="control-group-label">View</span>
-            {_post_button("/api/v1/refresh", "Refresh Now", tooltip="Fetch the latest orchestration state immediately.")}
-            <button type="button" id="pause-refresh" title="Pause the automatic 15-second dashboard refresh" data-tooltip="Pause the automatic 15-second dashboard refresh" onclick="cym.toggleAutoRefresh()">Pause Auto-Refresh</button>
-            <select id="tz-select" title="Display timestamps in this timezone" onchange="cym.setTimezone(this.value)">
-              <option value="UTC">UTC</option>
-              <option value="Europe/London">Europe/London</option>
-              <option value="Europe/Berlin">Europe/Berlin</option>
-              <option value="Europe/Paris">Europe/Paris</option>
-              <option value="Europe/Madrid">Europe/Madrid</option>
-              <option value="Europe/Rome">Europe/Rome</option>
-              <option value="Europe/Amsterdam">Europe/Amsterdam</option>
-              <option value="Europe/Zurich">Europe/Zurich</option>
-              <option value="Europe/Athens">Europe/Athens</option>
-              <option value="Europe/Helsinki">Europe/Helsinki</option>
-              <option value="Europe/Moscow">Europe/Moscow</option>
-              <option value="Asia/Dubai">Asia/Dubai</option>
-              <option value="Asia/Kolkata">Asia/Kolkata</option>
-              <option value="Asia/Shanghai">Asia/Shanghai</option>
-              <option value="Asia/Tokyo">Asia/Tokyo</option>
-              <option value="Australia/Sydney">Australia/Sydney</option>
-              <option value="Pacific/Auckland">Pacific/Auckland</option>
-              <option value="America/New_York">America/New_York</option>
-              <option value="America/Chicago">America/Chicago</option>
-              <option value="America/Denver">America/Denver</option>
-              <option value="America/Los_Angeles">America/Los_Angeles</option>
-              <option value="America/Sao_Paulo">America/Sao_Paulo</option>
-            </select>
-          </div>
-          <div class="control-group">
-            <span class="control-group-label">Dispatch</span>
-            {_post_button("/api/v1/dispatch/pause", "Pause", tooltip="Stop launching new work; active agents continue.", css_class="caution-button")}
-            {_post_button("/api/v1/dispatch/resume", "Resume", tooltip="Allow the orchestrator to start queued work again.")}
-          </div>
-          <div class="control-group">
-            <span class="control-group-label">Shutdown</span>
-            {_kill_app_switch(shutdown_requested)}
-          </div>
-        </div>
-      </div>
-    </div>
-
-    {_render_operator_cards("Running", "Active workers and current execution status.", list(groups["running"]), empty="No active agents.", mode="running")}
-    {_render_operator_cards("Retrying", "Retries scheduled after failures or continuation hand-offs.", list(groups["retrying"]), empty="No retries scheduled.", mode="retrying")}
+    {overview_html}
   </div>
-
-  <!-- ==================== TASKS TAB ==================== -->
   <div id="tab-tasks" class="tab-content">
-    {''.join(queue_sections)}
+    {tasks_html}
   </div>
-
-  <!-- ==================== CONFIG TAB ==================== -->
   <div id="tab-config" class="tab-content">
-    <section class="panel">
-      <div class="panel-head">
-        <h2>Active Config</h2>
-        <p><a href="/settings">Edit settings</a></p>
-      </div>
-      {_render_config_section(groups)}
-    </section>
+    {config_html}
   </div>
-
   <p class="footer">
     <a href="/api/v1/state">JSON state</a>
     · Live refresh every 15 s (pausable)
