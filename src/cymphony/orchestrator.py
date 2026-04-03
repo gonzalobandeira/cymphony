@@ -2768,6 +2768,29 @@ class Orchestrator:
             "preflight_errors": list(self._state.last_preflight_errors),
             "validation_errors": list(self._state.last_validation_errors),
             "workflow_config": {
+                "tracker": {
+                    "project_slug": self._config.tracker.project_slug,
+                    "assignee": self._config.tracker.assignee,
+                },
+                "polling": {
+                    "interval_ms": self._config.polling.interval_ms,
+                },
+                "agent": {
+                    "provider": self._config.agent.provider,
+                    "max_concurrent_agents": self._config.agent.max_concurrent_agents,
+                    "max_concurrent_agents_by_state": dict(self._config.agent.max_concurrent_agents_by_state) or None,
+                    "max_turns": self._config.agent.max_turns,
+                    "max_retry_backoff_ms": self._config.agent.max_retry_backoff_ms,
+                },
+                "runner": {
+                    "command": self._config.runner.command,
+                    "turn_timeout_ms": self._config.runner.turn_timeout_ms,
+                    "stall_timeout_ms": self._config.runner.stall_timeout_ms,
+                    "dangerously_skip_permissions": self._config.runner.dangerously_skip_permissions,
+                },
+                "server": {
+                    "port": self._config.server.port,
+                },
                 "active_states": list(self._config.tracker.active_states),
                 "terminal_states": list(self._config.tracker.terminal_states),
                 "transitions": {
