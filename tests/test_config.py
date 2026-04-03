@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import cymphony.config as config_module
 from cymphony.config import build_config, validate_dispatch_config
 from cymphony.models import QAReviewConfig, WorkflowDefinition
 
@@ -167,6 +168,42 @@ def test_runner_config_has_no_provider_field() -> None:
     import dataclasses
     field_names = {f.name for f in dataclasses.fields(RunnerConfig)}
     assert "provider" not in field_names
+
+
+def test_default_hooks_reuse_issue_branch_for_execution_and_base_for_qa(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(config_module, "_repo_root", lambda: config_module.Path("/tmp/repo"))
+    monkeypatch.setattr(
+        config_module, "_repo_clone_source", lambda repo_root: "git@github.com:example/repo.git"
+    )
+    monkeypatch.setattr(config_module, "_default_base_branch", lambda: "main")
+
+    hooks = config_module._default_hooks("test-project")
+
+    assert "ISSUE_BRANCH=\"agent/${ISSUE_KEY}\"" in hooks.before_run
+    assert "git ls-remote --exit-code --heads origin \"$ISSUE_BRANCH\"" in hooks.before_run
+    assert "git checkout -B \"$ISSUE_BRANCH\" \"origin/$ISSUE_BRANCH\"" in hooks.before_run
+    assert "if [[ \"$PWD\" == *\"/qa/\"* ]]" in hooks.before_run
+    assert "git checkout \"$BASE_BRANCH\"" in hooks.before_run
+
+
+def test_default_after_run_commits_and_updates_pr_from_issue_branch(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(config_module, "_repo_root", lambda: config_module.Path("/tmp/repo"))
+    monkeypatch.setattr(
+        config_module, "_repo_clone_source", lambda repo_root: "git@github.com:example/repo.git"
+    )
+    monkeypatch.setattr(config_module, "_default_base_branch", lambda: "main")
+
+    hooks = config_module._default_hooks("test-project")
+
+    assert "Execution workspace is still on ${BASE_BRANCH}; expected an issue branch." in hooks.after_run
+    assert "git commit -m \"${ISSUE_ID}: agent work [skip ci]\"" in hooks.after_run
+    assert "git push -u origin \"$BRANCH\" --force-with-lease || true" in hooks.after_run
+    assert "gh pr edit --title \"$TITLE\" || true" in hooks.after_run
+    assert "gh pr create --title \"$TITLE\" --body \"\" --base \"$BASE_BRANCH\" --head \"$BRANCH\" || true" in hooks.after_run
 
 
 # ---------------------------------------------------------------------------
