@@ -1290,6 +1290,30 @@ def _render_config_section(groups: dict[str, object]) -> str:
     return f"<div class='config-grid'>{''.join(sections)}</div>"
 
 
+def _render_recent_actions_feed(controls: dict[str, object], *, limit: int = 5) -> str:
+    """Render a compact recent-actions feed for the overview tab."""
+    actions = list(controls.get("recent_actions", []))[:limit]
+    if not actions:
+        return "<p class='empty small'>No recent operator actions.</p>"
+    items: list[str] = []
+    for row in actions:
+        action = escape(str(row.get("action") or ""))
+        scope = escape(str(row.get("scope") or ""))
+        outcome = str(row.get("outcome") or "")
+        issue = escape(str(row.get("issue_identifier") or ""))
+        ts = _format_timestamp(row.get("timestamp"))
+        ok = outcome.lower() in ("ok", "success", "accepted", "queued", "true")
+        pill = f"<span class='pill active'>ok</span>" if ok else f"<span class='pill paused'>fail</span>"
+        issue_html = f" <span class='muted'>({issue})</span>" if issue and issue != "-" else ""
+        items.append(
+            f"<div class='action-feed-item'>"
+            f"<span class='action-feed-label'>{action}{issue_html}</span>"
+            f"<span class='action-feed-meta'>{pill} <span class='muted'>{ts}</span></span>"
+            f"</div>"
+        )
+    return f"<div class='action-feed'>{''.join(items)}</div>"
+
+
 def _render_overview_tab(
     groups: dict[str, object],
     summary: dict,
@@ -1299,6 +1323,7 @@ def _render_overview_tab(
     shutdown_requested: bool,
 ) -> str:
     """Render the Overview tab content."""
+    controls = groups.get("controls", {})
     return f"""
     <section class="stats">
       <div class="stat running"><strong>{summary["running"]}</strong><span>Running</span></div>
@@ -1331,7 +1356,7 @@ def _render_overview_tab(
           <div class="control-group">
             <span class="control-group-label">View</span>
             {_post_button("/api/v1/refresh", "Refresh Now", tooltip="Fetch the latest orchestration state immediately.")}
-            <button type="button" id="pause-refresh" title="Pause the automatic 15-second dashboard refresh" data-tooltip="Pause the automatic 15-second dashboard refresh" onclick="cym.toggleAutoRefresh()">Pause Auto-Refresh</button>
+            <button type="button" id="pause-refresh" title="Pause the automatic 15-second dashboard refresh" data-tooltip="Pause the automatic 15-second dashboard refresh" onclick="cym.toggleAutoRefresh()"><span class="btn-label">Pause Auto-Refresh</span><span class="btn-spinner"></span></button>
             <select id="tz-select" title="Display timestamps in this timezone" onchange="cym.setTimezone(this.value)">
               <option value="UTC">UTC</option>
               <option value="Europe/London">Europe/London</option>
@@ -1359,8 +1384,20 @@ def _render_overview_tab(
           </div>
           <div class="control-group">
             <span class="control-group-label">Dispatch</span>
-            {_post_button("/api/v1/dispatch/pause", "Pause", tooltip="Stop launching new work; active agents continue.", css_class="caution-button")}
-            {_post_button("/api/v1/dispatch/resume", "Resume", tooltip="Allow the orchestrator to start queued work again.")}
+            <button type="button" class="caution-button{' is-active-toggle' if not dispatch_paused else ''}"
+              title="Stop launching new work; active agents continue."
+              data-tooltip="Stop launching new work; active agents continue."
+              onclick="cym.dispatchPause(this)"
+              {'disabled' if dispatch_paused else ''}>
+              <span class="btn-label">Pause</span><span class="btn-spinner"></span>
+            </button>
+            <button type="button" class="{' is-active-toggle' if dispatch_paused else ''}"
+              title="Allow the orchestrator to start queued work again."
+              data-tooltip="Allow the orchestrator to start queued work again."
+              onclick="cym.dispatchResume(this)"
+              {'disabled' if not dispatch_paused else ''}>
+              <span class="btn-label">Resume</span><span class="btn-spinner"></span>
+            </button>
           </div>
           <div class="control-group">
             <span class="control-group-label">Shutdown</span>
@@ -1369,6 +1406,11 @@ def _render_overview_tab(
         </div>
       </div>
     </div>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Recent Actions</h2><p>Last operator actions and their outcomes.</p></div>
+      {_render_recent_actions_feed(controls)}
+    </section>
 
     {_render_operator_cards("Running", "Active workers and current execution status.", list(groups["running"]), empty="No active agents.", mode="running")}
     {_render_operator_cards("Retrying", "Retries scheduled after failures or continuation hand-offs.", list(groups["retrying"]), empty="No retries scheduled.", mode="retrying")}
@@ -1862,7 +1904,8 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     font-size: 0.8rem;
     font-weight: 500;
     cursor: pointer;
-    transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+    transition: border-color 0.15s, background 0.15s, box-shadow 0.15s, opacity 0.15s;
+    position: relative;
   }}
   button:disabled {{
     opacity: 0.4;
@@ -1873,6 +1916,40 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     background: var(--accent-soft);
     box-shadow: var(--shadow);
   }}
+  button:focus-visible {{
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }}
+  button:active:not(:disabled) {{
+    transform: scale(0.97);
+  }}
+  /* Loading state */
+  button.is-loading {{
+    pointer-events: none;
+    opacity: 0.7;
+  }}
+  button.is-loading .btn-label {{
+    visibility: hidden;
+  }}
+  button.is-loading .btn-spinner {{
+    display: block;
+  }}
+  .btn-spinner {{
+    display: none;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 14px;
+    height: 14px;
+    margin: -7px 0 0 -7px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: cym-spin 0.6s linear infinite;
+  }}
+  @keyframes cym-spin {{
+    to {{ transform: rotate(360deg); }}
+  }}
   .danger-button {{
     border-color: rgba(220, 38, 38, 0.3);
     background: rgba(220, 38, 38, 0.05);
@@ -1882,6 +1959,9 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     border-color: rgba(220, 38, 38, 0.5);
     background: rgba(220, 38, 38, 0.1);
   }}
+  .danger-button:focus-visible {{
+    outline-color: var(--danger);
+  }}
   .caution-button {{
     border-color: rgba(217, 119, 6, 0.3);
     background: rgba(217, 119, 6, 0.05);
@@ -1890,6 +1970,14 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   .caution-button:hover:not(:disabled) {{
     border-color: rgba(217, 119, 6, 0.5);
     background: rgba(217, 119, 6, 0.1);
+  }}
+  .caution-button:focus-visible {{
+    outline-color: var(--warn);
+  }}
+  /* Highlight the currently applicable toggle button */
+  button.is-active-toggle:not(:disabled) {{
+    border-color: var(--accent);
+    box-shadow: inset 0 0 0 1px var(--accent);
   }}
 
   /* ---- Tooltips ---- */
@@ -2005,6 +2093,33 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   .pill.paused {{
     background: rgba(220, 38, 38, 0.1);
     color: var(--danger);
+  }}
+
+  /* ---- Action feed ---- */
+  .action-feed {{
+    display: grid;
+    gap: 0;
+  }}
+  .action-feed-item {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 0.85rem;
+  }}
+  .action-feed-item:last-child {{
+    border-bottom: 0;
+  }}
+  .action-feed-label {{
+    font-weight: 500;
+  }}
+  .action-feed-meta {{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
   }}
 
   /* ---- Issue actions ---- */
@@ -2259,15 +2374,33 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     padding: 10px 18px;
     border-radius: 8px;
     font-size: 0.82rem;
+    font-weight: 500;
     opacity: 0;
     transform: translateY(8px);
     transition: opacity 0.2s, transform 0.2s;
     z-index: 9999;
     pointer-events: none;
+    max-width: 340px;
   }}
   .cym-toast.visible {{
     opacity: 1;
     transform: translateY(0);
+  }}
+  .cym-toast--success {{
+    background: var(--good);
+  }}
+  .cym-toast--error {{
+    background: var(--danger);
+  }}
+  .cym-toast--info {{
+    background: var(--accent);
+  }}
+  /* Stack multiple toasts */
+  .cym-toast + .cym-toast {{
+    bottom: 64px;
+  }}
+  .cym-toast + .cym-toast + .cym-toast {{
+    bottom: 104px;
   }}
 
   /* ---- Responsive ---- */
@@ -2321,38 +2454,93 @@ window.cym = {{
   _INTERVAL: 15000,
   _paused: false,
 
-  /** Show a brief toast message. */
-  toast: function(msg) {{
+  /** Show a brief toast message with optional variant (success, error, info). */
+  toast: function(msg, variant) {{
     var el = document.createElement("div");
-    el.className = "cym-toast";
+    el.className = "cym-toast" + (variant ? " cym-toast--" + variant : "");
     el.textContent = msg;
     document.body.appendChild(el);
     requestAnimationFrame(function() {{ el.classList.add("visible"); }});
     setTimeout(function() {{
       el.classList.remove("visible");
       setTimeout(function() {{ el.remove(); }}, 300);
-    }}, 2000);
+    }}, 2400);
   }},
 
-  /** POST an action, show feedback, then refresh the dashboard content in place. */
-  post: function(url, body) {{
+  /** POST an action, show loading state on button, then refresh. */
+  post: function(url, body, btnEl) {{
     var label = url.split("/").pop().replace(/[-_]/g, " ");
+    // Set loading state on the clicked button
+    if (btnEl) {{
+      btnEl.disabled = true;
+      btnEl.classList.add("is-loading");
+    }}
     fetch(url, {{
       method: "POST",
       headers: {{"Content-Type": "application/x-www-form-urlencoded"}},
       body: body || ""
     }}).then(function(r) {{
-      cym.toast(r.ok ? "Done: " + label : "Failed: " + label);
+      if (r.ok) {{
+        cym.toast("Done: " + label, "success");
+      }} else {{
+        cym.toast("Failed: " + label, "error");
+      }}
+      // Clear loading state before refresh replaces DOM
+      if (btnEl) {{
+        btnEl.disabled = false;
+        btnEl.classList.remove("is-loading");
+      }}
       cym.refresh();
     }}).catch(function() {{
-      cym.toast("Error: " + label);
+      cym.toast("Error: " + label, "error");
+      if (btnEl) {{
+        btnEl.disabled = false;
+        btnEl.classList.remove("is-loading");
+      }}
     }});
   }},
 
   killApp: function() {{
     var armed = document.getElementById("kill-arm");
     if (!armed || !armed.checked) return;
-    cym.post("/api/v1/app/kill", "confirm_kill=true");
+    var btn = document.getElementById("kill-app-button");
+    // Immediately show the shutdown-requested state
+    if (armed) {{ armed.disabled = true; }}
+    if (btn) {{
+      btn.disabled = true;
+      btn.classList.add("is-loading");
+      var lbl = btn.querySelector(".btn-label");
+      if (lbl) lbl.textContent = "Shutting down…";
+    }}
+    fetch("/api/v1/app/kill", {{
+      method: "POST",
+      headers: {{"Content-Type": "application/x-www-form-urlencoded"}},
+      body: "confirm_kill=true"
+    }}).then(function(r) {{
+      if (r.ok) {{
+        cym.toast("Shutdown requested — the process will terminate shortly.", "success");
+        // Update dispatch pill to show shutdown state
+        document.querySelectorAll(".topbar-meta .pill, .control-group .pill").forEach(function(p) {{
+          p.className = "pill paused";
+          p.textContent = "Shutting Down";
+        }});
+      }} else {{
+        cym.toast("Kill request failed", "error");
+        if (armed) {{ armed.disabled = false; }}
+        if (btn) {{
+          btn.classList.remove("is-loading");
+          var lbl2 = btn.querySelector(".btn-label");
+          if (lbl2) lbl2.textContent = "Kill App";
+        }}
+        cym.syncKillButton();
+      }}
+      cym.refresh();
+    }}).catch(function() {{
+      cym.toast("Network error during shutdown", "error");
+      if (armed) {{ armed.disabled = false; }}
+      if (btn) {{ btn.classList.remove("is-loading"); }}
+      cym.syncKillButton();
+    }});
   }},
 
   syncKillButton: function() {{
@@ -2360,6 +2548,25 @@ window.cym = {{
     var button = document.getElementById("kill-app-button");
     if (!armed || !button) return;
     button.disabled = !armed.checked;
+  }},
+
+  /** Pause dispatching and immediately reflect in the UI. */
+  dispatchPause: function(btn) {{
+    // Optimistically update all dispatch pills to "Paused"
+    document.querySelectorAll(".topbar-meta .pill, .control-group .pill").forEach(function(p) {{
+      p.className = "pill paused";
+      p.textContent = "Paused";
+    }});
+    cym.post("/api/v1/dispatch/pause", "", btn);
+  }},
+
+  /** Resume dispatching and immediately reflect in the UI. */
+  dispatchResume: function(btn) {{
+    document.querySelectorAll(".topbar-meta .pill, .control-group .pill").forEach(function(p) {{
+      p.className = "pill active";
+      p.textContent = "Active";
+    }});
+    cym.post("/api/v1/dispatch/resume", "", btn);
   }},
 
   /** Fetch the dashboard HTML and swap <main> content in place. */
@@ -2407,14 +2614,18 @@ window.cym = {{
   toggleAutoRefresh: function() {{
     cym._paused = !cym._paused;
     var btn = document.getElementById("pause-refresh");
-    if (btn) btn.textContent = cym._paused ? "Resume Auto-Refresh" : "Pause Auto-Refresh";
+    if (btn) {{
+      var lbl = btn.querySelector(".btn-label");
+      if (lbl) lbl.textContent = cym._paused ? "Resume Auto-Refresh" : "Pause Auto-Refresh";
+      else btn.textContent = cym._paused ? "Resume Auto-Refresh" : "Pause Auto-Refresh";
+    }}
     if (cym._paused) {{
       clearInterval(cym._refreshTimer);
       cym._refreshTimer = null;
-      cym.toast("Auto-refresh paused");
+      cym.toast("Auto-refresh paused", "info");
     }} else {{
       cym.startAutoRefresh();
-      cym.toast("Auto-refresh resumed");
+      cym.toast("Auto-refresh resumed", "success");
     }}
   }},
 
@@ -2923,8 +3134,10 @@ def _post_button(
     class_attr = f" class='{html.escape(css_class, quote=True)}'" if css_class else ""
     return (
         f"<button type='button'{class_attr}{tooltip_attr}"
-        f" onclick=\"cym.post('{safe_action}')\">"
-        f"{safe_label}</button>"
+        f" onclick=\"cym.post('{safe_action}', '', this)\">"
+        f"<span class='btn-label'>{safe_label}</span>"
+        f"<span class='btn-spinner'></span>"
+        f"</button>"
     )
 
 
