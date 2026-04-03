@@ -49,7 +49,15 @@ def test_validate_dispatch_config_accepts_claude_provider() -> None:
 
 
 def test_validate_dispatch_config_accepts_codex_provider() -> None:
-    config = build_config(_workflow({"provider": "codex"}))
+    wf = WorkflowDefinition(
+        config={
+            "tracker": {"kind": "linear", "api_key": "k", "project_slug": "p"},
+            "agent": {"max_concurrent_agents": 1, "max_turns": 1, "provider": "codex"},
+            "runner": {},
+        },
+        prompt_template="test",
+    )
+    config = build_config(wf)
     result = validate_dispatch_config(config)
     assert result.ok
 
@@ -122,6 +130,35 @@ def test_runner_command_blank_string_resolves_to_provider_default() -> None:
     )
     config = build_config(wf)
     assert config.runner.command == "codex"
+
+
+def test_validate_dispatch_config_rejects_obvious_provider_command_mismatch() -> None:
+    wf = WorkflowDefinition(
+        config={
+            "tracker": {"kind": "linear", "api_key": "k", "project_slug": "p"},
+            "agent": {"max_concurrent_agents": 1, "max_turns": 1, "provider": "claude"},
+            "runner": {"command": "codex"},
+        },
+        prompt_template="test",
+    )
+    config = build_config(wf)
+    result = validate_dispatch_config(config)
+    assert not result.ok
+    assert any("runner.command does not match agent.provider" in e for e in result.errors)
+
+
+def test_validate_dispatch_config_allows_custom_same_provider_command_path() -> None:
+    wf = WorkflowDefinition(
+        config={
+            "tracker": {"kind": "linear", "api_key": "k", "project_slug": "p"},
+            "agent": {"max_concurrent_agents": 1, "max_turns": 1, "provider": "codex"},
+            "runner": {"command": "/usr/local/bin/my-codex"},
+        },
+        prompt_template="test",
+    )
+    config = build_config(wf)
+    result = validate_dispatch_config(config)
+    assert result.ok
 
 
 def test_runner_config_has_no_provider_field() -> None:
@@ -460,6 +497,24 @@ def test_qa_agent_validation_passes_with_valid_config() -> None:
     }))
     result = validate_dispatch_config(config)
     assert result.ok
+
+
+def test_qa_agent_validation_rejects_provider_command_mismatch() -> None:
+    config = build_config(_workflow_with_transitions({
+        "qa_review": {
+            "enabled": True,
+            "agent": {
+                "provider": "codex",
+                "command": "claude",
+            },
+        },
+    }))
+    result = validate_dispatch_config(config)
+    assert not result.ok
+    assert any(
+        "transitions.qa_review.agent.command does not match" in e
+        for e in result.errors
+    )
 
 
 def test_qa_agent_backward_compat_no_agent_block() -> None:

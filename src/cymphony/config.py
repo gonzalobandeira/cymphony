@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+import shlex
 from typing import Any
 
 from .models import (
@@ -169,6 +170,28 @@ def _to_str_list(value: Any, default: list[str]) -> list[str]:
     if isinstance(value, list):
         return [str(v) for v in value]
     return default
+
+
+def _command_provider_conflict(command: str, provider: str) -> str | None:
+    """Return the conflicting built-in provider name if the command is an obvious mismatch.
+
+    We only reject the high-confidence case where the configured executable is exactly
+    another built-in provider command. This catches misleading configs like
+    ``provider=claude`` with ``command=codex`` while still allowing custom same-provider
+    paths such as ``/usr/local/bin/my-codex``.
+    """
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        argv = [command]
+    if not argv:
+        return None
+
+    executable = Path(argv[0]).name.lower()
+    for built_in in _DEFAULT_COMMANDS:
+        if built_in != provider and executable == built_in:
+            return built_in
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +452,17 @@ def validate_dispatch_config(config: ServiceConfig) -> ValidationResult:
             f"agent.provider={config.agent.provider!r} is not supported "
             f"(expected one of {', '.join(SUPPORTED_PROVIDERS)})"
         )
+    else:
+        conflicting_provider = _command_provider_conflict(
+            config.runner.command,
+            config.agent.provider,
+        )
+        if conflicting_provider is not None:
+            result.fail(
+                "runner.command does not match agent.provider: "
+                f"provider={config.agent.provider!r} cannot use command "
+                f"{config.runner.command!r} because it selects the {conflicting_provider!r} CLI"
+            )
 
     # --- qa_review validation ---
     qa = config.transitions.qa_review
@@ -445,5 +479,17 @@ def validate_dispatch_config(config: ServiceConfig) -> ValidationResult:
                 f"transitions.qa_review.agent.provider={qa.agent.provider!r} is not supported "
                 f"(expected one of {', '.join(SUPPORTED_PROVIDERS)})"
             )
+        else:
+            conflicting_provider = _command_provider_conflict(
+                qa.agent.command,
+                qa.agent.provider,
+            )
+            if conflicting_provider is not None:
+                result.fail(
+                    "transitions.qa_review.agent.command does not match "
+                    "transitions.qa_review.agent.provider: "
+                    f"provider={qa.agent.provider!r} cannot use command "
+                    f"{qa.agent.command!r} because it selects the {conflicting_provider!r} CLI"
+                )
 
     return result

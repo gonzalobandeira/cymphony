@@ -89,6 +89,7 @@ Then edit `.cymphony/config.yml` and change at least:
 - `tracker.project_slug`
 - `tracker.assignee` if you want to restrict work to one Linear user
 - `agent.provider` to `claude` or `codex`
+- keep `runner.command` blank unless you need a custom executable path for that same provider
 - `server.port` if `8080` is already in use
 
 Do not add a `hooks:` block unless you need custom repository lifecycle behavior. If `hooks:` is omitted, Cymphony uses built-in defaults for clone, reset, commit/push, and PR creation.
@@ -190,7 +191,7 @@ agent:
     todo: 3
 
 runner:
-  command: ""                  # blank = auto from provider ("claude" or "codex")
+  command: ""                  # blank = auto from provider; if set, keep it aligned with agent.provider
   turn_timeout_ms: 3600000    # 1 hour per turn
   stall_timeout_ms: 300000    # 5 min with no output = stall
   dangerously_skip_permissions: true
