@@ -70,7 +70,36 @@ Cymphony loads this file automatically on startup. You can also export these as 
 
 > **Auth notes:** The Claude Code CLI supports both OAuth (interactive login) and API key authentication. OAuth tokens expire, which silently breaks background agents. An API key never expires and is the recommended approach for automated workflows. Cymphony passes auth environment variables (`ANTHROPIC_API_KEY` for Claude, `OPENAI_API_KEY` for Codex) through to the subprocess unchanged.
 
-**2. Create a `.cymphony/config.yml`** in your project directory, plus prompt files under `.cymphony/prompts/` (see [Configuration](#configuration) below).
+**2. Create a workflow config.** Cymphony does not have a separate `init` command. It starts from one of these sources:
+
+- Default local config: `.cymphony/config.yml`
+- Explicit override: `cymphony --workflow-path /path/to/config.yml`
+- Setup mode: if `.cymphony/config.yml` is missing, Cymphony starts a setup UI that can write it for you
+
+The clearest path for a new repo is:
+
+```bash
+mkdir -p .cymphony
+cp config.example.yml .cymphony/config.yml
+cp -R prompts.example .cymphony/prompts
+```
+
+Then edit `.cymphony/config.yml` and change at least:
+
+- `tracker.project_slug`
+- `tracker.assignee` if you want to restrict work to one Linear user
+- `agent.provider` to `claude` or `codex`
+- `server.port` if `8080` is already in use
+
+Do not add a `hooks:` block unless you need custom repository lifecycle behavior. If `hooks:` is omitted, Cymphony uses built-in defaults for clone, reset, commit/push, and PR creation.
+
+You can also skip the manual copy step and let the setup UI create the files:
+
+```bash
+cymphony --port 8081
+```
+
+If `.cymphony/config.yml` does not exist, open `http://127.0.0.1:8081/setup`, fill in the form, and save. The form pre-populates from [`config.example.yml`](/Users/gonzalobandeira/Documents/Cymphony/config.example.yml) when that file exists.
 
 **3. Run:**
 
@@ -90,7 +119,52 @@ The runtime config is split across:
 2. `.cymphony/prompts/execution.md`: execution-agent prompt
 3. `.cymphony/prompts/qa_review.md`: QA-review prompt
 
-### Example `.cymphony/config.yml`
+### Creating a new config
+
+For a brand-new project, you should end up with exactly these files:
+
+```text
+.cymphony/
+  config.yml
+  prompts/
+    execution.md
+    qa_review.md
+```
+
+There are three supported ways to create them:
+
+1. Copy the repo templates:
+
+```bash
+mkdir -p .cymphony
+cp config.example.yml .cymphony/config.yml
+cp -R prompts.example .cymphony/prompts
+```
+
+2. Start Cymphony without a local config and use the setup UI at `/setup`.
+
+3. Keep your config somewhere else and pass it explicitly:
+
+```bash
+cymphony --workflow-path /absolute/path/to/config.yml --port 8081
+```
+
+In all three cases, prompt paths are resolved relative to the config file. If you omit the `prompts:` block, Cymphony defaults to:
+
+- `prompts/execution.md`
+- `prompts/qa_review.md`
+
+If you create the config through the setup UI, Cymphony writes both the YAML file and the prompt templates for you.
+
+`hooks:` is also optional. If you leave it out, Cymphony infers default hook commands from the repo where it is running:
+
+- `after_create`: clone the current repo origin into the workspace
+- `before_run`: fetch origin, checkout the detected base branch, and hard-reset to `origin/<base-branch>`
+- `after_run`: commit agent changes, push the branch, and open a PR when the agent is not on the base branch
+
+Only define `hooks:` when the target repo needs something different, such as extra bootstrap steps, `git clean`, monorepo setup, custom PR creation, or when Cymphony is orchestrating a different repo than the one it is running inside.
+
+### Example minimal `.cymphony/config.yml`
 
 ```yaml
 tracker:
@@ -121,23 +195,6 @@ runner:
   stall_timeout_ms: 300000    # 5 min with no output = stall
   dangerously_skip_permissions: true
 
-hooks:
-  after_create: |              # runs once when workspace directory is created
-    git clone git@github.com:org/repo.git .
-  before_run: |                # runs before each agent turn batch
-    git fetch origin && git checkout main && git reset --hard origin/main
-  after_run: |                 # runs after each agent turn batch
-    BRANCH=$(git branch --show-current)
-    if [ "$BRANCH" != "main" ]; then
-      git add -A && git commit -m "chore: agent work [skip ci]" || true
-      git push -u origin "$BRANCH" || true
-      TITLE=$(git log --format="%s" origin/main..HEAD | tail -1)
-      gh pr create --title "$TITLE" --body "" --head "$BRANCH" || true
-    fi
-  before_remove: |             # runs before workspace is deleted
-    ...
-  timeout_ms: 120000           # hook timeout
-
 preflight:
   enabled: true                # set false to skip all preflight checks
   required_clis: [git]         # CLIs that must be on PATH before dispatch
@@ -155,6 +212,8 @@ prompts:
   execution: prompts/execution.md
   qa_review: prompts/qa_review.md
 ```
+
+If you need custom lifecycle commands, add an explicit `hooks:` block. Otherwise, prefer leaving it out and using the defaults.
 
 ### Example `.cymphony/prompts/execution.md`
 
@@ -212,18 +271,20 @@ Leave your decision in `REVIEW_RESULT.json`.
 
 ### Workflow transitions
 
-Cymphony uses an opinionated hardcoded workflow instead of configurable transition targets.
+Cymphony supports configurable transition targets. If you omit them, the defaults remain:
 
-Execution always uses:
+- `dispatch -> In Progress`
+- `success -> In Review`
 
-- `Todo -> In Progress`
-- clean implementation exit -> `In Review` when QA review is disabled
+Optional transition targets:
 
-When QA review is enabled, Cymphony always uses:
+- `failure`
+- `blocked`
+- `cancelled`
+
+QA review is enabled under `transitions.qa_review.enabled`, and when enabled the typical lifecycle becomes:
 
 - `Todo -> In Progress -> QA Review -> (Todo | In Review)`
-
-This keeps setup simple and avoids per-project transition drift. The `transitions` block exists only to enable the QA lane and tune its safeguards.
 
 ### Agent-driven QA review
 
