@@ -1232,6 +1232,64 @@ def _render_problems_panel(problems: list[dict[str, object]]) -> str:
     )
 
 
+def _render_config_section(groups: dict[str, object]) -> str:
+    """Render a read-only view of the current workflow configuration."""
+    config = groups.get("workflow_config") or {}
+    if not config:
+        return "<p class='empty'>No configuration data available.</p>"
+
+    sections: list[str] = []
+    for section_key, section_label in [
+        ("tracker", "Tracker"),
+        ("polling", "Polling"),
+        ("agent", "Agent"),
+        ("runner", "Runner"),
+        ("server", "Server"),
+    ]:
+        block = config.get(section_key)
+        if not block or not isinstance(block, dict):
+            continue
+        rows = "".join(
+            _render_key_value(str(k), str(v))
+            for k, v in block.items()
+            if v is not None
+        )
+        if rows:
+            sections.append(
+                f"<section class='detail-card'>"
+                f"<h3>{escape(section_label)}</h3>{rows}</section>"
+            )
+
+    # Active/terminal states
+    active_states = config.get("active_states")
+    terminal_states = config.get("terminal_states")
+    if active_states or terminal_states:
+        state_rows = ""
+        if active_states:
+            state_rows += _render_key_value("Active states", ", ".join(str(s) for s in active_states))
+        if terminal_states:
+            state_rows += _render_key_value("Terminal states", ", ".join(str(s) for s in terminal_states))
+        sections.append(f"<section class='detail-card'><h3>States</h3>{state_rows}</section>")
+
+    # Transitions
+    transitions = config.get("transitions")
+    if transitions and isinstance(transitions, dict):
+        t_rows = ""
+        for tk, tv in transitions.items():
+            if tk == "qa_review" and isinstance(tv, dict):
+                for qk, qv in tv.items():
+                    t_rows += _render_key_value(f"qa_review.{qk}", str(qv))
+            elif tv is not None:
+                t_rows += _render_key_value(str(tk), str(tv))
+        if t_rows:
+            sections.append(f"<section class='detail-card'><h3>Transitions</h3>{t_rows}</section>")
+
+    if not sections:
+        return "<p class='empty'>No configuration data available.</p>"
+
+    return f"<div class='config-grid'>{''.join(sections)}</div>"
+
+
 def _render_dashboard(groups: dict[str, object]) -> str:
     summary = groups["summary"]
     totals = groups["totals"]
@@ -1372,95 +1430,188 @@ def _render_dashboard(groups: dict[str, object]) -> str:
 <title>Cymphony Operator Dashboard</title>
 <style>
   :root {{
-    --bg: #f3efe6;
-    --bg-accent: radial-gradient(circle at top right, rgba(22, 163, 74, 0.12), transparent 28%), radial-gradient(circle at left top, rgba(14, 116, 144, 0.14), transparent 24%), #f3efe6;
-    --panel: rgba(255, 252, 246, 0.92);
-    --panel-strong: #fffaf0;
-    --ink: #1f2933;
-    --muted: #4a5568;
-    --line: rgba(31, 41, 51, 0.22);
-    --good: #166534;
-    --warn: #b45309;
-    --danger: #b91c1c;
-    --accent: #0f766e;
-    --shadow: 0 18px 40px rgba(31, 41, 51, 0.08);
+    --bg: #f4f6f9;
+    --panel: #ffffff;
+    --panel-strong: #f9fafb;
+    --ink: #111827;
+    --muted: #6b7280;
+    --line: #e5e7eb;
+    --good: #059669;
+    --warn: #d97706;
+    --danger: #dc2626;
+    --accent: #0891b2;
+    --accent-soft: rgba(8, 145, 178, 0.08);
+    --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    --shadow-lg: 0 4px 12px rgba(0,0,0,0.08);
+    --radius: 10px;
+    --sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
   }}
   * {{ box-sizing: border-box; }}
   body {{
     margin: 0;
-    font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+    font-family: var(--sans);
     color: var(--ink);
-    background: var(--bg-accent);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
   }}
   a {{ color: var(--accent); text-decoration: none; }}
   a:hover {{ text-decoration: underline; }}
   form {{ display: inline; margin: 0; }}
-  main {{ max-width: 1440px; margin: 0 auto; padding: 32px; }}
-  .hero {{
-    display: grid;
-    grid-template-columns: 2.2fr 1fr;
-    gap: 18px;
-    margin-bottom: 20px;
-  }}
-  .hero-card, .meta-card, .panel, .stat {{
+
+  /* ---- Top bar ---- */
+  .topbar {{
     background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 14px;
+    border-bottom: 1px solid var(--line);
+    padding: 0 24px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
     box-shadow: var(--shadow);
   }}
-  .hero-card {{
-    padding: 28px;
-    background: linear-gradient(135deg, rgba(15, 118, 110, 0.08), rgba(255, 250, 240, 0.96));
-  }}
-  .hero-card h1 {{
-    margin: 0 0 10px;
-    font-size: 2.6rem;
-    line-height: 1;
-    letter-spacing: -0.04em;
-  }}
-  .hero-card p, .meta-card p, .panel-head p {{
-    margin: 0;
-    color: var(--muted);
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
-  }}
-  .meta-card {{
-    padding: 22px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    justify-content: center;
-  }}
-  .meta-label {{
-    font-size: 0.84rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--muted);
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
-  }}
-  .meta-value {{
-    font-size: 1.1rem;
+  .topbar-brand {{
     font-weight: 700;
+    font-size: 1.05rem;
+    color: var(--ink);
+    padding: 14px 0;
+    white-space: nowrap;
   }}
+  .tab-nav {{
+    display: flex;
+    gap: 0;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    flex: 1;
+  }}
+  .tab-nav li {{
+    margin: 0;
+  }}
+  .tab-nav a {{
+    display: block;
+    padding: 14px 18px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--muted);
+    text-decoration: none;
+    border-bottom: 2px solid transparent;
+    transition: color 0.15s, border-color 0.15s;
+    white-space: nowrap;
+  }}
+  .tab-nav a:hover {{
+    color: var(--ink);
+    text-decoration: none;
+  }}
+  .tab-nav a.active {{
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    font-weight: 600;
+  }}
+  .topbar-meta {{
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    font-size: 0.82rem;
+    color: var(--muted);
+    white-space: nowrap;
+  }}
+  .topbar-meta .pill {{
+    font-size: 0.75rem;
+  }}
+
+  /* ---- Main content ---- */
+  main {{ max-width: 1400px; margin: 0 auto; padding: 24px; }}
+  .tab-content {{ display: none; }}
+  .tab-content.active {{ display: block; }}
+
+  /* ---- Stats row ---- */
   .stats {{
     display: grid;
     grid-template-columns: repeat(6, minmax(0, 1fr));
-    gap: 14px;
-    margin-bottom: 20px;
+    gap: 12px;
+    margin-bottom: 24px;
   }}
   .stat {{
-    padding: 18px;
-    background: var(--panel-strong);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 16px;
+    box-shadow: var(--shadow);
   }}
   .stat strong {{
     display: block;
-    font-size: 2rem;
+    font-size: 1.75rem;
     line-height: 1;
-    margin-bottom: 8px;
+    margin-bottom: 6px;
+    font-weight: 700;
   }}
+  .stat span {{
+    color: var(--muted);
+    font-size: 0.82rem;
+    font-weight: 500;
+  }}
+  .stat.attention strong {{ color: var(--danger); }}
+  .stat.ready strong {{ color: var(--good); }}
+  .stat.waiting strong {{ color: var(--warn); }}
+  .stat.running strong {{ color: var(--accent); }}
+
+  /* ---- Overview cards ---- */
+  .overview-grid {{
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 24px;
+  }}
+  .overview-card {{
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 20px;
+    box-shadow: var(--shadow);
+  }}
+  .overview-card h3 {{
+    margin: 0 0 12px;
+    font-size: 0.88rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }}
+
+  /* ---- Panels ---- */
+  .panel {{
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 16px 20px;
+    overflow: hidden;
+    margin-bottom: 16px;
+  }}
+  .panel-head {{
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 12px;
+  }}
+  .panel-head h2 {{
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+  }}
+  .panel-head p {{
+    margin: 0;
+    font-size: 0.82rem;
+    color: var(--muted);
+  }}
+
+  /* ---- Problems ---- */
   .problems-panel {{
-    margin-bottom: 20px;
     border-left: 4px solid var(--danger);
-    background: linear-gradient(135deg, rgba(185, 28, 28, 0.06), var(--panel));
+    background: linear-gradient(135deg, rgba(220, 38, 38, 0.03), var(--panel));
   }}
   .problems-panel .panel-head h2 {{
     color: var(--danger);
@@ -1469,69 +1620,59 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     display: inline-block;
     padding: 2px 8px;
     border-radius: 999px;
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
     font-size: 0.72rem;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.04em;
   }}
   .severity-error {{
-    background: rgba(185, 28, 28, 0.12);
+    background: rgba(220, 38, 38, 0.1);
     color: var(--danger);
   }}
   .severity-warning {{
-    background: rgba(180, 83, 9, 0.12);
+    background: rgba(217, 119, 6, 0.1);
     color: var(--warn);
   }}
   .severity-info {{
-    background: rgba(15, 118, 110, 0.12);
+    background: rgba(8, 145, 178, 0.1);
     color: var(--accent);
   }}
-  .problem-error {{
-    border-left: 3px solid var(--danger);
+  .problem-error {{ border-left: 3px solid var(--danger); }}
+  .problem-warning {{ border-left: 3px solid var(--warn); }}
+  .problem-info {{ border-left: 3px solid var(--accent); }}
+
+  /* ---- Tables ---- */
+  .table-wrap {{ overflow-x: auto; }}
+  table {{
+    width: 100%;
+    min-width: 640px;
+    border-collapse: collapse;
+    font-size: 0.88rem;
   }}
-  .problem-warning {{
-    border-left: 3px solid var(--warn);
+  th, td {{
+    padding: 10px 8px;
+    text-align: left;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
   }}
-  .problem-info {{
-    border-left: 3px solid var(--accent);
-  }}
-  .stat span {{
+  th {{
     color: var(--muted);
-    font-size: 0.92rem;
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.76rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
   }}
-  .stat.attention strong {{ color: var(--danger); }}
-  .stat.ready strong {{ color: var(--good); }}
-  .stat.waiting strong {{ color: var(--warn); }}
-  .stat.running strong {{ color: var(--accent); }}
-  .layout {{
-    display: grid;
-    grid-template-columns: 1.4fr 1fr;
-    gap: 18px;
-  }}
-  .stack {{
-    display: grid;
-    gap: 18px;
-    align-content: start;
-  }}
-  .panel {{
-    padding: 14px 18px;
-    overflow: hidden;
-  }}
-  .table-wrap {{
-    overflow-x: auto;
-  }}
+  tbody tr:last-child td {{ border-bottom: 0; }}
+  tbody tr:hover {{ background: var(--accent-soft); }}
+
+  /* ---- Controls ---- */
   .control-toolbar, .issue-actions {{
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
     align-items: center;
   }}
-  .control-toolbar {{
-    justify-content: flex-start;
-    gap: 0;
-  }}
+  .control-toolbar {{ gap: 0; }}
   .control-group {{
     display: flex;
     gap: 6px;
@@ -1540,20 +1681,60 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   .control-group + .control-group {{
     border-left: 1px solid var(--line);
-    padding-left: 10px;
-    margin-left: 4px;
+    padding-left: 12px;
+    margin-left: 6px;
   }}
   .control-group-label {{
     font-size: 0.72rem;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.06em;
     color: var(--muted);
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-weight: 600;
     white-space: nowrap;
   }}
-  [data-tooltip] {{
-    position: relative;
+
+  /* ---- Buttons ---- */
+  button {{
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
   }}
+  button:disabled {{
+    opacity: 0.4;
+    cursor: not-allowed;
+  }}
+  button:hover:not(:disabled) {{
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }}
+  .danger-button {{
+    border-color: rgba(220, 38, 38, 0.3);
+    background: rgba(220, 38, 38, 0.05);
+    color: var(--danger);
+  }}
+  .danger-button:hover:not(:disabled) {{
+    border-color: rgba(220, 38, 38, 0.5);
+    background: rgba(220, 38, 38, 0.1);
+  }}
+  .caution-button {{
+    border-color: rgba(217, 119, 6, 0.3);
+    background: rgba(217, 119, 6, 0.05);
+    color: #92400e;
+  }}
+  .caution-button:hover:not(:disabled) {{
+    border-color: rgba(217, 119, 6, 0.5);
+    background: rgba(217, 119, 6, 0.1);
+  }}
+
+  /* ---- Tooltips ---- */
+  [data-tooltip] {{ position: relative; }}
   [data-tooltip]:hover::after,
   [data-tooltip]:focus-visible::after,
   [data-tooltip]:focus-within::after {{
@@ -1564,15 +1745,15 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     transform: translateX(-50%);
     background: var(--ink);
     color: #fff;
-    font-size: 0.78rem;
+    font-size: 0.75rem;
     font-weight: 400;
     line-height: 1.35;
     padding: 5px 10px;
-    border-radius: 8px;
+    border-radius: 6px;
     white-space: nowrap;
     pointer-events: none;
     z-index: 10;
-    box-shadow: 0 2px 8px rgba(31, 41, 51, 0.18);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
   }}
   [data-tooltip]:hover::before,
   [data-tooltip]:focus-visible::before,
@@ -1587,30 +1768,101 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     pointer-events: none;
     z-index: 10;
   }}
-  .caution-button {{
-    border-color: rgba(180, 120, 0, 0.3);
-    background: rgba(180, 120, 0, 0.07);
-    color: #92600a;
+
+  /* ---- Selects ---- */
+  #tz-select {{
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font: inherit;
+    font-size: 0.82rem;
+    cursor: pointer;
   }}
-  .caution-button:hover {{
-    border-color: rgba(180, 120, 0, 0.45);
-    background: rgba(180, 120, 0, 0.12);
+  #tz-select:hover {{
+    border-color: var(--accent);
   }}
+
+  /* ---- Switches ---- */
+  .switch-form {{
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }}
+  .switch-label {{
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--muted);
+    font-size: 0.82rem;
+  }}
+  .switch-label input {{
+    appearance: none;
+    width: 40px;
+    height: 22px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: #e5e7eb;
+    position: relative;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }}
+  .switch-label input::after {{
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: white;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+    transition: transform 0.15s;
+  }}
+  .switch-label input:checked {{
+    background: var(--danger);
+    border-color: var(--danger);
+  }}
+  .switch-label input:checked::after {{
+    transform: translateX(18px);
+  }}
+
+  /* ---- Pills ---- */
+  .pill {{
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 0.78rem;
+    font-weight: 600;
+  }}
+  .pill.active {{
+    background: rgba(5, 150, 105, 0.1);
+    color: var(--good);
+  }}
+  .pill.paused {{
+    background: rgba(220, 38, 38, 0.1);
+    color: var(--danger);
+  }}
+
+  /* ---- Issue actions ---- */
   .issue-actions {{
     min-width: 180px;
     justify-content: flex-end;
   }}
-  .small {{ font-size: 0.9rem; }}
-  .muted {{ color: var(--muted); }}
+
+  /* ---- Operator cards ---- */
   .operator-card-list {{
     display: grid;
-    gap: 16px;
+    gap: 12px;
   }}
   .operator-card {{
-    padding: 18px;
-    border-radius: 18px;
+    padding: 16px;
+    border-radius: var(--radius);
     border: 1px solid var(--line);
-    background: linear-gradient(180deg, rgba(255, 250, 240, 0.98), rgba(249, 244, 234, 0.92));
+    background: var(--panel-strong);
   }}
   .operator-card-head {{
     display: flex;
@@ -1623,29 +1875,30 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     flex: 1;
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 10px 14px;
+    gap: 8px 14px;
   }}
   .operator-meta-item {{
     display: grid;
-    gap: 4px;
+    gap: 2px;
   }}
   .operator-meta-label {{
     color: var(--muted);
-    font-size: 0.84rem;
+    font-size: 0.72rem;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    letter-spacing: 0.06em;
+    font-weight: 600;
   }}
   .operator-meta-value {{
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
-    font-size: 1rem;
+    font-size: 0.9rem;
     font-weight: 600;
     word-break: break-word;
   }}
+
+  /* ---- Drilldowns ---- */
   .issue-drilldown summary {{
     cursor: pointer;
-    font-weight: 700;
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-weight: 600;
+    font-size: 0.88rem;
   }}
   .issue-drilldown[open] summary {{
     margin-bottom: 12px;
@@ -1658,9 +1911,9 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     align-items: start;
   }}
   .detail-card {{
-    background: var(--panel-strong);
+    background: var(--panel);
     border: 1px solid var(--line);
-    border-radius: 16px;
+    border-radius: 8px;
     padding: 14px;
     min-width: 0;
   }}
@@ -1669,30 +1922,34 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   .detail-card h3 {{
     margin: 0 0 8px;
-    font-size: 0.95rem;
+    font-size: 0.85rem;
+    font-weight: 600;
     color: var(--accent);
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
   }}
+
+  /* ---- Key-value rows ---- */
   .kv {{
     display: flex;
     justify-content: space-between;
     align-items: start;
     gap: 12px;
-    padding: 4px 0;
+    padding: 5px 0;
     border-bottom: 1px solid var(--line);
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
-    font-size: 0.9rem;
+    font-size: 0.85rem;
     min-width: 0;
   }}
   .k {{
     color: var(--muted);
     flex: 0 0 110px;
+    font-weight: 500;
   }}
   .v {{
     flex: 1 1 auto;
     text-align: right;
     word-break: break-word;
   }}
+
+  /* ---- Tags ---- */
   .tag-row {{
     display: flex;
     flex-wrap: wrap;
@@ -1701,26 +1958,27 @@ def _render_dashboard(groups: dict[str, object]) -> str:
   }}
   .tag {{
     display: inline-block;
-    padding: 4px 8px;
+    padding: 3px 8px;
     border-radius: 999px;
-    background: rgba(15, 118, 110, 0.1);
+    background: var(--accent-soft);
     color: var(--accent);
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
-    font-size: 0.84rem;
+    font-size: 0.78rem;
+    font-weight: 500;
   }}
+
+  /* ---- Events ---- */
   .event-list {{
     margin: 0;
     padding-left: 18px;
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
   }}
   .recent-events {{
     padding-left: 0;
     list-style: none;
     display: grid;
-    gap: 10px;
+    gap: 8px;
   }}
   .event-item {{
-    padding: 10px 0;
+    padding: 8px 0;
     border-bottom: 1px solid var(--line);
   }}
   .event-item:last-child {{
@@ -1734,201 +1992,99 @@ def _render_dashboard(groups: dict[str, object]) -> str:
     margin-bottom: 4px;
   }}
   .event-preview {{
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
-    font-size: 0.96rem;
+    font-size: 0.88rem;
     line-height: 1.4;
     word-break: break-word;
   }}
   .event-meta {{
     margin-top: 4px;
-    font-size: 0.86rem;
+    font-size: 0.8rem;
   }}
-  .event-message {{
-    margin-top: 8px;
-  }}
+  .event-message {{ margin-top: 8px; }}
   .event-message summary {{
     cursor: pointer;
     color: var(--accent);
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
-    font-size: 0.88rem;
+    font-size: 0.82rem;
     font-weight: 600;
   }}
-  .event-message pre {{
-    margin-top: 8px;
-  }}
+  .event-message pre {{ margin-top: 8px; }}
   pre {{
     white-space: pre-wrap;
     word-break: break-word;
     margin: 0;
     padding: 10px;
-    border-radius: 12px;
-    background: rgba(31, 41, 51, 0.04);
-    font-family: "SFMono-Regular", "Menlo", monospace;
-    font-size: 0.84rem;
-  }}
-  button {{
-    border: 1px solid var(--line);
+    border-radius: 6px;
     background: var(--panel-strong);
-    color: var(--ink);
-    border-radius: 999px;
-    padding: 5px 11px;
-    font: inherit;
-    font-size: 0.88rem;
-    cursor: pointer;
-  }}
-  button:disabled {{
-    opacity: 0.45;
-    cursor: not-allowed;
-  }}
-  button:hover {{
-    border-color: rgba(15, 118, 110, 0.35);
-    background: #f7f2e7;
-  }}
-  .danger-button {{
-    border-color: rgba(185, 28, 28, 0.28);
-    background: rgba(185, 28, 28, 0.08);
-    color: var(--danger);
-  }}
-  .danger-button:hover {{
-    border-color: rgba(185, 28, 28, 0.42);
-    background: rgba(185, 28, 28, 0.14);
-  }}
-  #tz-select {{
     border: 1px solid var(--line);
-    background: var(--panel-strong);
-    color: var(--ink);
-    border-radius: 999px;
-    padding: 5px 11px;
-    font: inherit;
-    font-size: 0.88rem;
-    cursor: pointer;
+    font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
+    font-size: 0.8rem;
   }}
-  #tz-select:hover {{
-    border-color: rgba(15, 118, 110, 0.35);
-    background: #f7f2e7;
+
+  /* ---- Config grid ---- */
+  .config-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
   }}
-  .switch-form {{
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-  }}
-  .switch-label {{
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
-    color: var(--muted);
-  }}
-  .switch-label input {{
-    appearance: none;
-    width: 44px;
-    height: 26px;
-    border-radius: 999px;
-    border: 1px solid var(--line);
-    background: rgba(31, 41, 51, 0.1);
-    position: relative;
-    cursor: pointer;
-    transition: background 120ms ease, border-color 120ms ease;
-  }}
-  .switch-label input::after {{
-    content: "";
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    background: white;
-    box-shadow: 0 1px 3px rgba(31, 41, 51, 0.2);
-    transition: transform 120ms ease;
-  }}
-  .switch-label input:checked {{
-    background: rgba(185, 28, 28, 0.72);
-    border-color: rgba(185, 28, 28, 0.72);
-  }}
-  .switch-label input:checked::after {{
-    transform: translateX(18px);
-  }}
-  .pill {{
-    display: inline-flex;
-    align-items: center;
-    border-radius: 999px;
-    padding: 4px 10px;
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
-    font-size: 0.82rem;
-    font-weight: 700;
-  }}
-  .pill.active {{
-    background: rgba(22, 101, 52, 0.12);
-    color: var(--good);
-  }}
-  .pill.paused {{
-    background: rgba(185, 28, 28, 0.12);
-    color: var(--danger);
-  }}
-  .panel-head {{
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    gap: 12px;
-    margin-bottom: 10px;
-  }}
-  .panel-head h2 {{
-    margin: 0;
-    font-size: 1.05rem;
-    letter-spacing: -0.02em;
-  }}
-  .panel-head p {{
-    font-size: 0.84rem;
-  }}
-  table {{
-    width: 100%;
-    min-width: 640px;
-    border-collapse: collapse;
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
-    font-size: 0.96rem;
-  }}
-  th, td {{
-    padding: 11px 8px;
-    text-align: left;
-    border-bottom: 1px solid var(--line);
-    vertical-align: top;
-  }}
-  th {{
-    color: var(--muted);
-    font-size: 0.82rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }}
-  tbody tr:last-child td {{ border-bottom: 0; }}
+
+  /* ---- Misc ---- */
+  .small {{ font-size: 0.82rem; }}
+  .muted {{ color: var(--muted); }}
   .empty {{
     margin: 0;
     color: var(--muted);
     font-style: italic;
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
   }}
   .footer {{
-    margin-top: 18px;
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
     color: var(--muted);
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
-    font-size: 0.9rem;
+    font-size: 0.82rem;
   }}
+
+  /* ---- Toast ---- */
+  .cym-toast {{
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: var(--ink);
+    color: #fff;
+    padding: 10px 18px;
+    border-radius: 8px;
+    font-size: 0.82rem;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.2s, transform 0.2s;
+    z-index: 9999;
+    pointer-events: none;
+  }}
+  .cym-toast.visible {{
+    opacity: 1;
+    transform: translateY(0);
+  }}
+
+  /* ---- Responsive ---- */
   @media (max-width: 1100px) {{
-    .hero, .layout {{ grid-template-columns: 1fr; }}
-    .stats {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    .overview-grid {{ grid-template-columns: 1fr; }}
+    .stats {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
     .operator-card-head {{ flex-direction: column; }}
     .issue-actions {{ justify-content: flex-start; }}
     .control-toolbar {{ flex-direction: column; align-items: flex-start; gap: 8px; }}
-    .control-group + .control-group {{ border-left: none; padding-left: 0; margin-left: 0; border-top: 1px solid var(--line); padding-top: 8px; }}
+    .control-group + .control-group {{
+      border-left: none; padding-left: 0; margin-left: 0;
+      border-top: 1px solid var(--line); padding-top: 8px;
+    }}
+    .topbar {{ padding: 0 16px; gap: 12px; }}
+    .tab-nav a {{ padding: 12px 12px; font-size: 0.84rem; }}
   }}
   @media (max-width: 700px) {{
-    main {{ padding: 18px; }}
-    .stats {{ grid-template-columns: 1fr; }}
-    .hero-card h1 {{ font-size: 2rem; }}
-    table {{ font-size: 0.9rem; }}
+    main {{ padding: 16px; }}
+    .stats {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    table {{ font-size: 0.82rem; }}
     .operator-meta {{ grid-template-columns: 1fr 1fr; }}
     .detail-wide {{ grid-column: span 1; }}
+    .config-grid {{ grid-template-columns: 1fr; }}
     .kv {{
       flex-direction: column;
       gap: 2px;
@@ -1937,26 +2093,14 @@ def _render_dashboard(groups: dict[str, object]) -> str:
       flex: initial;
       text-align: left;
     }}
-  }}
-  .cym-toast {{
-    position: fixed;
-    bottom: 24px;
-    right: 24px;
-    background: var(--ink);
-    color: #fff;
-    padding: 10px 18px;
-    border-radius: 10px;
-    font-family: "Avenir Next", "Segoe UI", sans-serif;
-    font-size: 0.88rem;
-    opacity: 0;
-    transform: translateY(8px);
-    transition: opacity 0.25s, transform 0.25s;
-    z-index: 9999;
-    pointer-events: none;
-  }}
-  .cym-toast.visible {{
-    opacity: 1;
-    transform: translateY(0);
+    .topbar {{
+      flex-wrap: wrap;
+      gap: 0;
+    }}
+    .topbar-brand {{ padding: 10px 0; }}
+    .tab-nav {{ order: 3; width: 100%; border-top: 1px solid var(--line); }}
+    .tab-nav a {{ padding: 10px 12px; font-size: 0.82rem; }}
+    .topbar-meta {{ display: none; }}
   }}
 </style>
 <script>
@@ -2026,6 +2170,9 @@ window.cym = {{
       // Remember scroll position.
       var scrollY = window.scrollY;
 
+      // Remember active tab.
+      var activeTab = cym._activeTab || "overview";
+
       // Swap content.
       current.innerHTML = fresh.innerHTML;
 
@@ -2036,6 +2183,9 @@ window.cym = {{
 
       // Restore scroll position.
       window.scrollTo(0, scrollY);
+
+      // Restore active tab.
+      cym.switchTab(activeTab);
 
       // Re-apply timezone to new content.
       cym.restoreTimezone();
@@ -2059,6 +2209,18 @@ window.cym = {{
   startAutoRefresh: function() {{
     if (cym._refreshTimer) clearInterval(cym._refreshTimer);
     cym._refreshTimer = setInterval(cym.refresh, cym._INTERVAL);
+  }},
+
+  /** Switch to a specific tab by name. */
+  switchTab: function(tabName) {{
+    cym._activeTab = tabName;
+    document.querySelectorAll(".tab-content").forEach(function(el) {{
+      el.classList.toggle("active", el.id === "tab-" + tabName);
+    }});
+    document.querySelectorAll(".tab-nav a").forEach(function(el) {{
+      el.classList.toggle("active", el.getAttribute("data-tab") === tabName);
+    }});
+    try {{ history.replaceState(null, "", "#" + tabName); }} catch(e) {{}}
   }},
 
   /** Apply the chosen timezone to all <time class="cym-ts"> elements. */
@@ -2098,53 +2260,51 @@ document.addEventListener("DOMContentLoaded", function() {{
   cym.restoreTimezone();
   var armed = document.getElementById("kill-arm");
   if (armed) armed.addEventListener("change", cym.syncKillButton);
+  // Activate tab from URL hash or default to overview.
+  var hash = (location.hash || "").replace("#", "") || "overview";
+  cym.switchTab(hash);
 }});
 </script>
 </head>
 <body>
+<nav class="topbar">
+  <span class="topbar-brand">Cymphony</span>
+  <ul class="tab-nav">
+    <li><a href="#overview" data-tab="overview" class="active" onclick="cym.switchTab('overview');return false;">Overview</a></li>
+    <li><a href="#tasks" data-tab="tasks" onclick="cym.switchTab('tasks');return false;">Tasks</a></li>
+    <li><a href="#config" data-tab="config" onclick="cym.switchTab('config');return false;">Config</a></li>
+  </ul>
+  <div class="topbar-meta">
+    <span>{escape(str(summary["capacity_in_use"]))}</span>
+    <span class="pill {'paused' if dispatch_paused else 'active'}">{'Paused' if dispatch_paused else 'Active'}</span>
+  </div>
+</nav>
 <main>
-  <section class="hero">
-    <div class="hero-card">
-      <h1>Cymphony Operator Board</h1>
-      <p>Scan the live system by operator intent: what is moving, what is ready next, what is blocked, and what needs intervention.</p>
-    </div>
-    <aside class="meta-card">
-      <div>
-        <div class="meta-label">Snapshot</div>
-        <div class="meta-value">{generated_at}</div>
-      </div>
-      <div>
-        <div class="meta-label">Capacity</div>
-        <div class="meta-value">{escape(str(summary["capacity_in_use"]))}</div>
-      </div>
-      <div>
-        <div class="meta-label">Runtime</div>
-        <div class="meta-value">{escape(_format_elapsed_seconds(totals.get("seconds_running")))}</div>
-      </div>
-      <div>
-        <div class="meta-label">Dispatch</div>
-        <div class="meta-value">{'Paused' if dispatch_paused else 'Active'}</div>
-      </div>
-    </aside>
-  </section>
+  <!-- ==================== OVERVIEW TAB ==================== -->
+  <div id="tab-overview" class="tab-content active">
+    <section class="stats">
+      <div class="stat running"><strong>{summary["running"]}</strong><span>Running now</span></div>
+      <div class="stat"><strong>{summary["retrying"]}</strong><span>Retrying</span></div>
+      <div class="stat ready"><strong>{summary["ready"]}</strong><span>Ready next</span></div>
+      <div class="stat waiting"><strong>{summary["waiting"]}</strong><span>Waiting</span></div>
+      <div class="stat attention"><strong>{summary["needs_attention"]}</strong><span>Needs attention</span></div>
+      <div class="stat"><strong>{totals.get("total_tokens", 0):,}</strong><span>Total tokens</span></div>
+    </section>
 
-  <section class="stats">
-    <div class="stat running"><strong>{summary["running"]}</strong><span>Running now</span></div>
-    <div class="stat"><strong>{summary["retrying"]}</strong><span>Retrying</span></div>
-    <div class="stat ready"><strong>{summary["ready"]}</strong><span>Ready next</span></div>
-    <div class="stat waiting"><strong>{summary["waiting"]}</strong><span>Waiting</span></div>
-    <div class="stat attention"><strong>{summary["needs_attention"]}</strong><span>Needs attention</span></div>
-    <div class="stat"><strong>{totals.get("total_tokens", 0):,}</strong><span>Total tokens</span></div>
-  </section>
+    {_render_problems_panel(list(groups.get("recent_problems", [])))}
 
-  {_render_problems_panel(list(groups.get("recent_problems", [])))}
-
-  <section class="layout">
-    <div class="stack">
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Operator Controls</h2>
-        </div>
+    <div class="overview-grid">
+      <div class="overview-card">
+        <h3>System</h3>
+        <div class='kv'><span class='k'>Snapshot</span><span class='v'>{generated_at}</span></div>
+        <div class='kv'><span class='k'>Capacity</span><span class='v'>{escape(str(summary["capacity_in_use"]))}</span></div>
+        <div class='kv'><span class='k'>Runtime</span><span class='v'>{escape(_format_elapsed_seconds(totals.get("seconds_running")))}</span></div>
+        <div class='kv'><span class='k'>Dispatch</span><span class='v'>{'Paused' if dispatch_paused else 'Active'}</span></div>
+        <div class='kv'><span class='k'>Input tokens</span><span class='v'>{totals.get("input_tokens", 0):,}</span></div>
+        <div class='kv'><span class='k'>Output tokens</span><span class='v'>{totals.get("output_tokens", 0):,}</span></div>
+      </div>
+      <div class="overview-card">
+        <h3>Controls</h3>
         <div class="control-toolbar">
           <div class="control-group">
             <span class="control-group-label">Status</span>
@@ -2189,14 +2349,28 @@ document.addEventListener("DOMContentLoaded", function() {{
             {_kill_app_switch(shutdown_requested)}
           </div>
         </div>
-      </section>
-      {_render_operator_cards("Running", "Active workers and current execution status.", list(groups["running"]), empty="No active agents.", mode="running")}
-      {_render_operator_cards("Retrying", "Retries scheduled after failures or continuation hand-offs.", list(groups["retrying"]), empty="No retries scheduled.", mode="retrying")}
+      </div>
     </div>
-    <div class="stack">
-      {''.join(queue_sections)}
-    </div>
-  </section>
+
+    {_render_operator_cards("Running", "Active workers and current execution status.", list(groups["running"]), empty="No active agents.", mode="running")}
+    {_render_operator_cards("Retrying", "Retries scheduled after failures or continuation hand-offs.", list(groups["retrying"]), empty="No retries scheduled.", mode="retrying")}
+  </div>
+
+  <!-- ==================== TASKS TAB ==================== -->
+  <div id="tab-tasks" class="tab-content">
+    {''.join(queue_sections)}
+  </div>
+
+  <!-- ==================== CONFIG TAB ==================== -->
+  <div id="tab-config" class="tab-content">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Active Config</h2>
+        <p><a href="/settings">Edit settings</a></p>
+      </div>
+      {_render_config_section(groups)}
+    </section>
+  </div>
 
   <p class="footer">
     <a href="/api/v1/state">JSON state</a>
