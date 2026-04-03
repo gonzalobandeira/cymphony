@@ -125,45 +125,60 @@ class QAReviewWorkflow:
             return issue.branch_name.strip()
         return f"agent/{issue.identifier.lower()}"
 
+    def review_branch_candidates(self, issue: Issue) -> list[str]:
+        """Return remote branch candidates for a QA review run."""
+        candidates: list[str] = []
+        preferred = (issue.branch_name or "").strip()
+        canonical = f"agent/{issue.identifier.lower()}"
+        for branch_name in (preferred, canonical):
+            if branch_name and branch_name not in candidates:
+                candidates.append(branch_name)
+        return candidates
+
     async def _checkout_review_branch(self, workspace_path: str, issue: Issue) -> None:
         """Check out the remote branch under review in a fresh QA workspace."""
-        branch_name = self.review_branch_name(issue)
-        fetch = await asyncio.create_subprocess_exec(
-            "git",
-            "fetch",
-            "origin",
-            branch_name,
-            cwd=workspace_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        fetch_stdout, fetch_stderr = await fetch.communicate()
-        if fetch.returncode != 0:
-            stderr_text = (fetch_stderr or b"").decode(errors="replace").strip()
-            stdout_text = (fetch_stdout or b"").decode(errors="replace").strip()
-            detail = stderr_text or stdout_text or "unknown git fetch failure"
-            raise RuntimeError(
-                f"Failed to fetch review branch {branch_name!r}: {detail}"
+        failures: list[tuple[str, str]] = []
+        for branch_name in self.review_branch_candidates(issue):
+            fetch = await asyncio.create_subprocess_exec(
+                "git",
+                "fetch",
+                "origin",
+                branch_name,
+                cwd=workspace_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+            fetch_stdout, fetch_stderr = await fetch.communicate()
+            if fetch.returncode != 0:
+                stderr_text = (fetch_stderr or b"").decode(errors="replace").strip()
+                stdout_text = (fetch_stdout or b"").decode(errors="replace").strip()
+                detail = stderr_text or stdout_text or "unknown git fetch failure"
+                failures.append((branch_name, detail))
+                continue
 
-        checkout = await asyncio.create_subprocess_exec(
-            "git",
-            "checkout",
-            "-B",
-            branch_name,
-            f"origin/{branch_name}",
-            cwd=workspace_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        checkout_stdout, checkout_stderr = await checkout.communicate()
-        if checkout.returncode != 0:
+            checkout = await asyncio.create_subprocess_exec(
+                "git",
+                "checkout",
+                "-B",
+                branch_name,
+                f"origin/{branch_name}",
+                cwd=workspace_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            checkout_stdout, checkout_stderr = await checkout.communicate()
+            if checkout.returncode == 0:
+                return
+
             stderr_text = (checkout_stderr or b"").decode(errors="replace").strip()
             stdout_text = (checkout_stdout or b"").decode(errors="replace").strip()
             detail = stderr_text or stdout_text or "unknown git checkout failure"
-            raise RuntimeError(
-                f"Failed to check out review branch {branch_name!r}: {detail}"
-            )
+            failures.append((branch_name, detail))
+
+        attempted = ", ".join(f"{name!r}: {detail}" for name, detail in failures)
+        raise RuntimeError(
+            f"Failed to fetch or check out any review branch candidate: {attempted}"
+        )
 
     def build_review_prompt(self, workflow: WorkflowDefinition, issue: Issue) -> str:
         """Render the QA review prompt."""

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -122,6 +123,23 @@ def test_qa_workflow_prefers_issue_branch_name_when_available() -> None:
     issue = _build_issue()
     issue.branch_name = "feature/bap-204-real-branch"
     assert workflow.review_branch_name(issue) == "feature/bap-204-real-branch"
+
+
+def test_qa_workflow_branch_candidates_fall_back_to_canonical_when_linear_branch_is_stale() -> None:
+    workflow = _build_workflow()
+    issue = _build_issue()
+    issue.branch_name = "feature/bap-204-stale"
+    assert workflow.review_branch_candidates(issue) == [
+        "feature/bap-204-stale",
+        "agent/bap-204",
+    ]
+
+
+def test_qa_workflow_branch_candidates_deduplicate_canonical_branch() -> None:
+    workflow = _build_workflow()
+    issue = _build_issue()
+    issue.branch_name = "agent/bap-204"
+    assert workflow.review_branch_candidates(issue) == ["agent/bap-204"]
 
 
 def test_qa_workflow_uses_dedicated_qa_agent_when_configured() -> None:
@@ -422,6 +440,78 @@ async def test_qa_workflow_prepare_run_uses_before_run_hook_and_checks_out_branc
         ("before_run", "/tmp/ws/BAP-204"),
         ("checkout", "/tmp/ws/BAP-204"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_qa_workflow_checkout_review_branch_falls_back_to_canonical_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = _build_workflow()
+    issue = _build_issue()
+    issue.branch_name = "feature/bap-204-stale"
+    calls: list[tuple[str, ...]] = []
+
+    class FakeProcess:
+        def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self._stdout = stdout.encode()
+            self._stderr = stderr.encode()
+
+        async def communicate(self):
+            return self._stdout, self._stderr
+
+    async def fake_exec(*cmd, **kwargs):
+        del kwargs
+        calls.append(tuple(str(part) for part in cmd))
+        if cmd[:3] == ("git", "fetch", "origin") and cmd[3] == "feature/bap-204-stale":
+            return FakeProcess(1, stderr="fatal: couldn't find remote ref feature/bap-204-stale")
+        if cmd[:3] == ("git", "fetch", "origin") and cmd[3] == "agent/bap-204":
+            return FakeProcess(0)
+        if cmd[:3] == ("git", "checkout", "-B") and cmd[3] == "agent/bap-204":
+            return FakeProcess(0)
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    await workflow._checkout_review_branch("/tmp/ws/BAP-204", issue)
+
+    assert calls == [
+        ("git", "fetch", "origin", "feature/bap-204-stale"),
+        ("git", "fetch", "origin", "agent/bap-204"),
+        ("git", "checkout", "-B", "agent/bap-204", "origin/agent/bap-204"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_qa_workflow_checkout_review_branch_reports_all_attempted_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = _build_workflow()
+    issue = _build_issue()
+    issue.branch_name = "feature/bap-204-stale"
+
+    class FakeProcess:
+        def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self._stdout = stdout.encode()
+            self._stderr = stderr.encode()
+
+        async def communicate(self):
+            return self._stdout, self._stderr
+
+    async def fake_exec(*cmd, **kwargs):
+        del kwargs
+        branch_name = str(cmd[3])
+        return FakeProcess(1, stderr=f"fatal: couldn't find remote ref {branch_name}")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await workflow._checkout_review_branch("/tmp/ws/BAP-204", issue)
+
+    message = str(excinfo.value)
+    assert "feature/bap-204-stale" in message
+    assert "agent/bap-204" in message
 
 
 @pytest.mark.asyncio
